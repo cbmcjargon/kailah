@@ -1,0 +1,327 @@
+// api.ts — getClient(chain): a FailoverClient over the chain's ordered
+// ProviderApi list (types.ts / networks.ts). Providers are tried in order; the
+// last-good one is remembered and tried first next time. Only BTC mainnet has a
+// genuine second provider today — the others run single-provider through the
+// same client so the seam is uniform.
+
+import type {
+  AccountUtxo,
+  ChainConfig,
+  ChainId,
+  FailoverClient,
+  FeeOption,
+  ProviderApi,
+  RawTxInfo,
+  Utxo,
+} from './types'
+import { EsploraProvider } from './esplora'
+import { BlockcypherProvider } from './blockcypher'
+
+/**
+ * Build the ProviderApi list for a chain from its ordered `providers` spec.
+ * `kind` selects the implementation; primary is first.
+ */
+function buildProviders(chain: ChainConfig): ProviderApi[] {
+  return chain.providers.map((spec) =>
+    spec.kind === 'esplora'
+      ? new EsploraProvider(spec, chain)
+      : new BlockcypherProvider(spec, chain),
+  )
+}
+
+/**
+ * Last-good provider per chain, persisted so a fresh page load starts on the
+ * backend that actually answered last time. During the live mempool.space
+ * outage (2026-08-01), every reload re-burned a full timeout burst against the
+ * dead primary before failing over — this makes the failover stick.
+ * Public data only (a provider name); cleared with every other kailah.* key.
+ */
+const PROVIDER_PREF_KEY = 'kailah.provider.v1'
+
+function readProviderPref(persistKey: string): string | null {
+  try {
+    const raw = localStorage.getItem(PROVIDER_PREF_KEY)
+    if (!raw) return null
+    const map: unknown = JSON.parse(raw)
+    const v = map && typeof map === 'object' ? (map as Record<string, unknown>)[persistKey] : null
+    return typeof v === 'string' ? v : null
+  } catch {
+    return null
+  }
+}
+
+function writeProviderPref(persistKey: string, providerName: string): void {
+  try {
+    const raw = localStorage.getItem(PROVIDER_PREF_KEY)
+    const map = raw ? ((JSON.parse(raw) as Record<string, string>) ?? {}) : {}
+    map[persistKey] = providerName
+    localStorage.setItem(PROVIDER_PREF_KEY, JSON.stringify(map))
+  } catch {
+    // best-effort
+  }
+}
+
+export function clearProviderPref(): void {
+  try {
+    localStorage.removeItem(PROVIDER_PREF_KEY)
+  } catch {
+    // ignore
+  }
+}
+
+class FailoverClientImpl implements FailoverClient {
+  private readonly providers: ProviderApi[]
+  private readonly persistKey: string | undefined
+  /** index of the provider that served the last successful call */
+  private activeIndex = 0
+
+  constructor(providers: ProviderApi[], persistKey?: string) {
+    if (providers.length === 0) throw new Error('FailoverClient requires at least one provider')
+    this.providers = providers
+    this.persistKey = persistKey
+    if (persistKey !== undefined) {
+      const preferred = readProviderPref(persistKey)
+      if (preferred !== null) {
+        const i = providers.findIndex((p) => p.providerName === preferred)
+        if (i >= 0) this.activeIndex = i
+      }
+    }
+  }
+
+  activeProvider(): string {
+    return this.providers[this.activeIndex]?.providerName ?? 'none'
+  }
+
+  hasXpubApi(): boolean {
+    // Whether the CURRENT healthy provider supports account queries. None do
+    // today, so scanner.ts always takes the per-address path — but the seam is
+    // preserved so a future Blockbook backend just works.
+    return this.providers[this.activeIndex]?.xpub !== undefined
+  }
+
+  /**
+   * Per-provider cooldown after a network-level failure (timeout / no HTTP
+   * response). Without it, every concurrent scanner request re-tries a
+   * black-holed provider and each pays the full request timeout — the live
+   * mempool.space outage (2026-08-01) turned every Bitcoin refresh into
+   * minutes of stalls. Cooled-down providers are skipped while the cooldown
+   * lasts, but always remain as last resort so a single-provider chain
+   * (testnet4) still gets attempted.
+   */
+  private static readonly DOWN_COOLDOWN_MS = 60_000
+  private downUntil: number[] = []
+
+  /**
+   * One-time startup probe: race every provider's tip endpoint and start on
+   * the first that answers. Without this, a first load during a primary
+   * outage sends the whole initial scan burst into a dead host and the user
+   * stares at a skeleton while timeouts drain (live incident 2026-08-01).
+   * All-fail → keep the configured order; run()'s failover handles the rest.
+   */
+  private probePromise: Promise<void> | null = null
+
+  private ensureProbed(): Promise<void> {
+    this.probePromise ??= (async () => {
+      // A single-provider chain (DOGE) has no choice to make — skip the
+      // probe entirely; on BlockCypher's hourly budget every request counts.
+      if (this.providers.length < 2) return
+      try {
+        const winner = await Promise.any(
+          this.providers.map(async (p, i) => {
+            const tip = await Promise.race([
+              p.getTipHeight(),
+              new Promise<never>((_, reject) =>
+                setTimeout(() => reject(new Error('probe timeout')), 3_500),
+              ),
+            ])
+            if (typeof tip !== 'number' || tip <= 0) throw new Error('bad tip')
+            return i
+          }),
+        )
+        if (winner !== this.activeIndex && this.persistKey !== undefined) {
+          writeProviderPref(this.persistKey, this.providers[winner].providerName)
+        }
+        this.activeIndex = winner
+      } catch {
+        // every probe failed — leave order as configured
+      }
+    })()
+    return this.probePromise
+  }
+
+  /** Active provider first, then healthy rest, then cooled-down last. */
+  private order(): number[] {
+    const now = Date.now()
+    const all = this.providers.map((_, i) => i)
+    const ranked = [this.activeIndex, ...all.filter((i) => i !== this.activeIndex)]
+    const healthy = ranked.filter((i) => (this.downUntil[i] ?? 0) <= now)
+    const cooling = ranked.filter((i) => (this.downUntil[i] ?? 0) > now)
+    return [...healthy, ...cooling]
+  }
+
+  /** A failure with no HTTP response — the kind worth a cooldown. */
+  private static isNetworkLevel(err: unknown): boolean {
+    if (err instanceof TypeError) return true
+    const msg = err instanceof Error ? err.message : String(err)
+    return /timed? ?out|abort|load failed|failed to fetch|networkerror/i.test(msg)
+  }
+
+  /**
+   * Run an idempotent read across providers with failover. Advances to the next
+   * provider on ANY failure (network/CORS/5xx and, conservatively, 4xx too —
+   * reads are side-effect-free, so an over-eager retry never harms). Remembers
+   * the provider that succeeds as the new active one.
+   */
+  private async run<T>(label: string, op: (p: ProviderApi) => Promise<T>): Promise<T> {
+    await this.ensureProbed()
+    let lastErr: unknown
+    for (const i of this.order()) {
+      const provider = this.providers[i]
+      try {
+        const result = await op(provider)
+        if (this.activeIndex !== i && this.persistKey !== undefined) {
+          writeProviderPref(this.persistKey, provider.providerName)
+        }
+        this.activeIndex = i
+        this.downUntil[i] = 0
+        return result
+      } catch (err) {
+        lastErr = err
+        if (FailoverClientImpl.isNetworkLevel(err)) {
+          this.downUntil[i] = Date.now() + FailoverClientImpl.DOWN_COOLDOWN_MS
+        }
+        // advance to the next provider
+      }
+    }
+    // Network-level failures ("Load failed" / "Failed to fetch" / timeouts)
+    // are also what a CORS-less rate-limit response looks like from a browser —
+    // BlockCypher's 429s carry no CORS headers. Say something a human can act on.
+    const detail = lastErr instanceof Error ? lastErr.message : String(lastErr)
+    const networky = /load failed|failed to fetch|networkerror|timed? ?out|abort/i.test(detail)
+    throw new Error(
+      networky
+        ? `Couldn't reach the network data service — it may be busy or rate-limited. ` +
+          `Your coins are safe; try again in a few minutes.`
+        : `All providers failed for ${label}: ${detail}`,
+    )
+  }
+
+  getAddressStats(address: string) {
+    return this.run('getAddressStats', (p) => p.getAddressStats(address))
+  }
+
+  getAddressUtxos(address: string): Promise<Utxo[]> {
+    return this.run('getAddressUtxos', (p) => p.getAddressUtxos(address))
+  }
+
+  getAddressTxs(address: string): Promise<RawTxInfo[]> {
+    return this.run('getAddressTxs', (p) => p.getAddressTxs(address))
+  }
+
+  getRawTxHex(txid: string): Promise<string> {
+    return this.run('getRawTxHex', (p) => p.getRawTxHex(txid))
+  }
+
+  getTxOutspends(txid: string): Promise<{ spent: boolean; txid: string | null; confirmed: boolean }[]> {
+    return this.run('getTxOutspends', (p) => {
+      if (p.getTxOutspends === undefined) throw new Error(`${p.providerName}: outspends unsupported`)
+      return p.getTxOutspends(txid)
+    })
+  }
+
+  getTxFee(txid: string): Promise<bigint | null> {
+    return this.run('getTxFee', (p) => {
+      if (p.getTxFee === undefined) throw new Error(`${p.providerName}: tx fee lookup unsupported`)
+      return p.getTxFee(txid)
+    })
+  }
+
+  getTipHeight(): Promise<number> {
+    return this.run('getTipHeight', (p) => p.getTipHeight())
+  }
+
+  getFeeOptions(): Promise<FeeOption[]> {
+    return this.run('getFeeOptions', (p) => p.getFeeOptions())
+  }
+
+  /**
+   * Broadcast is NOT a blind read-style failover: double-sending a signed tx to
+   * two backends is harmless on-chain (same txid) but a rejection from the first
+   * node is authoritative and must be shown, not masked by a second attempt.
+   *
+   * Rule: try the active provider; if it returns ANY HTTP response — success or
+   * error — stop there. Only a CLEAR network failure (fetch rejects with a
+   * TypeError: DNS/connection/CORS, so nothing ever reached a node) is safe to
+   * retry on the next provider.
+   */
+  async broadcast(txHex: string): Promise<string> {
+    let lastNetworkErr: unknown
+    for (const i of this.order()) {
+      const provider = this.providers[i]
+      try {
+        const txid = await provider.broadcast(txHex)
+        this.activeIndex = i
+        return txid
+      } catch (err) {
+        if (err instanceof TypeError) {
+          // Network/CORS: the request never reached a node — safe to try next.
+          lastNetworkErr = err
+          continue
+        }
+        // An HTTP response came back (even a rejection). Surface it; do NOT
+        // fail over — the tx may already be in the first node's mempool.
+        throw err
+      }
+    }
+    const detail = lastNetworkErr instanceof Error ? lastNetworkErr.message : String(lastNetworkErr)
+    throw new Error(`Broadcast failed: could not reach any provider (${detail})`)
+  }
+
+  // -- Account (xpub) surface -------------------------------------------------
+  // No configured provider implements XpubApi today. scanner.ts checks
+  // hasXpubApi() (false) and never calls these; they throw clearly if it does.
+
+  scanXpub: FailoverClient['scanXpub'] = async (xpub: string) => {
+    const provider = this.providers.find((p) => p.xpub !== undefined)
+    if (!provider || !provider.xpub) {
+      throw new Error(
+        'Account (xpub) queries are not supported by any provider for this chain; ' +
+          'use per-address scanning.',
+      )
+    }
+    return provider.xpub.scanXpub(xpub)
+  }
+
+  getXpubUtxos: FailoverClient['getXpubUtxos'] = async (xpub: string): Promise<AccountUtxo[]> => {
+    const provider = this.providers.find((p) => p.xpub !== undefined)
+    if (!provider || !provider.xpub) {
+      throw new Error(
+        'Account (xpub) queries are not supported by any provider for this chain; ' +
+          'use per-address scanning.',
+      )
+    }
+    return provider.xpub.getXpubUtxos(xpub)
+  }
+}
+
+/**
+ * Construct a FailoverClient from an explicit provider list. Used by getClient
+ * and by tests that want to force a specific ordering (e.g. bad-first failover).
+ */
+export function createFailoverClient(
+  providers: ProviderApi[],
+  persistKey?: string,
+): FailoverClient {
+  return new FailoverClientImpl(providers, persistKey)
+}
+
+const clients = new Map<ChainId, FailoverClient>()
+
+/** Return the FailoverClient for a chain, constructing it once per chain id. */
+export function getClient(chain: ChainConfig): FailoverClient {
+  const existing = clients.get(chain.id)
+  if (existing) return existing
+  const client = createFailoverClient(buildProviders(chain), chain.id)
+  clients.set(chain.id, client)
+  return client
+}

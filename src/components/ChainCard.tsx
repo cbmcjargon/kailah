@@ -1,0 +1,177 @@
+import type { ChainConfig, PricePoint, TxSummary, WatchAccountKeys } from '../lib/types'
+import { formatCoin, formatUsd, shortAddress } from '../lib/format'
+import { STRIKE_INVITE_URL } from '../lib/onramp'
+import { IconArrowDown, IconArrowUp, IconCard, IconRefresh, Spinner } from './Icons'
+import CopyButton from './CopyButton'
+import Sparkline from './Sparkline'
+import HistoryList from './HistoryList'
+import { coinsToUsd, type ChainUiState } from './ui'
+
+interface ChainCardProps {
+  chain: ChainConfig
+  account: WatchAccountKeys
+  /** set for a hardware account ("Ledger"): tags the card and its labels */
+  deviceLabel?: string
+  state: ChainUiState
+  price: number | undefined
+  priceHistory: PricePoint[]
+  onRefresh: () => void
+  onReceive: () => void
+  onSend: () => void
+  onBuy: () => void
+  onSelectTx: (tx: TxSummary) => void
+}
+
+export default function ChainCard({
+  chain,
+  account,
+  deviceLabel,
+  state,
+  price,
+  priceHistory,
+  onRefresh,
+  onReceive,
+  onSend,
+  onBuy,
+  onSelectTx,
+}: ChainCardProps) {
+  const { account: acct, loading, error } = state
+  const balance = acct?.balance ?? null
+  const isEmpty = balance !== null && balance.confirmed === 0n && balance.unconfirmed === 0n
+  const showUsd = chain.priceSymbol !== undefined && price !== undefined && balance !== null
+  const showSparkline = chain.priceSymbol !== undefined && priceHistory.length >= 2
+
+  // Current (fresh) receive address, with a stable fallback before the first scan.
+  const receiveAddr = acct?.nextReceive.address ?? account.address(0, 0).address
+
+  const pending = balance?.unconfirmed ?? 0n
+  const pendingLabel =
+    pending === 0n
+      ? null
+      : pending > 0n
+        ? `+${formatCoin(pending, chain.decimals)} ${chain.ticker} pending`
+        : `−${formatCoin(-pending, chain.decimals)} ${chain.ticker} pending`
+
+  return (
+    <section
+      className="card chain-card"
+      style={{ borderLeft: `3px solid ${chain.color}` }}
+      aria-label={`${chain.name}${deviceLabel ? ` ${deviceLabel}` : ''} account`}
+    >
+      <div className="chain-card-head">
+        <div className="chain-id">
+          <span
+            className="chain-chip"
+            style={{ backgroundColor: `${chain.color}24`, color: chain.color }}
+          >
+            {chain.ticker}
+          </span>
+          <span className="chain-name">
+            {chain.name}
+            {deviceLabel !== undefined && <span className="device-chip">{deviceLabel}</span>}
+          </span>
+        </div>
+        <div className="chain-head-right">
+          {showSparkline && <Sparkline history={priceHistory} />}
+          <button
+            type="button"
+            className="icon-btn icon-btn-small"
+            onClick={onRefresh}
+            aria-label={`Refresh ${chain.name} balance`}
+            disabled={loading}
+          >
+            {loading ? <Spinner size={16} /> : <IconRefresh size={16} />}
+          </button>
+        </div>
+      </div>
+
+      <div className="chain-balance">
+        {balance === null && loading ? (
+          <>
+            <div className="skeleton skeleton-balance" />
+            <div className="skeleton skeleton-caption" />
+          </>
+        ) : balance === null ? (
+          <div className="balance-main text-secondary">—</div>
+        ) : (
+          <>
+            <div className="balance-main">
+              {formatCoin(balance.confirmed, chain.decimals)}{' '}
+              <span className="balance-ticker">{chain.ticker}</span>
+            </div>
+            {pendingLabel && <div className="balance-pending">{pendingLabel}</div>}
+            {showUsd && balance !== null && (
+              <div className="balance-usd">
+                {formatUsd(coinsToUsd(balance.confirmed, chain.decimals, price))}
+              </div>
+            )}
+            {isEmpty && deviceLabel !== undefined && (
+              <p className="zero-state">
+                Nothing here yet. Tap Receive, check the address on your {deviceLabel}, then send
+                coins to it — only the device can spend them.
+              </p>
+            )}
+            {isEmpty && deviceLabel === undefined && chain.id !== 'btc' && (
+              <p className="zero-state">Nothing here yet — tap Receive to get your address.</p>
+            )}
+            {isEmpty && deviceLabel === undefined && chain.id === 'btc' && (
+              // Bitcoin onboarding: a first-time holder's most likely next step
+              // is buying, so point at the simplest on-ramp (disclosed invite).
+              <p className="zero-state">
+                Nothing here yet. New to bitcoin?{' '}
+                <a href={STRIKE_INVITE_URL} target="_blank" rel="noopener noreferrer">
+                  Strike
+                </a>
+                <span className="buy-option-tag">Invite link</span> is the simplest place to buy
+                your first — or tap Receive if you already have some.
+              </p>
+            )}
+          </>
+        )}
+      </div>
+
+      {error !== null && !loading && (
+        <div className="chain-error" role="alert">
+          <span>
+            {error}
+            {!chain.mainnet &&
+              ' Test-network services are often overloaded; your address and Get coins still work, and real networks have more providers.'}
+          </span>
+          <button type="button" className="btn btn-ghost btn-small" onClick={onRefresh}>
+            Retry
+          </button>
+        </div>
+      )}
+
+      <div className="chain-address">
+        <span className="chain-address-label text-tertiary">Receive</span>
+        <span className="mono text-secondary" title={receiveAddr}>
+          {shortAddress(receiveAddr)}
+        </span>
+        <CopyButton text={receiveAddr} label={`Copy ${chain.name} address`} />
+      </div>
+
+      <div className="btn-row">
+        <button type="button" className="btn btn-secondary" onClick={onBuy}>
+          <IconCard size={17} />
+          {chain.mainnet ? 'Buy' : 'Get coins'}
+        </button>
+        <button type="button" className="btn btn-secondary" onClick={onReceive}>
+          <IconArrowDown size={17} />
+          Receive
+        </button>
+        <button type="button" className="btn btn-primary" onClick={onSend}>
+          <IconArrowUp size={17} />
+          Send
+        </button>
+      </div>
+
+      {acct !== null && (
+        <div className="chain-activity">
+          <span className="chain-activity-label">Activity</span>
+          <HistoryList chain={chain} txs={acct.txs} price={price} onSelect={onSelectTx} />
+        </div>
+      )}
+    </section>
+  )
+}

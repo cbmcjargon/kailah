@@ -1,0 +1,35 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      # .npmrc disables install scripts; esbuild's binary comes from its
+      # optional platform package, so the toolchain still works.
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run build
+      # The extension build checks its own package (CSP hosts identical to
+      # public/_headers, pinned permissions, no PWA worker, no caching).
+      - run: npm run build:extension
+      # Build digests (SHA-256 over every output file). The builds are
+      # deterministic, so rebuilding this commit anywhere with Node 20 and
+      # `npm ci` must print the same lines: `npm run digest`.
+      - name: Build digests
+        run: |
+          npm run -s digest | tee digests.txt
+          { echo '### Build digests'; echo '```'; cat digests.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      # Offline suites only: derivation vectors, tx build/sign, QR parsing,
+      # vault + password policy, scan-frontier + snapshot validation. The live
+      # suites (check:live) talk to real networks and are run by hand.
+      - run: npm run check:offline
+      - run: npm audit --omit=dev --audit-level=high

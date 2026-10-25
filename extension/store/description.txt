@@ -1,0 +1,36 @@
+Kailah Wallet is a self-custody crypto wallet that runs entirely in your browser. One 12-word recovery phrase controls Bitcoin, Dogecoin, Litecoin, USDC and ETH on Base, Ethereum and Arbitrum, BNB, Solana (SOL and USDC) and TRON (TRX and USDT). Your keys are created and encrypted on your device and never leave it.
+
+IT CHECKS EVERY TRANSACTION BEFORE SIGNING
+• TRON: the network node builds the transaction, and the wallet decodes it field by field. Anything it didn't ask for blocks signing.
+• Solana swaps (through Jupiter): the instructions must pass an allow-list, and an on-chain simulation must match the quote.
+• Base, Ethereum, Arbitrum and BNB Chain: no token approvals, ever. Every signature names its network.
+• A double-pay guard blocks a new send while an earlier one can't be confirmed.
+• Ledger (Bitcoin and Litecoin): only signatures come back from the device, each checked against the wallet's own copy of the transaction. New; tested against an emulator so far, so start with small amounts.
+
+PRACTICE MODE
+One switch moves every network to its test network: Bitcoin testnet4, Base Sepolia, Solana devnet and TRON Nile. Faucet links are built in. Send and receive worthless coins until you're comfortable.
+
+PRIVATE BY DESIGN
+• No accounts, analytics, cookies, ads or trackers. No server of ours sees your wallet.
+• The wallet can contact only a fixed list of public blockchain and price services, and the browser enforces that list.
+• Your recovery phrase is encrypted with AES-256-GCM under a key derived with Argon2id. Cached data is encrypted too, and the wallet locks itself after 15 minutes idle.
+
+ALSO
+• SOL and TRX staking; SOL ↔ USDC swaps
+• QR code scanning, payment alerts (with no amounts) and CSV export
+• Face ID or fingerprint unlock with a passkey
+• Show only the networks you use; hidden ones are never queried
+
+OPEN SOURCE AND VERIFIABLE
+MIT-licensed source: https://github.com/cbmcjargon/kailah
+Builds are reproducible: rebuild a release and compare it file by file with this extension.
+
+PLEASE NOTE
+Kailah Wallet is maintained by one person. It has had AI-assisted security reviews, not a third-party audit, so keep amounts small. Nobody can recover a lost recovery phrase or reverse a send: write your 12 words on paper and keep them safe.
+
+PERMISSIONS
+• Display notifications: for payment alerts.
+• Unlimited storage: so the browser never evicts your encrypted wallet.
+The extension cannot read or change the websites you visit.
+
+Privacy policy: https://github.com/cbmcjargon/kailah/blob/main/PRIVACY.md

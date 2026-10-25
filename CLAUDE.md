@@ -1,0 +1,101 @@
+# Kailah Wallet — maintenance notes
+
+Self-custody browser wallet, v2.3.0: four engines — UTXO (BTC/DOGE/LTC),
+EVM (USDC+ETH on Base/Ethereum/Arbitrum + BNB on BSC, no explorer API there),
+Solana (SOL + SPL USDC + Jupiter swaps + native staking via hand-built
+stake-program instructions in solstake.ts), TRON (TRX + USDT-TRC20 + Stake 2.0 via tron.ts/tronstake.ts — the node builds raw txs and the wallet DECODES the protobuf bytes
+and refuses to sign on any mismatch; TronGrid keyless, Nile practice twin).
+Ledger hardware accounts for BTC/LTC (docs/hardware-signing.md): xpub-only
+accounts beside the seed ones, signed on the device — Bitcoin app via PSBT
+(src/lib/ledger/btcapp.ts), Litecoin via the legacy protocol (legacyapp.ts);
+no Ledger npm packages. Live: https://kailah-wallet.netlify.app
+Read README.md first; contracts live in src/lib/types.ts (header comments are
+the module API docs). The project is COMPLETE — sessions here are maintenance,
+not feature building, unless the user asks for something new.
+
+## Commands
+- `npm run dev` (port 5173; use the wallet-dev launch config, never Bash)
+- `node scripts/serve-dist.mjs` (port 4173; the dist-preview launch config) serves
+  the production build WITH public/_headers — the only way to exercise the CSP
+  (Trusted Types, connect-src) locally; the Vite dev server sends no headers.
+- `npm run typecheck` — strict, must stay at zero errors
+- `npm run build` → dist/
+- `npm run build:extension` → dist-extension/ (MV3 Chrome extension of the same
+  source; docs/extension.md). Its CSP is read from public/_headers at build
+  time and the build checks its own output, so a provider host change needs
+  no extension edit. Extension-only code paths sit behind IS_EXTENSION
+  (src/platform.ts), a build constant: the web dist/ must stay byte-identical
+  whether or not that code exists.
+- Deploy: Netlify (`npx netlify-cli deploy --prod --dir=dist --site …`) and the
+  nginx mirror (`deploy/vps-redeploy.sh`, which also regenerates the mirror's
+  security headers from public/_headers, so redeploy it whenever the CSP hosts
+  change). Site ID, host and access live in ops/infrastructure.md, which is
+  private (see "Public repository" below): @ops/infrastructure.md
+- Tests: `npm run check:offline` (keys, txbuild, txv2, qrparse, vault, scanner, hw, pending, netprefs —
+  no network; this is what CI runs on every push) and `npm run check:live`
+  (account, evm, sol, solswap, solstake, tron — real networks; a provider being
+  down or rate-limited prints SKIP, never FAIL). check-providers.mjs is run by
+  hand only when provider code changes (it burns BlockCypher's ~100/hr DOGE
+  budget); check-sol/check-solswap do REAL devnet broadcasts, which is fine —
+  devnet coins are worthless.
+- `npm run verify:live [origin …]` — after `npm run build`, fetches every dist/
+  file from both origins (or the ones given) and byte-compares it with the
+  local build, plus all seven public/_headers headers on every response. Its
+  one normalization is Netlify's fixed hosting comment in HTML.
+  `npm run digest` prints the build digests CI prints for every push.
+- Git: `main`; CI = .github/workflows/ci.yml. Commit every change.
+
+## Public repository
+- ops/ is private: infrastructure, accounts, release steps. Never copy host
+  names, account state, keys or local paths into tracked files outside ops/.
+  The public copy is cut by `ops/make-public-snapshot.sh`, which exports the
+  committed tree without ops/ and fails on any leak it knows to look for
+  (ops/public-release.md).
+
+## Hard rules
+- The service worker (public/sw.js) must NEVER cache application code — only
+  the static offline screen. A cached wallet is a security hole.
+- First load is code-split: Shell.tsx (welcome/lock) is the main chunk, App.tsx
+  (unlocked wallet + UTXO stack) loads on unlock, and src/engines/ loads EVM,
+  Solana and TRON when the dashboard renders, with modals lazy. A static value
+  import of lib/evm|sol|tron (or their components) from Shell, App or Dashboard
+  pulls that engine into an earlier chunk (type imports are fine); check the
+  chunk sizes `npm run build` prints.
+- Hardware path: only signatures come back from a device; hwsign.assembleSigned
+  verifies each against our own BIP143 digest and the reviewed outputs/fee
+  before anything is broadcast. Never accept a device-serialized transaction.
+  Any Ledger protocol fix lands with an emulator case in scripts/check-hw.mjs.
+- CSP `connect-src` (public/_headers AND .netlify/netlify.toml — keep in sync)
+  must list exactly the hosts called by networks.ts providers + prices.ts +
+  evm.ts (Base RPCs + blockscout).
+- The EVM engine (evm.ts, USDC on Base) is intentionally separate from the
+  UTXO stack: account model, viem signing with pinned chainId, no address
+  rotation. Never blind-retry a failed EVM broadcast — re-prepare (fresh
+  pending nonce) so an actually-landed first attempt can't be double-sent.
+- All amounts are bigint smallest-units everywhere. No floats in money math.
+- Secrets (mnemonic, private keys) exist only in memory; never log/store them.
+  Private keys are zeroed on lock/erase; erase must clear every kailah.* key.
+- DOGE scans are sequential and cache-seeded on purpose (BlockCypher budget).
+  Background polls MUST stay quick-mode (scanAccount quickCheckAgainst) at the
+  600s cadence; tip heights come from the kailah.tipcache.v1 fallback. Full
+  gap scans on every poll previously burned the ~100/hr budget and produced
+  CORS-less 429s that browsers report as "Load failed".
+- Networks shown (src/lib/netprefs.ts, kailah.sec.netprefs): hidden networks
+  are never scanned or polled — every scan/poll/refresh loop in App.tsx goes
+  through shownIn() (check-netprefs E1 enforces it) — and an engine chunk
+  whose every network is hidden in the current mode is never fetched
+  (useEngine's `wanted` = engineShown; no chunk, no key derived). netprefs
+  names chain ids itself so the chooser never value-imports an engine;
+  check-netprefs G keeps those ids/labels equal to the engine configs.
+  Ledger accounts always show. An undecided wallet must never hide a network
+  whose scan found funds or history, or couldn't tell.
+- Sends always build from a fresh scan (no stale-utxo fallback) and change goes
+  to the next unused change address.
+- Test wallet for dev flows: the public BIP39 vector phrase (abandon ×11 +
+  about), password irrelevant — NEVER for real funds; erase after testing. Its
+  testnet4/mainnet accounts have real history useful for exercising the UI.
+
+## Verification habits
+After changes: typecheck + relevant check scripts + drive the affected flow in
+the browser (restore test wallet → exercise → erase). After every deploy, run
+`npm run verify:live` on the deployed commit: both origins must MATCH.

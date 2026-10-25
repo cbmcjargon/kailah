@@ -1,0 +1,11 @@
+node_modules/
+dist/
+dist-extension/
+.DS_Store
+# Netlify CLI state is local; netlify.toml is config and MUST be committed
+# (its CSP is kept in sync with public/_headers — see CLAUDE.md).
+.netlify/*
+!.netlify/netlify.toml
+# per-machine Claude Code permissions; launch.json is shared dev config
+.claude/settings.local.json
+kailah-wallet-extension.zip
