@@ -4,7 +4,7 @@ Effective 2026-10-25. Applies to Kailah Wallet: the web app at
 https://kailah-wallet.netlify.app and https://wallet.photoprompting.org, and
 the Kailah Wallet Chrome extension.
 
-**In short:** the developer collects nothing. There are no accounts, analytics,
+**In short:** the developer collects no data. There are no accounts, analytics,
 cookies, ads or trackers, and no server of ours sees your wallet. Your recovery
 phrase, keys and password never leave your device. To show balances and send
 coins, the wallet talks directly from your browser to public blockchain
@@ -51,7 +51,9 @@ Content Security Policy), so nothing else can be reached.
 - **Prices:** api.coinbase.com, api.exchange.coinbase.com, api.coingecko.com.
   These receive price requests only, with no addresses.
 - **Swaps:** api.jup.ag (Jupiter) receives the amounts and your Solana
-  address, to build the swap you asked for.
+  address, to build the swap you asked for. Each swap includes a 0.5% fee,
+  paid in USDC to the developer's fee account and shown before you confirm.
+  That transfer is part of the public transaction, like the swap itself.
 - **Sites you choose to open.** Buy and exchange pages, block explorers and
   test-coin faucets are third-party sites with their own privacy policies.
   - The Banxa buy link includes your receive address, so it is filled in for

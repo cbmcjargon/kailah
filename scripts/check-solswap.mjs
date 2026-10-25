@@ -10,8 +10,9 @@
 // executed from a real USDC holder's account (sigVerify off — nothing is
 // signed or spent); the real prepareSwap() pipeline against mainnet on Jupiter
 // Swap V2 /build, including the wallet's own assembly and simulation gate;
-// and adversarial tamper tests proving the gate refuses a promise the route
-// doesn't make and a live route whose slippage was raised.
+// the 0.5% Kailah fee paid to the fee account; and adversarial tamper tests
+// proving the gate refuses a promise the route doesn't make, a live route
+// whose slippage was raised, and one whose fee was redirected.
 // NOTHING here broadcasts to mainnet; no mainnet key material is used.
 
 import { NET_ISSUE, isNetworkIssue, installLiveGuard } from './_live.mjs'
@@ -30,7 +31,7 @@ import {
   solRpc,
   solUsdcAta,
 } from '../src/lib/sol.ts'
-import { getSwapQuote, prepareSwap } from '../src/lib/solswap.ts'
+import { getSwapQuote, prepareSwap, SWAP_FEE_ACCOUNT } from '../src/lib/solswap.ts'
 
 const VECTOR_MNEMONIC =
   'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about'
@@ -265,6 +266,12 @@ if (quote !== null) {
         sol: String(prepared.simulatedSolDelta),
       }),
     )
+    const gross = prepared.simulatedUsdcDelta + prepared.swapFee
+    check(
+      'the simulated Kailah fee is 0.5% of the gross USDC output, paid to the fee account',
+      prepared.swapFee > 0n && (prepared.swapFee * 10_000n) / gross >= 49n && (prepared.swapFee * 10_000n) / gross <= 50n,
+      `${prepared.swapFee} of ${gross} USDC units`,
+    )
   } catch (e) {
     check('prepareSwap honest pipeline', false, e.message)
   }
@@ -325,6 +332,15 @@ if (quote !== null) {
     check('a live route with its slippage raised is refused', false, 'prepareSwap accepted it')
   } catch (e) {
     check('a live route with its slippage raised is refused', /does not match its quote/i.test(e.message), e.message)
+  }
+  try {
+    const build = structuredClone(quote.build)
+    const slot = build.swapInstruction.accounts.findIndex((a) => a.pubkey === SWAP_FEE_ACCOUNT)
+    build.swapInstruction.accounts[slot] = { pubkey: solUsdcAta(MAINNET, BINANCE_HOT), isSigner: false, isWritable: true }
+    await prepareSwap(MAINNET, BINANCE_HOT, { ...quote, builtAt: Date.now(), build })
+    check('a live route with the fee redirected to another account is refused', false, 'prepareSwap accepted it')
+  } catch (e) {
+    check('a live route with the fee redirected to another account is refused', /does not match its quote/i.test(e.message), e.message)
   }
 } else {
   skip('prepareSwap pipeline + tamper tests', 'no build available')

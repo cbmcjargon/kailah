@@ -260,7 +260,7 @@ prompt, a click on an OS notification, and the store's own install flow.
 - **Remote code.** "No, I am not using remote code." All JavaScript is in the
   package. Network requests fetch only JSON data from the blockchain and price
   APIs listed in the CSP.
-- **Data usage and privacy disclosure.** Nothing is sent to the developer.
+- **Data usage and privacy disclosure.** No data is sent to the developer (the 0.5% swap fee is an on-chain USDC payment, disclosed in the listing).
   There are no accounts, analytics, or servers. The recovery phrase, keys and
   password never leave the device. They are stored only as AES-256-GCM
   ciphertext under an Argon2id-derived key. To show balances and send coins, the

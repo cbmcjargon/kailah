@@ -661,6 +661,32 @@ instead of a finished transaction.
     another program (`9G4pPipv…`), so it can't pay fees. Any transaction from
     it fails in simulation, and the wallet refuses to sign it.
 
+### Swap fee (2026-10-25)
+
+Swaps carry a 0.5% fee for the developer, shown on the form and as its own
+line on the review screen. It is paid in USDC into one published token
+account: `SWAP_FEE_ACCOUNT`, owned by `SWAP_FEE_WALLET`, both constants in
+`solswap.ts`, checked on-chain before release. Jupiter takes the fee inside
+the swap: from the USDC output when selling SOL, from the USDC input when
+buying. Its quoted output is already net of the fee, and Jupiter charges
+none of its own on `/build`.
+
+The gate makes the fee impossible to raise or redirect:
+
+- **The decoded instruction** must carry `platform_fee_bps` = 50 and
+  Kailah's account in its fee slot: slot 10 for `route_v2`, measured live;
+  the IDL's `platform_fee_account` slot for the older forms. A build without
+  the fee, with a higher fee, or with another fee account is refused. These
+  checks run on Jupiter's instruction before anything is simulated, and
+  again on the compiled bytes.
+- **The final simulation** reads the fee account's balance, which must rise
+  by exactly 0.5% (±1 unit) of the gross USDC output, or of the USDC input.
+  Less, more, or nothing is refused, so the user can't be overcharged.
+- **Tests:** `check-swapgate` (82 checks) adds the fee cases and requires
+  every tampered field to be refused before any simulation. `check-solswap`
+  measured the fee on live mainnet routes at exactly 0.5%, and a live route
+  with its fee redirected is refused.
+
 ### Residual risks, as of 2026-10-22
 
 1. **Web delivery trust.** Whoever controls Netlify, DNS or the VPS can still

@@ -21,12 +21,14 @@
 //   4. exactly one Jupiter instruction, one of the four exact-in swap
 //      variants (layouts from the program's on-chain IDL), whose decoded
 //      fields must say what we asked: our input amount, the quoted output,
-//      our slippage, no platform fee, no positive-slippage share, and our
+//      our slippage, Kailah's 0.5% fee into Kailah's fee account (exactly;
+//      never more, never elsewhere), no positive-slippage share, and our
 //      address as the transfer authority; the guaranteed minimum shown and
 //      enforced below is computed from those decoded fields;
-//   5. simulates the final bytes (sigVerify off), reads OUR account's
-//      simulated post-balances, and refuses unless the SOL/USDC deltas honor
-//      that minimum within fee + rent bounds.
+//   5. simulates the final bytes (sigVerify off), reads OUR account's and the
+//      fee account's simulated post-balances, and refuses unless the fee
+//      account gains exactly 0.5% and the SOL/USDC deltas honor that minimum
+//      within fee + rent bounds.
 // Signing is byte-exact (verified: the message bytes are untouched by
 // signTx), so the transaction that was simulated is the one broadcast.
 // A failed broadcast is re-quoted from scratch — never blind-retried.
@@ -52,6 +54,16 @@ export const SOL_WRAPPED_MINT = 'So11111111111111111111111111111111111111112'
 const JUP_BASE = 'https://api.jup.ag/swap/v2'
 /** 0.5% — shown on the review screen, enforced on-chain by the route. */
 export const SWAP_SLIPPAGE_BPS = 50
+/**
+ * Kailah's swap fee: 0.5%, paid in USDC to the developer and shown on the form
+ * and the review screen. Jupiter takes it inside the swap (from the USDC
+ * output when selling SOL, from the USDC input when buying SOL) and charges
+ * no fee of its own on /build.
+ */
+export const SWAP_FEE_BPS = 50
+/** The developer's fee wallet and its USDC token account (checked on-chain 2026-10-25). */
+export const SWAP_FEE_WALLET = 'BpmzmuZieAHqCm8s183T9c397K46YqsEQKbyyNo4Wo8b'
+export const SWAP_FEE_ACCOUNT = 'F5VXwGCmbct91xohG4CTqiXg25d23zYNQav1pB5eH2oF'
 /** A build older than this is rebuilt before preparing (its blockhash lives ~60 s). */
 const BUILD_MAX_AGE_MS = 30_000
 
@@ -91,10 +103,13 @@ export interface SwapQuote {
   direction: SwapDirection
   /** smallest units of the input asset (lamports / USDC units) */
   inAmount: bigint
+  /** what the user receives, already net of Kailah's fee */
   outAmount: bigint
   /** worst case after slippage — what the route enforces on-chain */
   minOutAmount: bigint
   priceImpactPct: number
+  /** Kailah's fee in USDC units, estimated from the quote (the review shows the simulated one) */
+  estimatedFee: bigint
   /** the address the instructions were built for */
   taker: string
   /** Date.now() when built; prepareSwap rebuilds a stale one */
@@ -128,6 +143,19 @@ async function jupFetch(url: string, init?: RequestInit): Promise<unknown> {
 }
 
 /**
+ * Kailah's fee in USDC units. Selling SOL, it is 0.5% of the gross USDC output,
+ * of which the user keeps `usdcToUser`. Buying SOL, it is 0.5% of the USDC
+ * input. Jupiter rounds down (measured by simulation, 2026-10-25).
+ */
+function expectedSwapFee(direction: SwapDirection, usdcIn: bigint, usdcToUser: bigint): bigint {
+  const bps = BigInt(SWAP_FEE_BPS)
+  if (direction === 'usdc-to-sol') return (usdcIn * bps) / 10_000n
+  // gross = user + fee and fee = floor(gross × bps / 10000)
+  const gross = (usdcToUser * 10_000n + (10_000n - bps) - 1n) / (10_000n - bps)
+  return (gross * bps) / 10_000n
+}
+
+/**
  * Quote AND instructions for `taker` in one /build call. The figures here are
  * for the form; prepareSwap re-derives everything it relies on from the
  * transaction it assembles.
@@ -144,7 +172,8 @@ export async function getSwapQuote(
   const outputMint = direction === 'sol-to-usdc' ? chain.usdc.mint : SOL_WRAPPED_MINT
   const b = (await jupFetch(
     `${JUP_BASE}/build?inputMint=${inputMint}&outputMint=${outputMint}` +
-      `&amount=${amount}&taker=${taker}&slippageBps=${SWAP_SLIPPAGE_BPS}`,
+      `&amount=${amount}&taker=${taker}&slippageBps=${SWAP_SLIPPAGE_BPS}` +
+      `&platformFeeBps=${SWAP_FEE_BPS}&feeAccount=${SWAP_FEE_ACCOUNT}`,
   )) as JupBuildResponse
   if (!b.inAmount || !b.outAmount || !b.otherAmountThreshold || !b.swapInstruction) {
     throw new Error('The swap service returned an incomplete quote — try again.')
@@ -152,13 +181,15 @@ export async function getSwapQuote(
   if (b.inputMint !== inputMint || b.outputMint !== outputMint || b.inAmount !== amount.toString()) {
     throw new Error(MISMATCH)
   }
+  const outAmount = BigInt(b.outAmount)
   return {
     direction,
     inAmount: BigInt(b.inAmount),
-    outAmount: BigInt(b.outAmount),
+    outAmount,
     minOutAmount: BigInt(b.otherAmountThreshold),
     // Jupiter reports a fraction ("0.001" = 0.1%); the form shows percent.
     priceImpactPct: Number(b.priceImpactPct ?? '0') * 100,
+    estimatedFee: expectedSwapFee(direction, amount, outAmount),
     taker,
     builtAt: Date.now(),
     build: b,
@@ -180,6 +211,8 @@ export interface PreparedSwap {
   /** simulated net changes to OUR account — the proof behind the review screen */
   simulatedSolDelta: bigint
   simulatedUsdcDelta: bigint
+  /** Kailah's fee in USDC units, as the simulation paid it into the fee account */
+  swapFee: bigint
   /** the exact bytes that were simulated; signing does not alter them */
   txBase64: string
 }
@@ -200,6 +233,8 @@ interface JupiterSwapArgs {
   positiveSlippageBps: number
   /** the account in the instruction's user_transfer_authority slot */
   authority: string
+  /** the account in the platform-fee slot (a route account when there is no fee) */
+  feeAccount: string | undefined
 }
 
 function isAddress(a: unknown): a is string {
@@ -417,12 +452,15 @@ function u16le(d: Uint8Array, off: number): number {
  * u8; the v2 forms start with in_amount u64, quoted_out_amount u64,
  * slippage_bps u16, platform_fee_bps u16, positive_slippage_bps u16. Every
  * other Jupiter instruction (exact-out, token-ledger, claim…) is refused.
+ * The fee account sits in the v1 forms' named platform_fee_account slot; the
+ * v2 forms have none and take it as the first account after their named ones
+ * (route_v2's slot 10 measured live with a fee, 2026-10-25).
  */
-const JUPITER_SWAPS: Record<string, { authority: number; v2: boolean; shared: boolean }> = {
-  e517cb977ae3ad2a: { authority: 1, v2: false, shared: false }, // route
-  c1209b3341d69c81: { authority: 2, v2: false, shared: true }, // shared_accounts_route
-  bb64facc31c4af14: { authority: 0, v2: true, shared: false }, // route_v2
-  d19853937cfed8e9: { authority: 1, v2: true, shared: true }, // shared_accounts_route_v2
+const JUPITER_SWAPS: Record<string, { authority: number; fee: number; v2: boolean; shared: boolean }> = {
+  e517cb977ae3ad2a: { authority: 1, fee: 6, v2: false, shared: false }, // route
+  c1209b3341d69c81: { authority: 2, fee: 9, v2: false, shared: true }, // shared_accounts_route
+  bb64facc31c4af14: { authority: 0, fee: 10, v2: true, shared: false }, // route_v2
+  d19853937cfed8e9: { authority: 1, fee: 12, v2: true, shared: true }, // shared_accounts_route_v2
 }
 
 function decodeJupiterSwap(d: Uint8Array, keys: string[]): JupiterSwapArgs {
@@ -431,7 +469,7 @@ function decodeJupiterSwap(d: Uint8Array, keys: string[]): JupiterSwapArgs {
   const variant = JUPITER_SWAPS[disc]
   if (variant === undefined) throw new Error(MISMATCH)
   const head = 8 + (variant.shared ? 1 : 0) // the shared forms carry an id: u8 first
-  let args: Omit<JupiterSwapArgs, 'authority'>
+  let args: Omit<JupiterSwapArgs, 'authority' | 'feeAccount'>
   if (variant.v2) {
     if (d.length < head + 22 + 4) throw new Error(MISMATCH)
     args = {
@@ -454,7 +492,7 @@ function decodeJupiterSwap(d: Uint8Array, keys: string[]): JupiterSwapArgs {
   }
   const authority = keys[variant.authority]
   if (authority === undefined) throw new Error(MISMATCH)
-  return { ...args, authority }
+  return { ...args, authority, feeAccount: keys[variant.fee] }
 }
 
 /** Lookup-table contents from the chain: a 56-byte header, then 32-byte addresses. */
@@ -573,6 +611,22 @@ async function verifySwapInstructions(
   return { priorityFeeLamports, jupiter }
 }
 
+/** The decoded Jupiter swap must say exactly what we asked for. */
+function assertSwapArgs(jupiter: JupiterSwapArgs, owner: string, q: SwapQuote): void {
+  if (
+    jupiter.authority !== owner ||
+    jupiter.inAmount !== q.inAmount ||
+    jupiter.quotedOutAmount !== q.outAmount ||
+    jupiter.slippageBps !== SWAP_SLIPPAGE_BPS ||
+    // exactly Kailah's fee, into Kailah's fee account: never more, never elsewhere
+    jupiter.platformFeeBps !== SWAP_FEE_BPS ||
+    jupiter.feeAccount !== SWAP_FEE_ACCOUNT ||
+    jupiter.positiveSlippageBps !== 0
+  ) {
+    throw new Error(MISMATCH)
+  }
+}
+
 /** Simulate (sigVerify off); a failing simulation stops the swap before signing. */
 async function simulateSwap(
   chain: SolChainConfig,
@@ -626,14 +680,19 @@ export async function prepareSwap(
   ) {
     throw new Error(MISMATCH)
   }
+  const swapIx = toTxIx(b.swapInstruction)
   const body = [
     ...(b.setupInstructions ?? []).map(toTxIx),
-    toTxIx(b.swapInstruction),
+    swapIx,
     ...(b.cleanupInstruction ? [toTxIx(b.cleanupInstruction)] : []),
   ]
   for (const ix of [...priceIxs, ...body]) {
     if (ix.keys.some((k) => k.sign && k.address !== owner)) throw new Error(MISMATCH)
   }
+  // Refuse a route that doesn't say what we asked before anything is simulated
+  // (step 5 checks the same fields again on the compiled bytes).
+  if (swapIx.program !== JUPITER_V6_PROGRAM) throw new Error(MISMATCH)
+  assertSwapArgs(decodeJupiterSwap(swapIx.data, swapIx.keys.map((k) => k.address)), owner, q)
 
   // 2. Lookup tables come from the chain; Jupiter's list must agree with it.
   const listed = b.addressesByLookupTableAddress ?? {}
@@ -687,16 +746,7 @@ export async function prepareSwap(
   //    the Jupiter instruction must say exactly what we asked for.
   const { priorityFeeLamports, jupiter } = await verifySwapInstructions(chain, owner, decoded)
   const feeLamports = 5000n + priorityFeeLamports
-  if (
-    jupiter.authority !== owner ||
-    jupiter.inAmount !== q.inAmount ||
-    jupiter.quotedOutAmount !== q.outAmount ||
-    jupiter.slippageBps !== SWAP_SLIPPAGE_BPS ||
-    jupiter.platformFeeBps !== 0 ||
-    jupiter.positiveSlippageBps !== 0
-  ) {
-    throw new Error(MISMATCH)
-  }
+  assertSwapArgs(jupiter, owner, q)
   // The floor the program enforces, from the decoded route itself. Jupiter's
   // own figure may round it up by one unit; anything else is a mismatch.
   const minOutAmount = (jupiter.quotedOutAmount * BigInt(10_000 - jupiter.slippageBps)) / 10_000n
@@ -705,28 +755,47 @@ export async function prepareSwap(
 
   // 6. Current balances, then simulate the final bytes and diff our own accounts.
   const ata = solUsdcAta(chain, owner)
-  const [solBefore, usdcBefore, ataRentRes] = await Promise.all([
-    getSolBalance(chain, owner),
-    // getAccountInfo, not getTokenAccountBalance (public RPCs gate "indexed"
-    // methods). value:null means the ATA truly doesn't exist; a fetch failure
-    // throws and fails the whole prepare — it must NOT read as "missing", or
-    // an existing balance would inflate the perceived swap output below.
+  // getAccountInfo, not getTokenAccountBalance (public RPCs gate "indexed"
+  // methods). value:null means the account truly doesn't exist; a fetch
+  // failure throws and fails the whole prepare — it must NOT read as
+  // "missing", or an existing balance would inflate a delta below.
+  const tokenBalance = (address: string) =>
     solRpc<{ value: { data?: unknown } | null }>(chain, 'getAccountInfo', [
-      ata,
+      address,
       { encoding: 'base64' },
-    ]).then((r) => (r.value === null ? null : tokenAmountFromBase64(r.value.data))),
+    ]).then((r) => (r.value === null ? null : tokenAmountFromBase64(r.value.data)))
+  const [solBefore, usdcBefore, feeBefore, ataRentRes] = await Promise.all([
+    getSolBalance(chain, owner),
+    tokenBalance(ata),
+    tokenBalance(SWAP_FEE_ACCOUNT),
     solRpc<number>(chain, 'getMinimumBalanceForRentExemption', [165]).catch(() => null),
   ])
   const ataMissing = usdcBefore === null
   const ataRent = ataRentRes != null ? BigInt(ataRentRes) : ATA_RENT_FALLBACK
+  // The fee account must exist; a swap that pays a missing one would fail.
+  if (feeBefore === null) {
+    throw new Error('Swaps are unavailable right now. Your coins are safe; nothing was signed.')
+  }
 
-  const sim = await simulateSwap(chain, txBase64, [owner, ata])
+  const sim = await simulateSwap(chain, txBase64, [owner, ata, SWAP_FEE_ACCOUNT])
   const solAfter = BigInt(sim.value.accounts?.[0]?.lamports ?? 0)
   const usdcAfter = tokenAmountFrom(sim.value.accounts?.[1])
   const solDelta = solAfter - solBefore
   const usdcDelta = usdcAfter - (usdcBefore ?? 0n)
+  const swapFee = tokenAmountFrom(sim.value.accounts?.[2]) - feeBefore
 
-  // 7. The simulated outcome must honor the decoded floor.
+  // 7. Kailah's fee must be exactly 0.5% (±1 unit for rounding), into its
+  //    account: of the gross USDC output when selling SOL, of the USDC input
+  //    when buying.
+  const expectedFee =
+    q.direction === 'sol-to-usdc'
+      ? ((usdcDelta + swapFee) * BigInt(SWAP_FEE_BPS)) / 10_000n
+      : (q.inAmount * BigInt(SWAP_FEE_BPS)) / 10_000n
+  if (swapFee <= 0n || swapFee < expectedFee - 1n || swapFee > expectedFee + 1n) {
+    throw new Error(MISMATCH)
+  }
+
+  // 8. The simulated outcome must honor the decoded floor.
   if (q.direction === 'sol-to-usdc') {
     const maxSolCost = q.inAmount + feeLamports + (ataMissing ? ataRent : 0n) + FEE_ROUNDING_SLACK
     if (usdcDelta < minOutAmount || solDelta < -maxSolCost) {
@@ -749,6 +818,7 @@ export async function prepareSwap(
     feeLamports,
     simulatedSolDelta: solDelta,
     simulatedUsdcDelta: usdcDelta,
+    swapFee,
     txBase64,
   }
 }

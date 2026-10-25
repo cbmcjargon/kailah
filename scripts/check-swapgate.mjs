@@ -2,22 +2,25 @@
 //
 // The swap engine (src/lib/solswap.ts) builds SOL ↔ USDC swaps from Jupiter
 // Swap V2 /build INSTRUCTIONS, assembles the transaction itself, and checks the
-// exact bytes it would sign. Two real /build answers recorded on 2026-10-25
-// (scripts/fixtures/jupiter-build-*.json, one per direction, with the on-chain
-// contents of their lookup tables) drive this suite. It proves:
+// exact bytes it would sign. Real /build answers recorded on 2026-10-25 drive
+// this suite: two with Kailah's 0.5% fee (jupiter-build-fee-*.json, the honest
+// builds) and two without (jupiter-build-*.json), each with the on-chain
+// contents of its lookup tables. It proves:
 //   A. an honest build passes in both directions, and the compiled transaction
 //      is the one Jupiter described: same instructions, accounts and data,
 //      our compute-unit limit, a single signer, tables resolved from the chain;
 //   B. the decoded Jupiter instruction must say what we asked: any change to
-//      the amount, quoted output, slippage, platform fee, positive-slippage
-//      share, variant or transfer authority is refused;
+//      the amount, quoted output, slippage, fee rate, fee account,
+//      positive-slippage share, variant or transfer authority is refused, and
+//      so is a build that drops Kailah's fee;
 //   C. the build's shape is enforced: no "other" or tip instructions, v0 only,
 //      only a unit-price compute-budget instruction, no foreign signer, no
 //      second Jupiter instruction, no Approve, no CloseAccount paying someone
 //      else, no program off the allow-list, no stake account;
 //   D. lookup tables come from the chain, and Jupiter's list must agree;
-//   E. the simulation must honor the decoded floor, and a failing simulation
-//      stops the swap; a stale build is rebuilt; a 429 says "busy".
+//   E. the simulation must honor the decoded floor and pay the fee account
+//      exactly 0.5% (not less, not more), and a failing simulation stops the
+//      swap; a stale build is rebuilt; a 429 says "busy".
 const store = new Map()
 globalThis.localStorage = {
   getItem: (k) => (store.has(k) ? store.get(k) : null),
@@ -29,9 +32,9 @@ const { createHash } = await import('node:crypto')
 const solLib = await import('micro-sol-signer')
 const { base58, base64 } = await import('@scure/base')
 const { unlockSecureStore } = await import('../src/lib/securestore.ts')
-const { SOL_CHAINS } = await import('../src/lib/sol.ts')
+const { SOL_CHAINS, solUsdcAta } = await import('../src/lib/sol.ts')
 const { stakeAccountAddress } = await import('../src/lib/solstake.ts')
-const { getSwapQuote, prepareSwap, SWAP_SLIPPAGE_BPS } = await import('../src/lib/solswap.ts')
+const { getSwapQuote, prepareSwap, SWAP_SLIPPAGE_BPS, SWAP_FEE_BPS, SWAP_FEE_ACCOUNT, SWAP_FEE_WALLET } = await import('../src/lib/solswap.ts')
 
 let failures = 0
 const check = (name, cond, detail = '') => {
@@ -50,21 +53,21 @@ const rejects = async (fn) => {
 await unlockSecureStore('abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about')
 
 const MAINNET = SOL_CHAINS.sol
-const FIX = {
-  'sol-to-usdc': JSON.parse(readFileSync('scripts/fixtures/jupiter-build-sol-to-usdc.json', 'utf8')),
-  'usdc-to-sol': JSON.parse(readFileSync('scripts/fixtures/jupiter-build-usdc-to-sol.json', 'utf8')),
-}
+const load = (name) => JSON.parse(readFileSync(`scripts/fixtures/jupiter-build-${name}.json`, 'utf8'))
+const FIX = { 'sol-to-usdc': load('fee-sol-to-usdc'), 'usdc-to-sol': load('fee-usdc-to-sol') }
+const NOFEE = { 'sol-to-usdc': load('sol-to-usdc'), 'usdc-to-sol': load('usdc-to-sol') }
 const OWNER = FIX['sol-to-usdc'].request.taker
 const JUP6 = 'JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4'
 const BLOCKHASH = 'EkSnNWid2cvwEVnVx9aBqawnmiCNiDgp3gUdkDPTKN1N'
 const SOL_BEFORE = 50_000_000_000n
 const USDC_BEFORE = 1_000_000_000n
+const FEE_BEFORE = 37_211_240n
 const UNITS_USED = 150_000
 
 // --- the fake world ---------------------------------------------------------
 let world
-function resetWorld(direction) {
-  const fx = FIX[direction]
+function resetWorld(direction, fixtures = FIX) {
+  const fx = fixtures[direction]
   world = {
     direction,
     build: structuredClone(fx.build),
@@ -73,8 +76,10 @@ function resetWorld(direction) {
     builds: 0,
     jupStatus: 200,
     simErr: null,
-    // what the final simulation reports for our two accounts
+    // what the final simulation reports for our two accounts and the fee account
     shortfall: 0n,
+    feeSkew: 0n,
+    feeAccountMissing: false,
   }
 }
 const tokenAccountB64 = (amount) => {
@@ -100,6 +105,7 @@ globalThis.fetch = async (url, init) => {
     case 'getBalance':
       return rpcOk({ value: Number(SOL_BEFORE) })
     case 'getAccountInfo':
+      if (params[0] === SWAP_FEE_ACCOUNT) return rpcOk({ value: world.feeAccountMissing ? null : { data: [tokenAccountB64(FEE_BEFORE), 'base64'] } })
       return rpcOk({ value: { data: [tokenAccountB64(USDC_BEFORE), 'base64'] } })
     case 'getMinimumBalanceForRentExemption':
       return rpcOk(2_039_280)
@@ -111,8 +117,21 @@ globalThis.fetch = async (url, init) => {
       const wanted = params[1].accounts?.addresses
       if (!wanted) return rpcOk({ value: { err: null, logs: [], unitsConsumed: UNITS_USED } })
       const inA = BigInt(q.inAmount), out = BigInt(q.outAmount) - world.shortfall
+      // Jupiter's measured arithmetic: selling SOL, the fee is 0.5% of the
+      // gross USDC output; buying SOL, 0.5% of the USDC input.
+      const bps = BigInt(SWAP_FEE_BPS)
+      let userUsdc, fee
+      if (world.direction === 'sol-to-usdc') {
+        const gross = (out * 10_000n + 9_999n - bps) / (10_000n - bps)
+        fee = (gross * bps) / 10_000n
+        userUsdc = gross - fee
+      } else {
+        fee = (inA * bps) / 10_000n
+        userUsdc = -inA
+      }
+      world.fee = fee + world.feeSkew
       const solAfter = world.direction === 'sol-to-usdc' ? SOL_BEFORE - inA - 6_000n : SOL_BEFORE + out - 6_000n
-      const usdcAfter = world.direction === 'sol-to-usdc' ? USDC_BEFORE + out : USDC_BEFORE - inA
+      const usdcAfter = USDC_BEFORE + userUsdc
       return rpcOk({
         value: {
           err: null,
@@ -121,6 +140,7 @@ globalThis.fetch = async (url, init) => {
           accounts: [
             { lamports: Number(solAfter) },
             { lamports: 2_039_280, data: { parsed: { info: { tokenAmount: { amount: usdcAfter.toString() } } } } },
+            { lamports: 2_039_280, data: { parsed: { info: { tokenAmount: { amount: (FEE_BEFORE + world.fee).toString() } } } } },
           ],
         },
       })
@@ -131,8 +151,8 @@ globalThis.fetch = async (url, init) => {
 }
 
 const quoteFor = (direction, owner = OWNER) => getSwapQuote(MAINNET, direction, BigInt(FIX[direction].request.amount), owner)
-async function run(direction, mutate, owner = OWNER) {
-  resetWorld(direction)
+async function run(direction, mutate, owner = OWNER, fixtures = FIX) {
+  resetWorld(direction, fixtures)
   mutate?.(world)
   try {
     const quote = await quoteFor(direction, owner)
@@ -188,6 +208,7 @@ for (const direction of ['sol-to-usdc', 'usdc-to-sol']) {
   const p = r.prepared
   const floor = (BigInt(fx.build.outAmount) * BigInt(10_000 - SWAP_SLIPPAGE_BPS)) / 10_000n
   check(`A ${direction}: the guaranteed minimum is computed from the decoded route`, p.minOutAmount === floor, `${p.minOutAmount} vs ${floor} (Jupiter said ${fx.build.otherAmountThreshold})`)
+  check(`A ${direction}: the fee shown is what the simulation paid Kailah's account`, p.swapFee === world.fee && p.swapFee > 0n, `${p.swapFee} USDC units`)
   check(`A ${direction}: two simulations (measure, then the final bytes)`, world.simulations.length === 2)
   const tx = resolveCompiled(p.txBase64, fx.lookupTables)
   check(`A ${direction}: one signature, ours, and our blockhash`, tx.signatures === 1 && tx.required === 1 && tx.feePayer === OWNER && tx.blockhash === BLOCKHASH)
@@ -240,24 +261,33 @@ const B = [
   ['in_amount changed', (w) => { const d = ixData(w); patchU64(d, 8, BigInt(w.build.inAmount) + 1n); setIxData(w, d) }],
   ['quoted_out_amount raised above the quote', (w) => { const d = ixData(w); patchU64(d, 16, BigInt(w.build.outAmount) * 2n); setIxData(w, d) }],
   ['slippage raised to 3%', (w) => { const d = ixData(w); patchU16(d, 24, 300); setIxData(w, d) }],
-  ['a 0.5% platform fee slipped in', (w) => { const d = ixData(w); patchU16(d, 26, 50); setIxData(w, d) }],
+  ['the fee raised to 1%', (w) => { const d = ixData(w); patchU16(d, 26, 100); setIxData(w, d) }],
+  ['the fee dropped to 0', (w) => { const d = ixData(w); patchU16(d, 26, 0); setIxData(w, d) }],
+  ['the fee account swapped for another', (w) => { w.build.swapInstruction.accounts[10] = { pubkey: OTHER, isSigner: false, isWritable: true } }],
   ['a positive-slippage share slipped in', (w) => { const d = ixData(w); patchU16(d, 28, 10); setIxData(w, d) }],
   ['the variant switched to exact-out', (w) => { const d = ixData(w); d.set(disc('exact_out_route_v2'), 0); setIxData(w, d) }],
   ['an unknown Jupiter instruction', (w) => { const d = ixData(w); d.set(disc('claim_token'), 0); setIxData(w, d) }],
   ['the transfer authority is someone else', (w) => { w.build.swapInstruction.accounts[0] = { pubkey: OTHER, isSigner: false, isWritable: false } }],
 ]
 for (const direction of ['sol-to-usdc', 'usdc-to-sol']) {
+  const simulated = []
   for (const [label, mutate] of B) {
     const r = await run(direction, mutate)
     check(`B ${direction}: ${label} → refused`, refused(r), r.err?.message?.slice(0, 50) ?? 'accepted!')
+    if (world.simulations.length > 0) simulated.push(label)
   }
+  check(`B ${direction}: every tampered field is refused before anything is simulated`, simulated.length === 0, simulated.join('; '))
 }
 {
-  // The older route layout (route plan first, fields at the end) is decoded too.
-  const v1 = (fee) => (w) => {
+  // The older route layout (route plan first, fields at the end) is decoded
+  // too: authority in slot 1, the named platform_fee_account in slot 6.
+  const v1 = (fee, feeAccount = SWAP_FEE_ACCOUNT) => (w) => {
     const acc = w.build.swapInstruction.accounts
-    // route's authority slot is 1: put us there, keep a plausible slot 0
-    w.build.swapInstruction.accounts = [{ pubkey: acc[5].pubkey, isSigner: false, isWritable: false }, acc[0], ...acc.slice(1)]
+    const plain = (k) => ({ pubkey: acc[k].pubkey, isSigner: false, isWritable: acc[k].isWritable })
+    w.build.swapInstruction.accounts = [
+      plain(5), acc[0], plain(1), plain(2), plain(7), plain(4),
+      { pubkey: feeAccount, isSigner: false, isWritable: true }, plain(8), plain(9), ...acc.slice(11),
+    ]
     const tail = new Uint8Array(19)
     new DataView(tail.buffer).setBigUint64(0, BigInt(w.build.inAmount), true)
     new DataView(tail.buffer).setBigUint64(8, BigInt(w.build.outAmount), true)
@@ -265,9 +295,14 @@ for (const direction of ['sol-to-usdc', 'usdc-to-sol']) {
     tail[18] = fee
     setIxData(w, new Uint8Array([...disc('route'), 0, 0, 0, 0, ...tail]))
   }
-  const ok = await run('sol-to-usdc', v1(0))
+  const ok = await run('sol-to-usdc', v1(SWAP_FEE_BPS))
   check('B the older `route` layout with honest fields passes', ok.err === null, ok.err?.message?.slice(0, 60))
-  check('B the older `route` layout with a platform fee is refused', refused(await run('sol-to-usdc', v1(50))))
+  check('B the older `route` layout with a higher fee is refused', refused(await run('sol-to-usdc', v1(100))))
+  check('B the older `route` layout paying another fee account is refused', refused(await run('sol-to-usdc', v1(SWAP_FEE_BPS, OTHER))))
+}
+for (const direction of ['sol-to-usdc', 'usdc-to-sol']) {
+  const r = await run(direction, undefined, OWNER, NOFEE)
+  check(`B ${direction}: a real build WITHOUT Kailah's fee is refused`, refused(r), r.err?.message?.slice(0, 50) ?? 'accepted!')
 }
 
 console.log('--- C. the build\'s shape ---')
@@ -341,6 +376,27 @@ console.log('--- E. simulation, staleness, rate limits, the quote itself ---')
   check('E a quote for a different token than asked → refused', /does not match its quote/.test(wrongMint?.message ?? ''))
   const devnet = await rejects(() => getSwapQuote(SOL_CHAINS['sol-devnet'], 'sol-to-usdc', 1_000_000n, OWNER))
   check('E swapping stays mainnet-only', /only available on Solana mainnet/.test(devnet?.message ?? ''))
+}
+
+console.log('--- F. the fee account gets exactly 0.5% ---')
+for (const direction of ['sol-to-usdc', 'usdc-to-sol']) {
+  for (const [label, skew] of [['2 units less than 0.5%', -2n], ['2 units more than 0.5% (overcharging the user)', 2n]]) {
+    const r = await run(direction, (w) => { w.feeSkew = skew })
+    check(`F ${direction}: the fee account receiving ${label} → refused`, refused(r), r.err?.message?.slice(0, 50) ?? 'accepted!')
+  }
+  const r0 = await run(direction, (w) => { w.feeSkew = -(10n ** 12n) })
+  check(`F ${direction}: the fee account receiving nothing → refused`, refused(r0), r0.err?.message?.slice(0, 50) ?? 'accepted!')
+  const r1 = await run(direction, (w) => { w.feeSkew = 1n })
+  check(`F ${direction}: a one-unit rounding difference is tolerated`, r1.err === null, r1.err?.message?.slice(0, 60))
+}
+{
+  const r = await run('sol-to-usdc', (w) => { w.feeAccountMissing = true })
+  check('F a missing fee account stops the swap with a plain message, before signing', /Swaps are unavailable right now/.test(r.err?.message ?? ''), r.err?.message?.slice(0, 60))
+  check('F the fee account constant is the fee wallet\'s USDC account', solUsdcAta(MAINNET, SWAP_FEE_WALLET) === SWAP_FEE_ACCOUNT && SWAP_FEE_BPS === 50)
+  resetWorld('sol-to-usdc')
+  const quote = await quoteFor('sol-to-usdc')
+  const est = quote.estimatedFee
+  check('F the form\'s fee estimate is 0.5% of the gross output', est > 0n && est * 10_000n / (quote.outAmount + est) >= 49n && est * 10_000n / (quote.outAmount + est) <= 50n, `${est}`)
 }
 
 console.log(failures === 0 ? '\nAll swap-gate checks passed.' : `\n${failures} CHECK(S) FAILED.`)

@@ -16,7 +16,7 @@ PRIVATE BY DESIGN
 • Your recovery phrase is encrypted with AES-256-GCM under a key derived with Argon2id. Cached data is encrypted too, and the wallet locks itself after 15 minutes idle.
 
 ALSO
-• SOL and TRX staking; SOL ↔ USDC swaps
+• SOL and TRX staking; SOL ↔ USDC swaps (a 0.5% Kailah fee, shown before you confirm)
 • QR code scanning, payment alerts (with no amounts) and CSV export
 • Face ID or fingerprint unlock with a passkey
 • Show only the networks you use; hidden ones are never queried

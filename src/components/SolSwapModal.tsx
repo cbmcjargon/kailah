@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import type { SolChainConfig, SolKey, SolUiState } from '../lib/sol'
 import { formatSol, formatSolUsdc, SolBroadcastError, solTxSeen } from '../lib/sol'
 import type { PreparedSwap, SwapDirection, SwapQuote } from '../lib/solswap'
-import { broadcastSwap, getSwapQuote, prepareSwap, SWAP_SLIPPAGE_BPS } from '../lib/solswap'
+import { broadcastSwap, getSwapQuote, prepareSwap, SWAP_FEE_BPS, SWAP_SLIPPAGE_BPS } from '../lib/solswap'
 import { evmToUsd } from '../lib/units'
 import { formatUsd } from '../lib/format'
 import Modal from './Modal'
@@ -289,6 +289,8 @@ export default function SolSwapModal({
                 <span className="field-hint">
                   At least {fmtOut(quote.minOutAmount)} {outSymbol} after slippage (
                   {SWAP_SLIPPAGE_BPS / 100}%). Routed by Jupiter across Solana exchanges.
+                  Includes Kailah&rsquo;s {SWAP_FEE_BPS / 100}% fee (≈{' '}
+                  {formatSolUsdc(chain, quote.estimatedFee)} USDC).
                 </span>
               </>
             ) : (
@@ -373,10 +375,18 @@ export default function SolSwapModal({
               </dd>
             </div>
             <div className="review-row">
+              <dt>Kailah fee ({SWAP_FEE_BPS / 100}%)</dt>
+              <dd className="tnum">{formatSolUsdc(chain, step.prepared.swapFee)} USDC</dd>
+            </div>
+            <div className="review-row">
               <dt>Network fee</dt>
               <dd className="tnum">{formatSol(step.prepared.feeLamports)} SOL</dd>
             </div>
           </dl>
+          <p className="text-tertiary">
+            Kailah keeps {SWAP_FEE_BPS / 100}% of each swap, paid in USDC; Jupiter charges no fee.
+            The amounts above already include it.
+          </p>
           <p className="text-tertiary">
             Rates move with the market; if the price shifts beyond the slippage limit before the
             transaction lands, it fails safely and nothing is exchanged.

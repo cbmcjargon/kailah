@@ -1,6 +1,6 @@
 # Kailah Wallet
 
-**v2.4.0** — a self-custody wallet for Bitcoin, Dogecoin, Litecoin, USDC + ETH
+**v2.5.0** — a self-custody wallet for Bitcoin, Dogecoin, Litecoin, USDC + ETH
 (Base / Ethereum / Arbitrum), BNB, Solana (SOL + USDC, with in-wallet swaps
 and native staking), and TRON (TRX + USDT) that runs entirely in the browser. No servers, no accounts, no custody: keys are
 generated on your device, encrypted with your password, and never leave it.
@@ -61,7 +61,7 @@ npm run verify:live   # is each official site serving exactly this build?
   extension Chrome installed from the store, which adds only a `_metadata/`
   folder.
 
-**Privacy.** The developer collects nothing. [PRIVACY.md](PRIVACY.md) lists
+**Privacy.** The developer collects no data. [PRIVACY.md](PRIVACY.md) lists
 exactly what stays on your device and which services see what.
 
 **Report a vulnerability** privately, as [SECURITY.md](SECURITY.md)
@@ -124,8 +124,12 @@ because every change to wallet code gets a careful review.
   measures. It decodes Jupiter's swap instruction and refuses unless the
   amount, slippage and fee fields say exactly what you asked, then simulates
   the exact bytes and signs only if the balance changes honor the minimum
-  decoded from the route. check-swapgate tampers with every part of a
-  recorded build offline; check-solswap runs the gate on live mainnet routes.
+  decoded from the route. Each swap carries a 0.5% Kailah fee, paid in USDC
+  to the developer's published fee account and shown on the form and the
+  review screen. The gate checks the route asks for exactly that fee into
+  exactly that account, and that the simulation pays it exactly 0.5%.
+  check-swapgate tampers with every part of a recorded build offline;
+  check-solswap runs the gate on live mainnet routes.
 - **Stablecoins done honestly** — each network card shows your USDC and the
   ETH that pays fees, with per-network fee truth on the send form (Base and
   Arbitrum cost fractions of a cent; Ethereum mainnet can cost dollars when

@@ -1,6 +1,6 @@
 # Kailah Wallet — maintenance notes
 
-Self-custody browser wallet, v2.4.0: four engines — UTXO (BTC/DOGE/LTC),
+Self-custody browser wallet, v2.5.0: four engines — UTXO (BTC/DOGE/LTC),
 EVM (USDC+ETH on Base/Ethereum/Arbitrum + BNB on BSC, no explorer API there),
 Solana (SOL + SPL USDC + Jupiter swaps + native staking via hand-built
 stake-program instructions in solstake.ts), TRON (TRX + USDT-TRC20 + Stake 2.0 via tron.ts/tronstake.ts — the node builds raw txs and the wallet DECODES the protobuf bytes
@@ -78,6 +78,10 @@ not feature building, unless the user asks for something new.
   UTXO stack: account model, viem signing with pinned chainId, no address
   rotation. Never blind-retry a failed EVM broadcast — re-prepare (fresh
   pending nonce) so an actually-landed first attempt can't be double-sent.
+- Swaps carry a 0.5% fee (SWAP_FEE_BPS) into SWAP_FEE_ACCOUNT (solswap.ts),
+  disclosed on the form, the review screen, README, PRIVACY.md and the store
+  description. Changing the rate or the account is a deliberate edit to all
+  of those plus the check-swapgate expectations, never a side effect.
 - All amounts are bigint smallest-units everywhere. No floats in money math.
 - Secrets (mnemonic, private keys) exist only in memory; never log/store them.
   Private keys are zeroed on lock/erase; erase must clear every kailah.* key.
