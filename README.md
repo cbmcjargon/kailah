@@ -71,7 +71,11 @@ describes. Please don't open a public issue for a security problem.
 are by arrangement. Open an issue first so we can agree on the approach,
 because every change to wallet code gets a careful review.
 
-**License.** MIT; see [LICENSE](LICENSE).
+**License and name.** The code is MIT-licensed; see [LICENSE](LICENSE). The
+name "Kailah Wallet" and its logo are covered by [TRADEMARK.md](TRADEMARK.md):
+a build distributed under that name must keep the referral links and the
+swap fee account unchanged, and a build that changes them must use a
+different name and logo.
 
 ## Features
 
