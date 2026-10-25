@@ -1,7 +1,7 @@
 {
   "name": "kailah-wallet",
   "private": true,
-  "version": "2.3.0",
+  "version": "2.3.1",
   "license": "MIT",
   "type": "module",
   "scripts": {
@@ -10,7 +10,7 @@
     "build:extension": "vite build --config vite.extension.config.ts",
     "typecheck": "tsc --noEmit",
     "preview": "vite preview",
-    "check:offline": "for s in keys txbuild txv2 qrparse vault scanner hw pending netprefs; do npx tsx scripts/check-$s.mjs || exit 1; done",
+    "check:offline": "for s in keys txbuild txv2 qrparse vault scanner hw pending netprefs failover; do npx tsx scripts/check-$s.mjs || exit 1; done",
     "check:live": "for s in account evm sol solswap solstake tron; do npx tsx scripts/check-$s.mjs || exit 1; done",
     "digest": "node scripts/build-digest.mjs",
     "verify:live": "node scripts/verify-live.mjs"

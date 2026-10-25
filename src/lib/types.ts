@@ -336,6 +336,15 @@ export interface ProviderApi extends AddressApi {
   /** short id for logs/errors, e.g. 'mempool.space' */
   providerName: string
   xpub?: XpubApi
+  /**
+   * The backend sheds load in short bursts (esplora: 429s for a second or two
+   * under scan load). A browser can't see those 429s when they carry no CORS
+   * headers, only a network error, so for such a provider the FailoverClient
+   * reads a network-level failure right after a success as a rate limit and
+   * backs off and retries it. Leave unset where the limit is long (BlockCypher
+   * is hourly) and a retry seconds later can't help.
+   */
+  burstLimited?: boolean
 }
 
 /** getClient(chain) v2: failover over an ordered ProviderApi list. */

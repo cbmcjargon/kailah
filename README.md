@@ -1,6 +1,6 @@
 # Kailah Wallet
 
-**v2.3.0** — a self-custody wallet for Bitcoin, Dogecoin, Litecoin, USDC + ETH
+**v2.3.1** — a self-custody wallet for Bitcoin, Dogecoin, Litecoin, USDC + ETH
 (Base / Ethereum / Arbitrum), BNB, Solana (SOL + USDC, with in-wallet swaps
 and native staking), and TRON (TRX + USDT) that runs entirely in the browser. No servers, no accounts, no custody: keys are
 generated on your device, encrypted with your password, and never leave it.
@@ -304,6 +304,7 @@ Verification suites (run with `npx tsx scripts/<name>.mjs`):
 | check-hw.mjs | hardware signing against scripts/ledger-emulator.mjs (device side of both Ledger protocols): framing, merkle/client commands, wallet policy, xpub import (LTC assembled from legacy replies), sends and RBF bumps byte-identical to the software path on BTC/testnet/LTC, a btc-signer-parsed PSBTv2 mock, device display = review screen, and every refusal (tampered digest, wrong key/index, bad DER, lying provider, other Ledger, rejected, locked, wrong app) |
 | check-solswap.mjs | independent ATA re-derivation, a REAL devnet USDC send, live Jupiter quotes, the full prepareSwap gate on mainnet (simulation only), and an adversarial tampered-quote test proving the refuse-to-sign path |
 | check-netprefs.mjs | networks-shown choice: encrypted and seed-bound, cleared by erase, practice mirroring, the funds/history classifier that never hides a funded or unreadable network, which engine chunks load for a choice (and that the static ids/labels match the engines), and source checks that every scan/poll loop filters hidden networks and every engine load is gated |
+| check-failover.mjs | rate limit vs outage in the provider failover: a provider that pushes back (a 429, or the bare network error a browser shows for a CORS-less 429) is paused and retried, a healthy backup covers the pause, timeouts get one retry, a dead provider fails over at once with a 60 s cooldown, BlockCypher's hourly limit is never retried, and a request never waits or retries past its limits |
 | check-providers.mjs | live API shapes + failover (spends BlockCypher budget — run sparingly) |
 
 ## Deployment

@@ -214,6 +214,9 @@ check('address() memoizes (same reference on repeat)', btc.address(0, 0) === btc
 console.log('\n--- Part 2: addrcache persistence + zero() wipe ---')
 
 const FAKE_XPUB = 'xpub-unit-test-key'
+// The cache lives in the encrypted secure store, so it persists only while
+// unlocked; the writes are encrypted in the background.
+await unlockSecureStore(MN)
 check('addrcache.get on unknown xpub is empty', (() => {
   const e = addrcache.get(FAKE_XPUB)
   return (
@@ -232,7 +235,14 @@ check(
     JSON.stringify({ receive: [0, 1, 3, 5], change: [2, 7], highestReceive: 5, highestChange: 7 }),
   JSON.stringify(merged),
 )
-check('addrcache persisted under kailah.addrmap.v1', memStore.has('kailah.addrmap.v1'))
+for (let i = 0; i < 40 && !memStore.has('kailah.sec.addrmap'); i++) await new Promise((r) => setTimeout(r, 25))
+const sealed = memStore.get('kailah.sec.addrmap') ?? ''
+check(
+  'addrcache persisted encrypted under kailah.sec.addrmap (no xpub or indices in the clear)',
+  sealed !== '' && !sealed.includes(FAKE_XPUB) && !sealed.includes('receive'),
+  sealed.slice(0, 24),
+)
+check('no plaintext copy under the legacy key kailah.addrmap.v1', !memStore.has('kailah.addrmap.v1'))
 addrcache.clearAll()
 check('addrcache.clearAll empties the store', addrcache.get(FAKE_XPUB).receive.length === 0)
 

@@ -75,10 +75,12 @@ class FailoverClientImpl implements FailoverClient {
   /** index of the provider that served the last successful call */
   private activeIndex = 0
 
-  constructor(providers: ProviderApi[], persistKey?: string) {
+  constructor(providers: ProviderApi[], persistKey?: string, tuning?: FailoverTuning) {
     if (providers.length === 0) throw new Error('FailoverClient requires at least one provider')
     this.providers = providers
     this.persistKey = persistKey
+    this.backoffMs = tuning?.backoffMs ?? FailoverClientImpl.BACKOFF_MS
+    this.maxWaitMs = tuning?.maxWaitMs ?? FailoverClientImpl.MAX_WAIT_MS
     if (persistKey !== undefined) {
       const preferred = readProviderPref(persistKey)
       if (preferred !== null) {
@@ -112,6 +114,33 @@ class FailoverClientImpl implements FailoverClient {
   private downUntil: number[] = []
 
   /**
+   * A rate limit is not an outage. A testnet4 scan used to fail with
+   * "Couldn't reach the network data service" (live 2026-10-25): under scan
+   * load mempool.space answers some lookups with 429 (CORS-less, so a browser
+   * sees only "Load failed") and lets others hang, and its backup
+   * mempool.emzy.de rate-limits harder still. Every push-back sent the scan
+   * to the other provider, which was refusing too.
+   *
+   * Push-back from a burstLimited provider pauses that provider for EVERY
+   * request, for backoffMs[strikes] (strikes reset on its next success).
+   * Push-back is a visible 429 (`rateLimited`), or a network-level failure
+   * from a provider that answered within RECENT_OK_MS. A timeout counts only
+   * once per request: a second one means the host is down. Requests go to a
+   * provider that isn't paused, or wait for the earliest pause to end, within
+   * maxWaitMs and MAX_ATTEMPTS. A provider that hasn't answered recently and
+   * fails at network level is down, as before (DOWN_COOLDOWN_MS).
+   */
+  private static readonly RECENT_OK_MS = 30_000
+  private static readonly BACKOFF_MS: readonly number[] = [1_500, 4_000, 8_000]
+  private static readonly MAX_WAIT_MS = 30_000
+  private static readonly MAX_ATTEMPTS = 8
+  private readonly backoffMs: readonly number[]
+  private readonly maxWaitMs: number
+  private lastOkAt: number[] = []
+  private pauseUntil: number[] = []
+  private strikes: number[] = []
+
+  /**
    * One-time startup probe: race every provider's tip endpoint and start on
    * the first that answers. Without this, a first load during a primary
    * outage sends the whole initial scan burst into a dead host and the user
@@ -135,6 +164,7 @@ class FailoverClientImpl implements FailoverClient {
               ),
             ])
             if (typeof tip !== 'number' || tip <= 0) throw new Error('bad tip')
+            this.lastOkAt[i] = Date.now()
             return i
           }),
         )
@@ -166,16 +196,49 @@ class FailoverClientImpl implements FailoverClient {
     return /timed? ?out|abort|load failed|failed to fetch|networkerror/i.test(msg)
   }
 
+  /** A deadline or abort: the host hung rather than refused. */
+  private static isTimeout(err: unknown): boolean {
+    const name = err instanceof Error ? err.name : ''
+    const msg = err instanceof Error ? err.message : String(err)
+    return name === 'TimeoutError' || name === 'AbortError' || /timed? ?out|abort/i.test(msg)
+  }
+
+  /** Push-back from a burstLimited provider: pause it for every request. */
+  private pause(i: number): void {
+    // Concurrent requests caught in one burst all report it; count it once.
+    if ((this.pauseUntil[i] ?? 0) > Date.now()) return
+    const strike = this.strikes[i] ?? 0
+    this.strikes[i] = strike + 1
+    const delay = this.backoffMs[Math.min(strike, this.backoffMs.length - 1)] ?? 0
+    this.pauseUntil[i] = Math.max(this.pauseUntil[i] ?? 0, Date.now() + delay)
+  }
+
   /**
-   * Run an idempotent read across providers with failover. Advances to the next
-   * provider on ANY failure (network/CORS/5xx and, conservatively, 4xx too —
-   * reads are side-effect-free, so an over-eager retry never harms). Remembers
-   * the provider that succeeds as the new active one.
+   * Run an idempotent read across providers with failover. A provider that
+   * answers with an error (5xx and, conservatively, 4xx too; reads are
+   * side-effect-free) or is down is skipped for the rest of this request. One
+   * that pushes back (see BACKOFF_MS) is paused and retried once the pause
+   * ends, unless another provider is free first. Remembers the provider that
+   * succeeds as the new active one.
    */
   private async run<T>(label: string, op: (p: ProviderApi) => Promise<T>): Promise<T> {
     await this.ensureProbed()
     let lastErr: unknown
-    for (const i of this.order()) {
+    const giveUpAt = Date.now() + this.maxWaitMs
+    const done = new Set<number>() // answered with an error, or down: not retried in this request
+    const timedOut = new Set<number>()
+    for (let attempts = 0; attempts < FailoverClientImpl.MAX_ATTEMPTS; ) {
+      const now = Date.now()
+      const candidates = this.order().filter((i) => !done.has(i))
+      if (candidates.length === 0) break
+      const i = candidates.find((c) => (this.pauseUntil[c] ?? 0) <= now)
+      if (i === undefined) {
+        const wake = Math.min(...candidates.map((c) => this.pauseUntil[c] ?? 0))
+        if (wake > giveUpAt) break
+        await new Promise((r) => setTimeout(r, wake - now))
+        continue
+      }
+      attempts++
       const provider = this.providers[i]
       try {
         const result = await op(provider)
@@ -184,20 +247,33 @@ class FailoverClientImpl implements FailoverClient {
         }
         this.activeIndex = i
         this.downUntil[i] = 0
+        this.lastOkAt[i] = Date.now()
+        this.strikes[i] = 0
         return result
       } catch (err) {
         lastErr = err
-        if (FailoverClientImpl.isNetworkLevel(err)) {
-          this.downUntil[i] = Date.now() + FailoverClientImpl.DOWN_COOLDOWN_MS
+        const burst = provider.burstLimited === true
+        const visible429 = (err as { rateLimited?: unknown } | null)?.rateLimited === true
+        const networkLevel = FailoverClientImpl.isNetworkLevel(err)
+        const recentlyOk = Date.now() - (this.lastOkAt[i] ?? -Infinity) < FailoverClientImpl.RECENT_OK_MS
+        const timeout = networkLevel && FailoverClientImpl.isTimeout(err)
+        const pushBack = burst && (visible429 || (networkLevel && recentlyOk && !(timeout && timedOut.has(i))))
+        if (pushBack) {
+          if (timeout) timedOut.add(i)
+          this.pause(i)
+          continue
         }
-        // advance to the next provider
+        if (networkLevel) this.downUntil[i] = Date.now() + FailoverClientImpl.DOWN_COOLDOWN_MS
+        done.add(i)
       }
     }
     // Network-level failures ("Load failed" / "Failed to fetch" / timeouts)
     // are also what a CORS-less rate-limit response looks like from a browser —
     // BlockCypher's 429s carry no CORS headers. Say something a human can act on.
     const detail = lastErr instanceof Error ? lastErr.message : String(lastErr)
-    const networky = /load failed|failed to fetch|networkerror|timed? ?out|abort/i.test(detail)
+    const networky =
+      (lastErr as { rateLimited?: unknown } | null)?.rateLimited === true ||
+      /load failed|failed to fetch|networkerror|timed? ?out|abort/i.test(detail)
     throw new Error(
       networky
         ? `Couldn't reach the network data service — it may be busy or rate-limited. ` +
@@ -307,12 +383,22 @@ class FailoverClientImpl implements FailoverClient {
 /**
  * Construct a FailoverClient from an explicit provider list. Used by getClient
  * and by tests that want to force a specific ordering (e.g. bad-first failover).
+ * `tuning` shortens the rate-limit backoff for tests.
  */
 export function createFailoverClient(
   providers: ProviderApi[],
   persistKey?: string,
+  tuning?: FailoverTuning,
 ): FailoverClient {
-  return new FailoverClientImpl(providers, persistKey)
+  return new FailoverClientImpl(providers, persistKey, tuning)
+}
+
+/** Rate-limit timing overrides (tests only). */
+export interface FailoverTuning {
+  /** pause after the 1st, 2nd, 3rd+ push-back in a row */
+  backoffMs?: readonly number[]
+  /** longest one request waits for paused providers before giving up */
+  maxWaitMs?: number
 }
 
 const clients = new Map<ChainId, FailoverClient>()

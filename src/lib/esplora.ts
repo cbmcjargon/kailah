@@ -110,6 +110,8 @@ export class EsploraProvider implements ProviderApi {
   // No account endpoint on esplora — the seam stays open (xpub undefined) so
   // api.ts reports hasXpubApi()===false and scans per-address instead.
   readonly xpub: XpubApi | undefined = undefined
+  // mempool.space and friends shed scan bursts with brief, CORS-less 429s.
+  readonly burstLimited = true
 
   private readonly base: string
   private readonly spec: ProviderSpec
@@ -139,16 +141,16 @@ export class EsploraProvider implements ProviderApi {
   private static readonly REQUEST_TIMEOUT_MS = 10_000
 
   private async getText(path: string): Promise<string> {
-    let res = await fetch(this.base + path, {
+    const res = await fetch(this.base + path, {
       signal: deadline(EsploraProvider.REQUEST_TIMEOUT_MS),
     })
     if (res.status === 429) {
-      // Rate-limited, not down: one polite retry beats failing over to a
-      // provider that may be the dead one (live incident: blockstream 429s
-      // under scan load while mempool.space was unreachable).
-      await new Promise((r) => setTimeout(r, 1_500))
-      res = await fetch(this.base + path, {
-        signal: deadline(EsploraProvider.REQUEST_TIMEOUT_MS),
+      // Rate-limited, not down. The FailoverClient pauses this provider for
+      // every request and retries after backing off (burstLimited). When the
+      // 429 carries no CORS headers, a browser never gets here and fetch
+      // throws a TypeError instead; the client handles that case too.
+      throw Object.assign(new Error(`${this.providerName}: rate limited (HTTP 429)`), {
+        rateLimited: true,
       })
     }
     const text = await res.text()

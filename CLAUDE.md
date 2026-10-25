@@ -1,6 +1,6 @@
 # Kailah Wallet — maintenance notes
 
-Self-custody browser wallet, v2.3.0: four engines — UTXO (BTC/DOGE/LTC),
+Self-custody browser wallet, v2.3.1: four engines — UTXO (BTC/DOGE/LTC),
 EVM (USDC+ETH on Base/Ethereum/Arbitrum + BNB on BSC, no explorer API there),
 Solana (SOL + SPL USDC + Jupiter swaps + native staking via hand-built
 stake-program instructions in solstake.ts), TRON (TRX + USDT-TRC20 + Stake 2.0 via tron.ts/tronstake.ts — the node builds raw txs and the wallet DECODES the protobuf bytes
@@ -31,7 +31,7 @@ not feature building, unless the user asks for something new.
   security headers from public/_headers, so redeploy it whenever the CSP hosts
   change). Site ID, host and access live in ops/infrastructure.md, which is
   private (see "Public repository" below): @ops/infrastructure.md
-- Tests: `npm run check:offline` (keys, txbuild, txv2, qrparse, vault, scanner, hw, pending, netprefs —
+- Tests: `npm run check:offline` (keys, txbuild, txv2, qrparse, vault, scanner, hw, pending, netprefs, failover —
   no network; this is what CI runs on every push) and `npm run check:live`
   (account, evm, sol, solswap, solstake, tron — real networks; a provider being
   down or rate-limited prints SKIP, never FAIL). check-providers.mjs is run by
@@ -80,6 +80,14 @@ not feature building, unless the user asks for something new.
   600s cadence; tip heights come from the kailah.tipcache.v1 fallback. Full
   gap scans on every poll previously burned the ~100/hr budget and produced
   CORS-less 429s that browsers report as "Load failed".
+- Rate limits are handled in ONE place, the FailoverClient (api.ts). An
+  esplora provider (burstLimited) that pushes back (a 429, or a network error
+  right after a success) is paused for every request and retried after
+  1.5/4/8 s; a provider that never answered is down for 60 s.
+  check-failover proves both. Don't add retries inside a provider: a second
+  layer multiplies requests, and mempool.space and mempool.emzy.de block a
+  whole IP for a while after heavy bursts (2026-10-25). Keep live testnet
+  scans and burst tests rare.
 - Networks shown (src/lib/netprefs.ts, kailah.sec.netprefs): hidden networks
   are never scanned or polled — every scan/poll/refresh loop in App.tsx goes
   through shownIn() (check-netprefs E1 enforces it) — and an engine chunk
