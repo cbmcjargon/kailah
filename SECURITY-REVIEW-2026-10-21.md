@@ -624,14 +624,52 @@ This detects tampering; it does not prevent it. It shows what one machine
 was served at one moment, and a host could serve different bytes to someone
 else.
 
+### Swaps on Jupiter Swap V2 (2026-10-25)
+
+Jupiter deprecated the keyless `lite-api.jup.ag/swap/v1` the wallet used
+("no longer actively maintained", the host "phased out"). Swaps now use
+`api.jup.ag/swap/v2/build`, which returns the route as **instructions**
+instead of a finished transaction.
+
+- **The wallet assembles the transaction.** Lookup tables come from the
+  chain, and Jupiter's list of each table must agree with it. The blockhash is
+  the wallet's own. The compute-unit limit is measured by a first simulation
+  (1.2×, capped). Program ids, signers and the fee payer stay static keys.
+- **The build's shape is checked:** version 0, no "other" or tip
+  instructions, only a unit-price compute-budget instruction, and no signer
+  but the user anywhere.
+- **The Jupiter instruction is decoded** (layouts from the program's
+  on-chain IDL). Exactly one is allowed, and it must be one of the four
+  exact-in swap variants. Its fields must say what the user asked: the input
+  amount, the quoted output, 50 bps slippage, a platform fee of 0, a
+  positive-slippage share of 0, and the user as transfer authority. The
+  guaranteed minimum shown and enforced is computed from the decoded route,
+  which closes finding 2's slippage-floor residual.
+- **All earlier checks still run on the exact bytes:** the program and
+  instruction allow-lists, CloseAccount paying the user, no stake accounts,
+  the priority-fee cap, and simulated balance changes that must honor the
+  decoded minimum.
+- **Tests.** `check-swapgate` (60 offline checks, on two recorded /build
+  answers) covers honest builds compiling to exactly what Jupiter described,
+  byte-exact signing, and the refusal of every tamper above. `check-solswap`
+  runs the gate on live mainnet routes by simulation, including a first-time
+  USDC holder and two tampered live routes.
+- **Found along the way:**
+  - The price-impact warning compared Jupiter's fraction (0.01 = 1%) with a
+    percentage, so it could only fire at 100% impact. It now converts.
+  - The public test wallet's mainnet Solana account has been reassigned to
+    another program (`9G4pPipv…`), so it can't pay fees. Any transaction from
+    it fails in simulation, and the wallet refuses to sign it.
+
 ### Residual risks, as of 2026-10-22
 
 1. **Web delivery trust.** Whoever controls Netlify, DNS or the VPS can still
    ship code to web users. Hardening those accounts, DNS and the server
    reduces this. It is closed only for users of the store-signed extension,
    once that is published.
-2. **Solana swaps.** Simulation runs on a single RPC, and the route's
-   on-chain slippage floor is not decoded (finding 2's residual).
+2. **Solana swaps.** Simulation runs on a single RPC. (The route's on-chain
+   slippage floor, finding 2's other residual, is decoded since 2026-10-25;
+   see "Swaps on Jupiter Swap V2".)
 3. **UTXO frontier.** A provider that lies consistently across many full
    scans can ratchet the cached frontier about 20 indices per scan (finding
    7's residual). Closing this needs multi-provider corroboration.

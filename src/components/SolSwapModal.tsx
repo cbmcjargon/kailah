@@ -101,7 +101,7 @@ export default function SolSwapModal({
     const seq = ++quoteSeqRef.current
     setQuoteLoading(true)
     const timer = setTimeout(() => {
-      getSwapQuote(chain, direction, parsedAmount)
+      getSwapQuote(chain, direction, parsedAmount, solKey.address)
         .then((q) => {
           if (aliveRef.current && quoteSeqRef.current === seq) {
             setQuote(q)

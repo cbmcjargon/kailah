@@ -50,7 +50,7 @@ Content Security Policy), so nothing else can be reached.
   - **TRON:** api.trongrid.io, nile.trongrid.io.
 - **Prices:** api.coinbase.com, api.exchange.coinbase.com, api.coingecko.com.
   These receive price requests only, with no addresses.
-- **Swaps:** lite-api.jup.ag (Jupiter) receives the amounts and your Solana
+- **Swaps:** api.jup.ag (Jupiter) receives the amounts and your Solana
   address, to build the swap you asked for.
 - **Sites you choose to open.** Buy and exchange pages, block explorers and
   test-coin faucets are third-party sites with their own privacy policies.

@@ -8,9 +8,10 @@
 // Live, read-only: on-chain USDC mint sanity on both clusters; a devnet
 // simulation of the wallet's exact ATA-create + transferChecked instructions
 // executed from a real USDC holder's account (sigVerify off — nothing is
-// signed or spent); the real prepareSwap() pipeline against mainnet including
-// its simulation gate; and an adversarial tamper test proving the gate
-// refuses a transaction that doesn't deliver what the quote promises.
+// signed or spent); the real prepareSwap() pipeline against mainnet on Jupiter
+// Swap V2 /build, including the wallet's own assembly and simulation gate;
+// and adversarial tamper tests proving the gate refuses a promise the route
+// doesn't make and a live route whose slippage was raised.
 // NOTHING here broadcasts to mainnet; no mainnet key material is used.
 
 import { NET_ISSUE, isNetworkIssue, installLiveGuard } from './_live.mjs'
@@ -228,83 +229,51 @@ try {
 }
 
 // --- 6. Swap quote (mainnet, read-only) -------------------------------------
+// Jupiter Swap V2 /build returns quote + instructions for a given taker. A
+// well-known active wallet is the taker; nothing is signed, and the keyless
+// limit is small, so this section makes as few builds as it can.
+const BINANCE_HOT = '9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM'
 let quote = null
 try {
-  quote = await getSwapQuote(MAINNET, 'sol-to-usdc', 100_000_000n)
+  quote = await getSwapQuote(MAINNET, 'sol-to-usdc', 100_000_000n, BINANCE_HOT)
   check(
-    'live Jupiter quote SOL→USDC is coherent',
-    quote.inAmount === 100_000_000n && quote.outAmount > 0n && quote.minOutAmount <= quote.outAmount,
+    'live Jupiter V2 build SOL→USDC is coherent',
+    quote.inAmount === 100_000_000n && quote.outAmount > 0n && quote.minOutAmount <= quote.outAmount && quote.taker === BINANCE_HOT,
     JSON.stringify({ out: String(quote.outAmount), min: String(quote.minOutAmount) }),
   )
   const solPrice = Number(quote.outAmount) / 1e6 / 0.1
   check(`implied SOL price sane ($${solPrice.toFixed(2)})`, solPrice > 1 && solPrice < 100_000)
 } catch (e) {
-  check('live Jupiter quote', false, e.message)
+  check('live Jupiter V2 build', false, e.message)
 }
 
 // --- 7. Real prepareSwap pipeline (mainnet, simulation only) ----------------
-// Uses a well-known active wallet as the owner. prepareSwap internally:
-// builds via Jupiter, decodes, checks fee payer + single signature, simulates,
-// and verifies the deltas. Returning at all means every gate passed.
-const BINANCE_HOT = '9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM'
+// prepareSwap checks the build's shape, resolves lookup tables from the
+// chain, assembles the transaction itself, simulates to size the compute
+// limit, decodes the Jupiter instruction, and simulates the final bytes.
+// Returning at all means every gate passed. (Signing byte-exactness on the
+// wallet's own compiled transaction is proven offline, in check-swapgate.)
 if (quote !== null) {
   try {
     const prepared = await prepareSwap(MAINNET, BINANCE_HOT, quote)
     check(
-      'prepareSwap gates pass on an honest swap (simulated deltas returned)',
-      prepared.simulatedUsdcDelta >= quote.minOutAmount && prepared.simulatedSolDelta < 0n,
+      'prepareSwap gates pass on an honest V2 swap (simulated deltas returned)',
+      prepared.simulatedUsdcDelta >= prepared.minOutAmount && prepared.simulatedSolDelta < 0n,
       JSON.stringify({
         usdc: String(prepared.simulatedUsdcDelta),
+        min: String(prepared.minOutAmount),
         sol: String(prepared.simulatedSolDelta),
       }),
     )
-    // Byte-exact signing: the signed message must equal the simulated message.
-    const throwaway = new Uint8Array(32).fill(0x37)
-    const addr = solLib.getAddress(throwaway)
-    const q2 = await getSwapQuote(MAINNET, 'sol-to-usdc', 100_000_000n)
-    try {
-      const p2 = await prepareSwap(MAINNET, addr, q2)
-      // unlikely (unfunded owner usually fails Jupiter's own simulation)…
-      const [, signed] = solLib.signTx(throwaway, p2.txBase64)
-      const a = base64.decode(p2.txBase64).slice(65)
-      const b = base64.decode(signed).slice(65)
-      check('signing leaves swap message bytes untouched', a.length === b.length && a.every((x, i) => x === b[i]))
-    } catch {
-      // …so prove byte-exactness on the raw build instead (no simulation gate).
-      const swRes = await fetch('https://lite-api.jup.ag/swap/v1/swap', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          quoteResponse: q2.raw,
-          userPublicKey: addr,
-          wrapAndUnwrapSol: true,
-        }),
-      })
-      const sw = await swRes.json()
-      if (!sw.swapTransaction) {
-        skip('signing byte-exactness', 'Jupiter refused to build for throwaway key')
-      } else {
-        const [, signed] = solLib.signTx(throwaway, sw.swapTransaction)
-        const a = base64.decode(sw.swapTransaction).slice(65)
-        const b = base64.decode(signed).slice(65)
-        const sig = base64.decode(signed).slice(1, 65)
-        check(
-          'signing leaves swap message bytes untouched + signature verifies',
-          a.length === b.length &&
-            a.every((x, i) => x === b[i]) &&
-            ed25519.verify(sig, b, ed25519.getPublicKey(throwaway)),
-        )
-      }
-    }
   } catch (e) {
     check('prepareSwap honest pipeline', false, e.message)
   }
 
   // Regression (found by a real user): a FIRST-TIME USDC holder has zero
   // slack in the cost bound — their swap also creates the token account, and
-  // the chain rounds the priority fee up by 1 lamport vs what the service
-  // reports. The gate must still pass an honest first-time swap. A validator
-  // identity account (funded, holds no token accounts) reproduces the state.
+  // the chain rounds the priority fee up by 1 lamport. The gate must still
+  // pass an honest first-time swap. A validator identity account (funded,
+  // holds no token accounts) reproduces the state.
   try {
     const votes = await withRetry(() => solRpc(MAINNET, 'getVoteAccounts', [{}]))
     let firstTimer = null
@@ -325,11 +294,11 @@ if (quote !== null) {
     if (firstTimer === null) {
       skip('first-time-holder swap regression', 'no funded no-ATA validator found')
     } else {
-      const qf = await getSwapQuote(MAINNET, 'sol-to-usdc', 100_000_000n)
+      const qf = await getSwapQuote(MAINNET, 'sol-to-usdc', 100_000_000n, firstTimer)
       const pf = await prepareSwap(MAINNET, firstTimer, qf)
       check(
         'first-time USDC holder passes the gate (rounding slack regression)',
-        pf.simulatedUsdcDelta >= qf.minOutAmount && pf.simulatedSolDelta < 0n,
+        pf.simulatedUsdcDelta >= pf.minOutAmount && pf.simulatedSolDelta < 0n,
         JSON.stringify({ sol: String(pf.simulatedSolDelta), usdc: String(pf.simulatedUsdcDelta) }),
       )
     }
@@ -337,35 +306,44 @@ if (quote !== null) {
     check('first-time-holder swap regression', false, e.message)
   }
 
-  // --- 8. ADVERSARIAL: the gate must refuse a wrong-promise transaction -----
-  // Same real transaction, but the quote object now promises double the
-  // output. The simulation can't deliver it, so prepareSwap must throw the
-  // refuse-to-sign error rather than returning.
+  // --- 8. ADVERSARIAL: the gate must refuse what the live build didn't say ---
+  // builtAt is refreshed so prepareSwap uses THESE (tampered) instructions
+  // rather than rebuilding a fresh, honest set.
   try {
-    const inflated = { ...quote, minOutAmount: quote.minOutAmount * 2n, outAmount: quote.outAmount * 2n }
+    const inflated = { ...quote, builtAt: Date.now(), outAmount: quote.outAmount * 2n, minOutAmount: quote.minOutAmount * 2n }
     await prepareSwap(MAINNET, BINANCE_HOT, inflated)
-    check('tampered quote is refused', false, 'prepareSwap accepted an undeliverable promise')
+    check('a quote promising more than its route is refused', false, 'prepareSwap accepted an undeliverable promise')
   } catch (e) {
-    check('tampered quote is refused (refuse-to-sign gate fires)', /does not match its quote/i.test(e.message), e.message)
+    check('a quote promising more than its route is refused (refuse-to-sign gate fires)', /does not match its quote/i.test(e.message), e.message)
+  }
+  try {
+    const build = structuredClone(quote.build)
+    const d = base64.decode(build.swapInstruction.data)
+    new DataView(d.buffer, d.byteOffset).setUint16(24, 300, true) // route_v2 slippage_bps → 3%
+    build.swapInstruction.data = base64.encode(d)
+    await prepareSwap(MAINNET, BINANCE_HOT, { ...quote, builtAt: Date.now(), build })
+    check('a live route with its slippage raised is refused', false, 'prepareSwap accepted it')
+  } catch (e) {
+    check('a live route with its slippage raised is refused', /does not match its quote/i.test(e.message), e.message)
   }
 } else {
-  skip('prepareSwap pipeline + tamper test', 'no quote available')
+  skip('prepareSwap pipeline + tamper tests', 'no build available')
 }
 
-// --- 9. USDC→SOL quote direction --------------------------------------------
+// --- 9. USDC→SOL build direction --------------------------------------------
 try {
-  const q = await getSwapQuote(MAINNET, 'usdc-to-sol', 10_000_000n)
+  const q = await getSwapQuote(MAINNET, 'usdc-to-sol', 10_000_000n, BINANCE_HOT)
   check(
-    'live Jupiter quote USDC→SOL is coherent',
+    'live Jupiter V2 build USDC→SOL is coherent',
     q.inAmount === 10_000_000n && q.outAmount > 0n && q.minOutAmount <= q.outAmount,
   )
 } catch (e) {
-  check('USDC→SOL quote', false, e.message)
+  check('USDC→SOL build', false, e.message)
 }
 
 // --- 10. Devnet swap correctly refused --------------------------------------
 try {
-  await getSwapQuote(DEVNET, 'sol-to-usdc', 1_000_000n)
+  await getSwapQuote(DEVNET, 'sol-to-usdc', 1_000_000n, BINANCE_HOT)
   check('swap refused on devnet', false, 'quote unexpectedly returned')
 } catch (e) {
   check('swap refused on devnet', /only available on solana mainnet/i.test(e.message), e.message)

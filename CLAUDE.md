@@ -1,6 +1,6 @@
 # Kailah Wallet — maintenance notes
 
-Self-custody browser wallet, v2.3.1: four engines — UTXO (BTC/DOGE/LTC),
+Self-custody browser wallet, v2.4.0: four engines — UTXO (BTC/DOGE/LTC),
 EVM (USDC+ETH on Base/Ethereum/Arbitrum + BNB on BSC, no explorer API there),
 Solana (SOL + SPL USDC + Jupiter swaps + native staking via hand-built
 stake-program instructions in solstake.ts), TRON (TRX + USDT-TRC20 + Stake 2.0 via tron.ts/tronstake.ts — the node builds raw txs and the wallet DECODES the protobuf bytes
@@ -31,7 +31,12 @@ not feature building, unless the user asks for something new.
   security headers from public/_headers, so redeploy it whenever the CSP hosts
   change). Site ID, host and access live in ops/infrastructure.md, which is
   private (see "Public repository" below): @ops/infrastructure.md
-- Tests: `npm run check:offline` (keys, txbuild, txv2, qrparse, vault, scanner, hw, pending, netprefs, failover —
+  The Netlify CLI rewrites .netlify/netlify.toml's `publish` to this Mac's
+  absolute path on every deploy. Restore `publish = "dist"` before
+  committing, and never `git add -A` right after a deploy without checking.
+  The public snapshot's leak scan refuses that path (it caught it once,
+  2026-10-25).
+- Tests: `npm run check:offline` (keys, txbuild, txv2, qrparse, vault, scanner, hw, pending, netprefs, failover, swapgate —
   no network; this is what CI runs on every push) and `npm run check:live`
   (account, evm, sol, solswap, solstake, tron — real networks; a provider being
   down or rate-limited prints SKIP, never FAIL). check-providers.mjs is run by
@@ -67,7 +72,8 @@ not feature building, unless the user asks for something new.
   Any Ledger protocol fix lands with an emulator case in scripts/check-hw.mjs.
 - CSP `connect-src` (public/_headers AND .netlify/netlify.toml — keep in sync)
   must list exactly the hosts called by networks.ts providers + prices.ts +
-  evm.ts (Base RPCs + blockscout).
+  evm.ts (Base RPCs + blockscout) + the sol.ts/tron.ts RPCs + solswap.ts
+  (Jupiter Swap V2, api.jup.ag). PRIVACY.md lists the same hosts.
 - The EVM engine (evm.ts, USDC on Base) is intentionally separate from the
   UTXO stack: account model, viem signing with pinned chainId, no address
   rotation. Never blind-retry a failed EVM broadcast — re-prepare (fresh
@@ -102,6 +108,9 @@ not feature building, unless the user asks for something new.
 - Test wallet for dev flows: the public BIP39 vector phrase (abandon ×11 +
   about), password irrelevant — NEVER for real funds; erase after testing. Its
   testnet4/mainnet accounts have real history useful for exercising the UI.
+  Its mainnet Solana account was reassigned to another program by someone, so
+  it can't pay fees: live swap tests simulate from a funded public wallet
+  (check-solswap's BINANCE_HOT) instead.
 
 ## Verification habits
 After changes: typecheck + relevant check scripts + drive the affected flow in

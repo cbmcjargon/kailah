@@ -1,6 +1,6 @@
 # Kailah Wallet
 
-**v2.3.1** — a self-custody wallet for Bitcoin, Dogecoin, Litecoin, USDC + ETH
+**v2.4.0** — a self-custody wallet for Bitcoin, Dogecoin, Litecoin, USDC + ETH
 (Base / Ethereum / Arbitrum), BNB, Solana (SOL + USDC, with in-wallet swaps
 and native staking), and TRON (TRX + USDT) that runs entirely in the browser. No servers, no accounts, no custody: keys are
 generated on your device, encrypted with your password, and never leave it.
@@ -117,12 +117,15 @@ because every change to wallet code gets a careful review.
   makes USDT sends cheap or free. Every stake action is decode-verified before
   signing like the rest of the TRON engine, and the 14-day unstaking wait is
   stated up front, not discovered later.
-- **Swap, verified before signed** — SOL ↔ USDC on mainnet through Jupiter,
-  Solana's standard DEX aggregator, keylessly. The aggregator returns a
-  pre-built transaction and the wallet never signs it blind: it decodes it
-  (single signature, our fee payer only), simulates it on-chain, and signs
-  only if the simulated balance changes honor the quote — otherwise it
-  refuses. The tamper case is part of the test suite.
+- **Swap, verified before signed** — SOL ↔ USDC on mainnet through Jupiter
+  Swap V2, Solana's standard DEX aggregator, keylessly. Jupiter returns the
+  route as instructions, and the wallet assembles the transaction itself:
+  lookup tables read from the chain, its own blockhash, a compute limit it
+  measures. It decodes Jupiter's swap instruction and refuses unless the
+  amount, slippage and fee fields say exactly what you asked, then simulates
+  the exact bytes and signs only if the balance changes honor the minimum
+  decoded from the route. check-swapgate tampers with every part of a
+  recorded build offline; check-solswap runs the gate on live mainnet routes.
 - **Stablecoins done honestly** — each network card shows your USDC and the
   ETH that pays fees, with per-network fee truth on the send form (Base and
   Arbitrum cost fractions of a cent; Ethereum mainnet can cost dollars when
@@ -302,8 +305,9 @@ Verification suites (run with `npx tsx scripts/<name>.mjs`):
 | check-solstake.mjs | hand-built stake-program instruction bytes, a full simulated create+delegate on mainnet (the runtime itself verifies the seed-derived address), and a REAL devnet stake→unstake→withdraw lifecycle when the faucet allows |
 | check-tron.mjs | Stake 2.0 contract decoding (live freeze bytes for both resources, hand-built vectors for vote/unfreeze/claim/withdraw, build-time refusal of an over-limit vote), independent address derivation (raw curve + keccak + hand-built base58check), protobuf decoder vs live node bytes on two networks, our-calldata verification for USDT, sign/recover round-trip, and a live negative broadcast the node rejects with SIGERROR — proving the signature wire format |
 | check-hw.mjs | hardware signing against scripts/ledger-emulator.mjs (device side of both Ledger protocols): framing, merkle/client commands, wallet policy, xpub import (LTC assembled from legacy replies), sends and RBF bumps byte-identical to the software path on BTC/testnet/LTC, a btc-signer-parsed PSBTv2 mock, device display = review screen, and every refusal (tampered digest, wrong key/index, bad DER, lying provider, other Ledger, rejected, locked, wrong app) |
-| check-solswap.mjs | independent ATA re-derivation, a REAL devnet USDC send, live Jupiter quotes, the full prepareSwap gate on mainnet (simulation only), and an adversarial tampered-quote test proving the refuse-to-sign path |
+| check-solswap.mjs | independent ATA re-derivation, a REAL devnet USDC send, live Jupiter Swap V2 builds in both directions, the full prepareSwap gate on mainnet (simulation only, including a first-time USDC holder), and adversarial tests on live routes: a quote promising more than its route, and a route whose slippage was raised, are both refused |
 | check-netprefs.mjs | networks-shown choice: encrypted and seed-bound, cleared by erase, practice mirroring, the funds/history classifier that never hides a funded or unreadable network, which engine chunks load for a choice (and that the static ids/labels match the engines), and source checks that every scan/poll loop filters hidden networks and every engine load is gated |
+| check-swapgate.mjs | the Jupiter Swap V2 gate, offline, on two recorded /build answers: honest builds compile to exactly the instructions Jupiter described and sign byte-exactly; any change to the decoded amount, quoted output, slippage, platform fee, positive-slippage share, variant or authority is refused, as are "other"/tip instructions, foreign signers, a second Jupiter instruction, Approve, a CloseAccount paying someone else, unlisted programs, stake accounts, lookup tables that disagree with the chain, and a simulation short of the decoded floor |
 | check-failover.mjs | rate limit vs outage in the provider failover: a provider that pushes back (a 429, or the bare network error a browser shows for a CORS-less 429) is paused and retried, a healthy backup covers the pause, timeouts get one retry, a dead provider fails over at once with a 60 s cooldown, BlockCypher's hourly limit is never retried, and a request never waits or retries past its limits |
 | check-providers.mjs | live API shapes + failover (spends BlockCypher budget — run sparingly) |
 
