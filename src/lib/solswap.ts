@@ -64,6 +64,16 @@ export const SWAP_FEE_BPS = 50
 /** The developer's fee wallet and its USDC token account (checked on-chain 2026-10-25). */
 export const SWAP_FEE_WALLET = 'BpmzmuZieAHqCm8s183T9c397K46YqsEQKbyyNo4Wo8b'
 export const SWAP_FEE_ACCOUNT = 'F5VXwGCmbct91xohG4CTqiXg25d23zYNQav1pB5eH2oF'
+
+/**
+ * The fee a wallet pays: none for the fee wallet itself. Its USDC account IS
+ * the fee account, so a fee would only move its own coins in a circle, and the
+ * fee check could not tell the swap's output from the fee (a swap from the fee
+ * wallet was refused that way, 2026-10-25).
+ */
+export function swapFeeBpsFor(chain: SolChainConfig, owner: string): number {
+  return solUsdcAta(chain, owner) === SWAP_FEE_ACCOUNT ? 0 : SWAP_FEE_BPS
+}
 /** A build older than this is rebuilt before preparing (its blockhash lives ~60 s). */
 const BUILD_MAX_AGE_MS = 30_000
 
@@ -108,6 +118,8 @@ export interface SwapQuote {
   /** worst case after slippage — what the route enforces on-chain */
   minOutAmount: bigint
   priceImpactPct: number
+  /** the fee rate this wallet pays (0 for the fee wallet itself) */
+  feeBps: number
   /** Kailah's fee in USDC units, estimated from the quote (the review shows the simulated one) */
   estimatedFee: bigint
   /** the address the instructions were built for */
@@ -147,8 +159,14 @@ async function jupFetch(url: string, init?: RequestInit): Promise<unknown> {
  * of which the user keeps `usdcToUser`. Buying SOL, it is 0.5% of the USDC
  * input. Jupiter rounds down (measured by simulation, 2026-10-25).
  */
-function expectedSwapFee(direction: SwapDirection, usdcIn: bigint, usdcToUser: bigint): bigint {
-  const bps = BigInt(SWAP_FEE_BPS)
+function expectedSwapFee(
+  direction: SwapDirection,
+  usdcIn: bigint,
+  usdcToUser: bigint,
+  feeBps: number,
+): bigint {
+  if (feeBps === 0) return 0n
+  const bps = BigInt(feeBps)
   if (direction === 'usdc-to-sol') return (usdcIn * bps) / 10_000n
   // gross = user + fee and fee = floor(gross × bps / 10000)
   const gross = (usdcToUser * 10_000n + (10_000n - bps) - 1n) / (10_000n - bps)
@@ -170,10 +188,11 @@ export async function getSwapQuote(
   if (amount <= 0n) throw new Error('Enter an amount to swap.')
   const inputMint = direction === 'sol-to-usdc' ? SOL_WRAPPED_MINT : chain.usdc.mint
   const outputMint = direction === 'sol-to-usdc' ? chain.usdc.mint : SOL_WRAPPED_MINT
+  const feeBps = swapFeeBpsFor(chain, taker)
   const b = (await jupFetch(
     `${JUP_BASE}/build?inputMint=${inputMint}&outputMint=${outputMint}` +
       `&amount=${amount}&taker=${taker}&slippageBps=${SWAP_SLIPPAGE_BPS}` +
-      `&platformFeeBps=${SWAP_FEE_BPS}&feeAccount=${SWAP_FEE_ACCOUNT}`,
+      (feeBps > 0 ? `&platformFeeBps=${feeBps}&feeAccount=${SWAP_FEE_ACCOUNT}` : ''),
   )) as JupBuildResponse
   if (!b.inAmount || !b.outAmount || !b.otherAmountThreshold || !b.swapInstruction) {
     throw new Error('The swap service returned an incomplete quote — try again.')
@@ -189,7 +208,8 @@ export async function getSwapQuote(
     minOutAmount: BigInt(b.otherAmountThreshold),
     // Jupiter reports a fraction ("0.001" = 0.1%); the form shows percent.
     priceImpactPct: Number(b.priceImpactPct ?? '0') * 100,
-    estimatedFee: expectedSwapFee(direction, amount, outAmount),
+    feeBps,
+    estimatedFee: expectedSwapFee(direction, amount, outAmount, feeBps),
     taker,
     builtAt: Date.now(),
     build: b,
@@ -213,6 +233,8 @@ export interface PreparedSwap {
   simulatedUsdcDelta: bigint
   /** Kailah's fee in USDC units, as the simulation paid it into the fee account */
   swapFee: bigint
+  /** the fee rate charged (0 when the fee wallet swaps for itself) */
+  swapFeeBps: number
   /** the exact bytes that were simulated; signing does not alter them */
   txBase64: string
 }
@@ -618,13 +640,63 @@ function assertSwapArgs(jupiter: JupiterSwapArgs, owner: string, q: SwapQuote): 
     jupiter.inAmount !== q.inAmount ||
     jupiter.quotedOutAmount !== q.outAmount ||
     jupiter.slippageBps !== SWAP_SLIPPAGE_BPS ||
-    // exactly Kailah's fee, into Kailah's fee account: never more, never elsewhere
-    jupiter.platformFeeBps !== SWAP_FEE_BPS ||
-    jupiter.feeAccount !== SWAP_FEE_ACCOUNT ||
+    // exactly this wallet's fee, into Kailah's fee account: never more, never elsewhere
+    jupiter.platformFeeBps !== q.feeBps ||
+    (q.feeBps > 0 && jupiter.feeAccount !== SWAP_FEE_ACCOUNT) ||
     jupiter.positiveSlippageBps !== 0
   ) {
     throw new Error(MISMATCH)
   }
+}
+
+const ATA_IX_CREATE = 0
+const ATA_IX_CREATE_IDEMPOTENT = 1
+
+/**
+ * A route through a third token (SOL → USD1 → USDC, say) has Jupiter create
+ * the owner's account for that token in setup and never close it, stranding
+ * its rent (~0.002 SOL) in an account the wallet doesn't show — and tripping
+ * the SOL-cost bound, which refused such routes. For each one that doesn't
+ * exist yet, a CloseAccount after the swap (which has emptied it) returns the
+ * rent to the owner. Accounts that already exist are the owner's and stay.
+ */
+async function intermediateCloses(chain: SolChainConfig, owner: string, setup: TxIx[]): Promise<TxIx[]> {
+  const created: { ata: string; tokenProgram: string }[] = []
+  for (const ix of setup) {
+    if (ix.program !== solLib.ASSOCIATED_TOKEN_PROGRAM) continue
+    const kind = ix.data.length === 0 ? ATA_IX_CREATE : ix.data.length === 1 ? ix.data[0] : -1
+    if (kind !== ATA_IX_CREATE && kind !== ATA_IX_CREATE_IDEMPOTENT) continue
+    // payer, account, wallet, mint, system program, token program
+    const [, ata, wallet, mint, , tokenProgram] = ix.keys.map((k) => k.address)
+    if (wallet !== owner || mint === SOL_WRAPPED_MINT || mint === chain.usdc.mint) continue
+    if (
+      ata === undefined ||
+      mint === undefined ||
+      tokenProgram === undefined ||
+      !SWAP_TOKEN_PROGRAMS.includes(tokenProgram) ||
+      solLib.tokenAddress({ mint, owner, tokenProgram }) !== ata
+    ) {
+      throw new Error(MISMATCH)
+    }
+    if (!created.some((c) => c.ata === ata)) created.push({ ata, tokenProgram })
+  }
+  if (created.length === 0) return []
+  const res = await solRpc<{ value?: unknown[] }>(chain, 'getMultipleAccounts', [
+    created.map((c) => c.ata),
+    { encoding: 'base64', dataSlice: { offset: 0, length: 0 } },
+  ])
+  if (!Array.isArray(res.value) || res.value.length !== created.length) throw new Error(FRIENDLY_NET)
+  return created
+    .filter((_, i) => res.value![i] === null)
+    .map(({ ata, tokenProgram }) => ({
+      program: tokenProgram,
+      keys: [
+        { address: ata, sign: false, write: true },
+        { address: owner, sign: false, write: true }, // the rent comes back here
+        { address: owner, sign: true, write: false },
+      ],
+      data: new Uint8Array([TOKEN_IX_CLOSE]),
+    }))
 }
 
 /** Simulate (sigVerify off); a failing simulation stops the swap before signing. */
@@ -660,6 +732,9 @@ export async function prepareSwap(
   if (!chain.mainnet) throw new Error('Swapping is only available on Solana mainnet.')
   await assertNoSolInFlight(chain)
   if (quote.taker !== owner) throw new Error(MISMATCH)
+  // The rate comes from the owner, never from the quote object alone.
+  const feeBps = swapFeeBpsFor(chain, owner)
+  if (quote.feeBps !== feeBps) throw new Error(MISMATCH)
   // The route was priced when it was built; rebuild one that has gone stale.
   const q =
     Date.now() - quote.builtAt > BUILD_MAX_AGE_MS
@@ -680,9 +755,10 @@ export async function prepareSwap(
   ) {
     throw new Error(MISMATCH)
   }
+  const setupIxs = (b.setupInstructions ?? []).map(toTxIx)
   const swapIx = toTxIx(b.swapInstruction)
   const body = [
-    ...(b.setupInstructions ?? []).map(toTxIx),
+    ...setupIxs,
     swapIx,
     ...(b.cleanupInstruction ? [toTxIx(b.cleanupInstruction)] : []),
   ]
@@ -693,6 +769,7 @@ export async function prepareSwap(
   // (step 5 checks the same fields again on the compiled bytes).
   if (swapIx.program !== JUPITER_V6_PROGRAM) throw new Error(MISMATCH)
   assertSwapArgs(decodeJupiterSwap(swapIx.data, swapIx.keys.map((k) => k.address)), owner, q)
+  body.push(...(await intermediateCloses(chain, owner, setupIxs)))
 
   // 2. Lookup tables come from the chain; Jupiter's list must agree with it.
   const listed = b.addressesByLookupTableAddress ?? {}
@@ -764,10 +841,11 @@ export async function prepareSwap(
       address,
       { encoding: 'base64' },
     ]).then((r) => (r.value === null ? null : tokenAmountFromBase64(r.value.data)))
+  const charged = feeBps > 0
   const [solBefore, usdcBefore, feeBefore, ataRentRes] = await Promise.all([
     getSolBalance(chain, owner),
     tokenBalance(ata),
-    tokenBalance(SWAP_FEE_ACCOUNT),
+    charged ? tokenBalance(SWAP_FEE_ACCOUNT) : Promise.resolve(0n),
     solRpc<number>(chain, 'getMinimumBalanceForRentExemption', [165]).catch(() => null),
   ])
   const ataMissing = usdcBefore === null
@@ -777,22 +855,24 @@ export async function prepareSwap(
     throw new Error('Swaps are unavailable right now. Your coins are safe; nothing was signed.')
   }
 
-  const sim = await simulateSwap(chain, txBase64, [owner, ata, SWAP_FEE_ACCOUNT])
+  const sim = await simulateSwap(chain, txBase64, charged ? [owner, ata, SWAP_FEE_ACCOUNT] : [owner, ata])
   const solAfter = BigInt(sim.value.accounts?.[0]?.lamports ?? 0)
   const usdcAfter = tokenAmountFrom(sim.value.accounts?.[1])
   const solDelta = solAfter - solBefore
   const usdcDelta = usdcAfter - (usdcBefore ?? 0n)
-  const swapFee = tokenAmountFrom(sim.value.accounts?.[2]) - feeBefore
+  const swapFee = charged ? tokenAmountFrom(sim.value.accounts?.[2]) - feeBefore : 0n
 
-  // 7. Kailah's fee must be exactly 0.5% (±1 unit for rounding), into its
+  // 7. Kailah's fee must be exactly the rate (±1 unit for rounding), into its
   //    account: of the gross USDC output when selling SOL, of the USDC input
-  //    when buying.
-  const expectedFee =
-    q.direction === 'sol-to-usdc'
-      ? ((usdcDelta + swapFee) * BigInt(SWAP_FEE_BPS)) / 10_000n
-      : (q.inAmount * BigInt(SWAP_FEE_BPS)) / 10_000n
-  if (swapFee <= 0n || swapFee < expectedFee - 1n || swapFee > expectedFee + 1n) {
-    throw new Error(MISMATCH)
+  //    when buying. The fee wallet itself pays none (feeBps 0).
+  if (charged) {
+    const expectedFee =
+      q.direction === 'sol-to-usdc'
+        ? ((usdcDelta + swapFee) * BigInt(feeBps)) / 10_000n
+        : (q.inAmount * BigInt(feeBps)) / 10_000n
+    if (swapFee <= 0n || swapFee < expectedFee - 1n || swapFee > expectedFee + 1n) {
+      throw new Error(MISMATCH)
+    }
   }
 
   // 8. The simulated outcome must honor the decoded floor.
@@ -819,6 +899,7 @@ export async function prepareSwap(
     simulatedSolDelta: solDelta,
     simulatedUsdcDelta: usdcDelta,
     swapFee,
+    swapFeeBps: feeBps,
     txBase64,
   }
 }

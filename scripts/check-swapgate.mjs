@@ -20,7 +20,11 @@
 //   D. lookup tables come from the chain, and Jupiter's list must agree;
 //   E. the simulation must honor the decoded floor and pay the fee account
 //      exactly 0.5% (not less, not more), and a failing simulation stops the
-//      swap; a stale build is rebuilt; a 429 says "busy".
+//      swap; a stale build is rebuilt; a 429 says "busy";
+//   G. the fee wallet itself swaps with no fee (its USDC account is the fee
+//      account), and nothing else can claim that exemption;
+//   H. a route through a third token closes the token account it opens, so
+//      its rent comes back instead of tripping the SOL-cost bound.
 const store = new Map()
 globalThis.localStorage = {
   getItem: (k) => (store.has(k) ? store.get(k) : null),
@@ -34,7 +38,7 @@ const { base58, base64 } = await import('@scure/base')
 const { unlockSecureStore } = await import('../src/lib/securestore.ts')
 const { SOL_CHAINS, solUsdcAta } = await import('../src/lib/sol.ts')
 const { stakeAccountAddress } = await import('../src/lib/solstake.ts')
-const { getSwapQuote, prepareSwap, SWAP_SLIPPAGE_BPS, SWAP_FEE_BPS, SWAP_FEE_ACCOUNT, SWAP_FEE_WALLET } = await import('../src/lib/solswap.ts')
+const { getSwapQuote, prepareSwap, swapFeeBpsFor, SWAP_SLIPPAGE_BPS, SWAP_FEE_BPS, SWAP_FEE_ACCOUNT, SWAP_FEE_WALLET } = await import('../src/lib/solswap.ts')
 
 let failures = 0
 const check = (name, cond, detail = '') => {
@@ -80,6 +84,13 @@ function resetWorld(direction, fixtures = FIX) {
     shortfall: 0n,
     feeSkew: 0n,
     feeAccountMissing: false,
+    // the fee the fake chain pays out (0 when the fee wallet swaps for itself)
+    feeBps: SWAP_FEE_BPS,
+    jupUrls: [],
+    // token accounts that already exist on the fake chain, beyond our USDC one
+    existing: new Set(),
+    // the swap leaves a remainder in an intermediate account, so closing it fails
+    dust: false,
   }
 }
 const tokenAccountB64 = (amount) => {
@@ -92,6 +103,7 @@ globalThis.fetch = async (url, init) => {
   const u = String(url)
   if (u.startsWith('https://api.jup.ag/')) {
     world.builds++
+    world.jupUrls.push(u)
     if (world.jupStatus === 429) return new Response('{"error":"Rate limit exceeded"}', { status: 429 })
     return new Response(JSON.stringify(world.build), { status: 200 })
   }
@@ -99,7 +111,11 @@ globalThis.fetch = async (url, init) => {
   const q = world.build
   switch (method) {
     case 'getMultipleAccounts':
-      return rpcOk({ value: params[0].map((a) => (world.tables[a] ? { data: [world.tables[a], 'base64'] } : null)) })
+      return rpcOk({
+        value: params[0].map((a) =>
+          world.tables[a] ? { data: [world.tables[a], 'base64'] } : world.existing.has(a) ? { data: ['', 'base64'], lamports: 2_039_280 } : null,
+        ),
+      })
     case 'getLatestBlockhash':
       return rpcOk({ value: { blockhash: BLOCKHASH, lastValidBlockHeight: 1 } })
     case 'getBalance':
@@ -114,14 +130,19 @@ globalThis.fetch = async (url, init) => {
     case 'simulateTransaction': {
       world.simulations.push(params[0])
       if (world.simErr) return rpcOk({ value: { err: world.simErr, logs: ['Program log: slippage exceeded'] } })
+      const rent = strandedRent(params[0])
+      if (rent === null) return rpcOk({ value: { err: { InstructionError: [9, { Custom: 11 }] }, logs: ['Program log: Error: Non-native account can only be closed if its balance is zero'] } })
       const wanted = params[1].accounts?.addresses
       if (!wanted) return rpcOk({ value: { err: null, logs: [], unitsConsumed: UNITS_USED } })
       const inA = BigInt(q.inAmount), out = BigInt(q.outAmount) - world.shortfall
       // Jupiter's measured arithmetic: selling SOL, the fee is 0.5% of the
       // gross USDC output; buying SOL, 0.5% of the USDC input.
-      const bps = BigInt(SWAP_FEE_BPS)
+      const bps = BigInt(world.feeBps)
       let userUsdc, fee
-      if (world.direction === 'sol-to-usdc') {
+      if (bps === 0n) {
+        fee = 0n
+        userUsdc = world.direction === 'sol-to-usdc' ? out : -inA
+      } else if (world.direction === 'sol-to-usdc') {
         const gross = (out * 10_000n + 9_999n - bps) / (10_000n - bps)
         fee = (gross * bps) / 10_000n
         userUsdc = gross - fee
@@ -130,8 +151,10 @@ globalThis.fetch = async (url, init) => {
         userUsdc = -inA
       }
       world.fee = fee + world.feeSkew
-      const solAfter = world.direction === 'sol-to-usdc' ? SOL_BEFORE - inA - 6_000n : SOL_BEFORE + out - 6_000n
-      const usdcAfter = USDC_BEFORE + userUsdc
+      const solAfter = (world.direction === 'sol-to-usdc' ? SOL_BEFORE - inA - 6_000n : SOL_BEFORE + out - 6_000n) - rent
+      // the fee wallet's own USDC account IS the fee account
+      const ataBefore = wanted[1] === SWAP_FEE_ACCOUNT ? FEE_BEFORE : USDC_BEFORE
+      const usdcAfter = ataBefore + userUsdc + (wanted[1] === SWAP_FEE_ACCOUNT ? world.fee : 0n)
       return rpcOk({
         value: {
           err: null,
@@ -140,7 +163,7 @@ globalThis.fetch = async (url, init) => {
           accounts: [
             { lamports: Number(solAfter) },
             { lamports: 2_039_280, data: { parsed: { info: { tokenAmount: { amount: usdcAfter.toString() } } } } },
-            { lamports: 2_039_280, data: { parsed: { info: { tokenAmount: { amount: (FEE_BEFORE + world.fee).toString() } } } } },
+            ...(wanted.length > 2 ? [{ lamports: 2_039_280, data: { parsed: { info: { tokenAmount: { amount: (FEE_BEFORE + world.fee).toString() } } } } }] : []),
           ],
         },
       })
@@ -197,6 +220,21 @@ function resolveCompiled(txB64, tables) {
   }
 }
 const b58 = (u8) => base58.encode(u8)
+
+// The chain's rent: an intermediate token account this transaction opens and
+// leaves open costs us its rent; one it also closes costs nothing, unless the
+// swap left a remainder in it (world.dust) and the close fails (null).
+const ATA_PROGRAM = 'ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL'
+const BASE_MINTS = ['So11111111111111111111111111111111111111112', MAINNET.usdc.mint]
+function strandedRent(txB64) {
+  const ixs = resolveCompiled(txB64, world.tables).instructions
+  const opened = ixs
+    .filter((i) => i.program === ATA_PROGRAM && !BASE_MINTS.includes(i.keys[3]) && !world.existing.has(i.keys[1]))
+    .map((i) => i.keys[1])
+  const closed = new Set(ixs.filter((i) => i.program !== ATA_PROGRAM && i.data.length === 1 && i.data[0] === 9).map((i) => i.keys[0]))
+  if (world.dust && opened.some((a) => closed.has(a))) return null
+  return BigInt(opened.filter((a) => !closed.has(a)).length) * 2_039_280n
+}
 const hex = (u8) => Buffer.from(u8).toString('hex')
 
 console.log('--- A. honest builds pass, and compile to what Jupiter described ---')
@@ -397,6 +435,104 @@ for (const direction of ['sol-to-usdc', 'usdc-to-sol']) {
   const quote = await quoteFor('sol-to-usdc')
   const est = quote.estimatedFee
   check('F the form\'s fee estimate is 0.5% of the gross output', est > 0n && est * 10_000n / (quote.outAmount + est) >= 49n && est * 10_000n / (quote.outAmount + est) <= 50n, `${est}`)
+}
+
+console.log('--- G. the fee wallet swaps for itself ---')
+{
+  // Its USDC account IS the fee account, so it pays no fee (a swap from it
+  // used to be refused: the fee check saw the whole output land in the fee
+  // account). The fee-free recordings, retargeted at the fee wallet: its own
+  // address and token accounts take the recorded taker's.
+  const feeWalletAta = (mint, tokenProgram) => solLib.tokenAddress({ mint, owner: SWAP_FEE_WALLET, tokenProgram })
+  const asFeeWallet = (w) => {
+    const b = w.build
+    const moved = new Map([[solUsdcAta(MAINNET, OWNER), SWAP_FEE_ACCOUNT]])
+    for (const i of b.setupInstructions) {
+      if (i.programId === ATA_PROGRAM && i.accounts[2].pubkey === OWNER) moved.set(i.accounts[1].pubkey, feeWalletAta(i.accounts[3].pubkey, i.accounts[5].pubkey))
+    }
+    for (const i of [...b.computeBudgetInstructions, ...b.setupInstructions, b.swapInstruction, ...(b.cleanupInstruction ? [b.cleanupInstruction] : [])]) {
+      for (const a of i.accounts) a.pubkey = a.pubkey === OWNER ? SWAP_FEE_WALLET : moved.get(a.pubkey) ?? a.pubkey
+    }
+    w.feeBps = 0
+  }
+  check('G the fee wallet pays no fee; every other wallet pays 0.5%', swapFeeBpsFor(MAINNET, SWAP_FEE_WALLET) === 0 && swapFeeBpsFor(MAINNET, OWNER) === SWAP_FEE_BPS)
+  for (const direction of ['sol-to-usdc', 'usdc-to-sol']) {
+    const r = await run(direction, asFeeWallet, SWAP_FEE_WALLET, NOFEE)
+    check(`G ${direction}: the fee wallet's swap passes, with no fee`, r.err === null && r.prepared?.swapFee === 0n && r.prepared?.swapFeeBps === 0, r.err?.message?.slice(0, 60))
+    if (direction === 'sol-to-usdc') {
+      // this recorded route runs through a Token-2022 stablecoin (2b1kV6…)
+      const t22 = NOFEE[direction].build.setupInstructions.find((i) => i.programId === ATA_PROGRAM && i.accounts[5].pubkey === solLib.TOKEN_PROGRAM2022)
+      const last = r.prepared && resolveCompiled(r.prepared.txBase64, NOFEE[direction].lookupTables).instructions.at(-1)
+      check(
+        'G sol-to-usdc: its recorded route through a Token-2022 token closes that account at the end',
+        t22 !== undefined && last?.program === solLib.TOKEN_PROGRAM2022 && hex(last.data) === '09' &&
+          last.keys.join() === [feeWalletAta(t22.accounts[3].pubkey, solLib.TOKEN_PROGRAM2022), SWAP_FEE_WALLET, SWAP_FEE_WALLET].join(),
+      )
+    }
+    check(`G ${direction}: its build request asks Jupiter for no fee`, world.jupUrls.length > 0 && world.jupUrls.every((u) => !u.includes('platformFeeBps') && !u.includes('feeAccount')))
+    check(`G ${direction}: the review shows the full output as received`, r.prepared !== null && (direction === 'sol-to-usdc' ? r.prepared.simulatedUsdcDelta === BigInt(NOFEE[direction].build.outAmount) : r.prepared.simulatedUsdcDelta === -BigInt(NOFEE[direction].build.inAmount)))
+    const charged = await run(direction, (w) => { asFeeWallet(w); w.feeBps = SWAP_FEE_BPS }, SWAP_FEE_WALLET, FIX)
+    check(`G ${direction}: a build that charges the fee wallet a fee anyway is refused`, refused(charged), charged.err?.message?.slice(0, 50) ?? 'accepted!')
+  }
+  resetWorld('sol-to-usdc')
+  await quoteFor('sol-to-usdc')
+  check('G a normal wallet\'s build request asks for exactly 0.5% into the fee account', world.jupUrls.at(-1).includes(`platformFeeBps=${SWAP_FEE_BPS}`) && world.jupUrls.at(-1).includes(`feeAccount=${SWAP_FEE_ACCOUNT}`))
+  resetWorld('sol-to-usdc')
+  const q = await quoteFor('sol-to-usdc')
+  const e = await rejects(() => prepareSwap(MAINNET, OWNER, { ...q, feeBps: 0 }))
+  check('G a quote object claiming "no fee" for a normal wallet is refused (the rate comes from the owner)', /does not match its quote/.test(e?.message ?? ''))
+}
+
+console.log('--- H. a route through a third token closes the account it opens ---')
+{
+  const USD1 = 'USD1ttGY1N17NEEHLmELoaybftRBUSErhqYiQzvEmuB'
+  const ataOf = (owner, mint, tokenProgram = solLib.TOKEN_PROGRAM) => solLib.tokenAddress({ mint, owner, tokenProgram })
+  // Jupiter's createATA (idempotent): payer, account, wallet, mint, system, token program
+  const openAta = (wallet, mint, tokenProgram = solLib.TOKEN_PROGRAM, account = ataOf(wallet, mint, tokenProgram)) =>
+    ix(ATA_PROGRAM, [
+      { pubkey: OWNER, isSigner: true, isWritable: true },
+      { pubkey: account, isSigner: false, isWritable: true },
+      { pubkey: wallet, isSigner: false, isWritable: false },
+      { pubkey: mint, isSigner: false, isWritable: false },
+      { pubkey: '11111111111111111111111111111111', isSigner: false, isWritable: false },
+      { pubkey: tokenProgram, isSigner: false, isWritable: false },
+    ], [1])
+  const via = (...args) => (w) => { w.build.setupInstructions.push(openAta(...args)) }
+  const isCloseOf = (i, account, program = solLib.TOKEN_PROGRAM) =>
+    i.program === program && hex(i.data) === '09' && i.keys.join() === [account, OWNER, OWNER].join()
+  const usd1 = ataOf(OWNER, USD1)
+  for (const direction of ['sol-to-usdc', 'usdc-to-sol']) {
+    const plain = await run(direction)
+    const r = await run(direction, via(OWNER, USD1))
+    check(`H ${direction}: a route that opens a USD1 account for us passes`, r.err === null, r.err?.message?.slice(0, 60))
+    if (!r.prepared) continue
+    const tx = resolveCompiled(r.prepared.txBase64, FIX[direction].lookupTables)
+    check(`H ${direction}: the last instruction closes that account, rent back to us`, isCloseOf(tx.instructions.at(-1), usd1))
+    check(`H ${direction}: the units were measured with the close in place`, isCloseOf(resolveCompiled(world.simulations[0], world.tables).instructions.at(-1), usd1))
+    check(`H ${direction}: the rent is not part of the swap's SOL cost`, r.prepared.simulatedSolDelta === plain.prepared?.simulatedSolDelta, `${r.prepared.simulatedSolDelta} vs ${plain.prepared?.simulatedSolDelta}`)
+  }
+  {
+    const r = await run('sol-to-usdc', (w) => { via(OWNER, USD1)(w); w.existing.add(usd1) })
+    const tx = r.prepared && resolveCompiled(r.prepared.txBase64, FIX['sol-to-usdc'].lookupTables)
+    check('H a USD1 account we already have is left open (no close added)', r.err === null && tx !== null && !tx.instructions.some((i) => i.keys[0] === usd1 && hex(i.data) === '09'), r.err?.message?.slice(0, 60))
+    const t22 = ataOf(OWNER, USD1, solLib.TOKEN_PROGRAM2022)
+    const r2 = await run('sol-to-usdc', via(OWNER, USD1, solLib.TOKEN_PROGRAM2022))
+    const tx2 = r2.prepared && resolveCompiled(r2.prepared.txBase64, FIX['sol-to-usdc'].lookupTables)
+    check('H a Token-2022 intermediate is closed by the Token-2022 program', r2.err === null && tx2 !== null && isCloseOf(tx2.instructions.at(-1), t22, solLib.TOKEN_PROGRAM2022), r2.err?.message?.slice(0, 60))
+    const r3 = await run('sol-to-usdc', (w) => { via(OWNER, USD1)(w); w.dust = true })
+    check('H a close that fails (the swap left a remainder) stops the swap before signing', /fails in simulation/.test(r3.err?.message ?? ''), r3.err?.message?.slice(0, 60))
+  }
+  for (const [label, mutate] of [
+    ['an intermediate account that is not our derived address', via(OWNER, USD1, solLib.TOKEN_PROGRAM, OTHER)],
+    ['an intermediate account under an unknown token program', via(OWNER, USD1, OTHER)],
+  ]) {
+    const r = await run('sol-to-usdc', mutate)
+    check(`H ${label} → refused before anything is simulated`, refused(r) && world.simulations.length === 0, r.err?.message?.slice(0, 50) ?? 'accepted!')
+  }
+  for (const direction of ['sol-to-usdc', 'usdc-to-sol']) {
+    const r = await run(direction, via(OTHER, USD1))
+    check(`H ${direction}: paying rent for SOMEONE ELSE's token account → refused (SOL-cost bound)`, refused(r) && world.simulations.length === 2, r.err?.message?.slice(0, 50) ?? 'accepted!')
+  }
 }
 
 console.log(failures === 0 ? '\nAll swap-gate checks passed.' : `\n${failures} CHECK(S) FAILED.`)

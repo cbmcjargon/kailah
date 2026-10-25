@@ -31,7 +31,7 @@ import {
   solRpc,
   solUsdcAta,
 } from '../src/lib/sol.ts'
-import { getSwapQuote, prepareSwap, SWAP_FEE_ACCOUNT } from '../src/lib/solswap.ts'
+import { getSwapQuote, prepareSwap, SWAP_FEE_ACCOUNT, SWAP_FEE_WALLET } from '../src/lib/solswap.ts'
 
 const VECTOR_MNEMONIC =
   'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about'
@@ -344,6 +344,70 @@ if (quote !== null) {
   }
 } else {
   skip('prepareSwap pipeline + tamper tests', 'no build available')
+}
+
+// --- 8b. The fee wallet swaps for itself, with no fee (simulation only) ------
+// Its USDC account IS the fee account; a swap from it used to be refused.
+try {
+  const bal = await solRpc(MAINNET, 'getBalance', [SWAP_FEE_WALLET, {}]).then((r) => BigInt(r.value))
+  if (bal < 20_000_000n) {
+    skip('fee wallet swaps without a fee', 'fee wallet holds under 0.02 SOL')
+  } else {
+    const qf = await getSwapQuote(MAINNET, 'sol-to-usdc', 10_000_000n, SWAP_FEE_WALLET)
+    const pf = await prepareSwap(MAINNET, SWAP_FEE_WALLET, qf)
+    check(
+      'the fee wallet swaps for itself with no fee (gate passes, full output)',
+      qf.feeBps === 0 && pf.swapFee === 0n && pf.simulatedUsdcDelta >= pf.minOutAmount,
+      JSON.stringify({ fee: String(pf.swapFee), usdc: String(pf.simulatedUsdcDelta), min: String(pf.minOutAmount) }),
+    )
+  }
+} catch (e) {
+  check('fee wallet swaps without a fee', false, e.message)
+}
+
+// --- 8c. A route through a third token (simulation only) --------------------
+// Some routes run SOL → USD1 → USDC, and Jupiter opens the taker's USD1 account
+// without closing it; that rent tripped the SOL-cost bound and the swap was
+// refused. The wallet now closes such an account in the same transaction.
+// Only some builds take such a route, so this tries a few (spaced for the
+// keyless limit). The fee wallet holds no intermediate accounts, so a close is
+// actually needed; BINANCE_HOT stands in if it runs low.
+{
+  const ATA_PROGRAM = 'ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL'
+  const SOL_MINT = 'So11111111111111111111111111111111111111112'
+  let taker = BINANCE_HOT
+  try {
+    const bal = await solRpc(MAINNET, 'getBalance', [SWAP_FEE_WALLET, {}]).then((r) => BigInt(r.value))
+    if (bal >= 20_000_000n) taker = SWAP_FEE_WALLET
+  } catch {}
+  let found = null
+  let lastErr = null
+  for (let i = 0; i < 6 && found === null; i++) {
+    await sleep(7000)
+    try {
+      const q = await getSwapQuote(MAINNET, 'sol-to-usdc', 10_000_000n, taker)
+      const third = (q.build.setupInstructions ?? []).find(
+        (ix) => ix.programId === ATA_PROGRAM && ![SOL_MINT, MAINNET.usdc.mint].includes(ix.accounts[3]?.pubkey),
+      )
+      if (third) found = { q, mint: third.accounts[3].pubkey }
+    } catch (e) {
+      lastErr = e
+    }
+  }
+  if (found === null) {
+    skip('a route through a third token passes the gate', lastErr ? `no build: ${lastErr.message.slice(0, 60)}` : 'no such route in 6 builds')
+  } else {
+    try {
+      const p = await prepareSwap(MAINNET, taker, found.q)
+      check(
+        `a route through a third token (${found.mint.slice(0, 6)}…) passes the gate, its rent returned`,
+        p.simulatedUsdcDelta >= p.minOutAmount && -p.simulatedSolDelta <= found.q.inAmount + p.feeLamports + 1_000n,
+        JSON.stringify({ sol: String(p.simulatedSolDelta), fee: String(p.feeLamports) }),
+      )
+    } catch (e) {
+      check('a route through a third token passes the gate', false, e.message)
+    }
+  }
 }
 
 // --- 9. USDC→SOL build direction --------------------------------------------

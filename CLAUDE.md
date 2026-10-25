@@ -1,6 +1,6 @@
 # Kailah Wallet — maintenance notes
 
-Self-custody browser wallet, v2.5.0: four engines — UTXO (BTC/DOGE/LTC),
+Self-custody browser wallet, v2.5.1: four engines — UTXO (BTC/DOGE/LTC),
 EVM (USDC+ETH on Base/Ethereum/Arbitrum + BNB on BSC, no explorer API there),
 Solana (SOL + SPL USDC + Jupiter swaps + native staking via hand-built
 stake-program instructions in solstake.ts), TRON (TRX + USDT-TRC20 + Stake 2.0 via tron.ts/tronstake.ts — the node builds raw txs and the wallet DECODES the protobuf bytes
@@ -81,7 +81,11 @@ not feature building, unless the user asks for something new.
 - Swaps carry a 0.5% fee (SWAP_FEE_BPS) into SWAP_FEE_ACCOUNT (solswap.ts),
   disclosed on the form, the review screen, README, PRIVACY.md and the store
   description. Changing the rate or the account is a deliberate edit to all
-  of those plus the check-swapgate expectations, never a side effect.
+  of those plus the check-swapgate expectations, never a side effect. The
+  fee wallet itself pays none (swapFeeBpsFor): its USDC account IS the fee
+  account. Routes through a third token get a CloseAccount appended for the
+  intermediate token account Jupiter opens (intermediateCloses); without it
+  the stranded rent trips the SOL-cost bound and the swap is refused.
 - All amounts are bigint smallest-units everywhere. No floats in money math.
 - Secrets (mnemonic, private keys) exist only in memory; never log/store them.
   Private keys are zeroed on lock/erase; erase must clear every kailah.* key.
