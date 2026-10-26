@@ -1,6 +1,6 @@
 # Privacy policy
 
-Effective 2026-10-27. Applies to Kailah Wallet: the web app at
+Effective 2026-10-28. Applies to Kailah Wallet: the web app at
 https://kailah-wallet.netlify.app and https://wallet.photoprompting.org, and
 the Kailah Wallet Chrome extension.
 
@@ -21,6 +21,9 @@ Stored in your browser's local storage for this site or extension:
 - **Encrypted caches:** addresses, balances, history, in-flight sends, the
   networks you chose to show, and the public keys of any Ledger accounts.
   They are encrypted with a key derived from your recovery phrase.
+- **A record of the addresses you have sent to,** per network, also
+  encrypted. The lookalike-address warning compares new destinations with
+  it; it never leaves your device.
 - **A few non-sensitive settings, unencrypted:** practice or real mode,
   whether payment alerts are on, the latest block heights, and which data
   provider answered last.

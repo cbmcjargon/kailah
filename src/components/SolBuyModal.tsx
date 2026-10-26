@@ -1,84 +1,55 @@
-import { useState } from 'react'
 import type { SolChainConfig } from '../lib/sol'
-import { requestDevnetAirdrop } from '../lib/sol'
 import { coinbaseOption, geminiOption, krakenOption } from '../lib/onramp'
 import Modal from './Modal'
 import CopyButton from './CopyButton'
 import ExchangeList from './BuyOptions'
-import { IconCheck, IconExternal, IconWarning, Spinner } from './Icons'
-import { errMessage } from './ui'
+import { IconExternal } from './Icons'
 
 interface SolBuyModalProps {
   chain: SolChainConfig
   address: string
   onClose: () => void
-  /** called after a successful devnet airdrop so the card refreshes */
-  onFunded: () => void
 }
 
-type AirdropState =
-  | { kind: 'idle' }
-  | { kind: 'requesting' }
-  | { kind: 'done' }
-  | { kind: 'failed'; message: string }
+// Practice coins come from the public faucets. Solana's devnet RPC airdrop,
+// which this screen used to call in one tap, was closed by Solana in 2026
+// ("the RPC faucet is closed on this cluster"); its web faucet still works.
+const PRACTICE_FAUCETS = [
+  { name: 'Solana faucet (test SOL)', url: 'https://faucet.solana.com/', note: 'pick Devnet' },
+  { name: 'Circle faucet (test USDC)', url: 'https://faucet.circle.com/', note: 'pick Solana Devnet' },
+]
 
-export default function SolBuyModal({ chain, address, onClose, onFunded }: SolBuyModalProps) {
-  const [airdrop, setAirdrop] = useState<AirdropState>({ kind: 'idle' })
-
+export default function SolBuyModal({ chain, address, onClose }: SolBuyModalProps) {
   if (!chain.mainnet) {
-    const requesting = airdrop.kind === 'requesting'
     return (
       <Modal title="Get practice SOL" onClose={onClose}>
         <div className="stack">
           <p className="text-secondary">
-            Solana&rsquo;s test network hands out free SOL directly — no sign-ups, no captchas.
-            One tap drops 1 test SOL into your practice account.
+            Practice coins are free. Copy your practice address, open a faucet, choose Devnet and
+            paste it. Test SOL pays the network fees; test {chain.usdc.symbol} goes to the same
+            address.
           </p>
-          <button
-            type="button"
-            className="btn btn-primary"
-            disabled={requesting}
-            onClick={() => {
-              setAirdrop({ kind: 'requesting' })
-              requestDevnetAirdrop(address)
-                .then(() => {
-                  setAirdrop({ kind: 'done' })
-                  window.setTimeout(onFunded, 3000)
-                })
-                .catch((e) => setAirdrop({ kind: 'failed', message: errMessage(e) }))
-            }}
-          >
-            {requesting ? <Spinner size={18} /> : null}
-            {requesting ? 'Requesting…' : 'Airdrop 1 test SOL'}
-          </button>
-          {airdrop.kind === 'done' && (
-            <p className="field-hint" role="status">
-              <IconCheck size={14} className="inline-icon" />
-              Airdrop requested — your balance updates in a few seconds.
-            </p>
-          )}
-          {airdrop.kind === 'failed' && (
-            <div className="warning-box" role="alert">
-              <IconWarning size={20} />
-              <div>
-                <strong>Airdrop unavailable right now</strong>
-                <p>{airdrop.message} The devnet faucet rate-limits; try again in a minute.</p>
-              </div>
-            </div>
-          )}
+          <div className="address-block">
+            <div className="mono address-full">{address}</div>
+            <CopyButton text={address} label="Copy address" withText />
+          </div>
+          <div className="faucet-box">
+            <span className="field-label">Faucets</span>
+            <ul className="faucet-list">
+              {PRACTICE_FAUCETS.map((f) => (
+                <li key={f.url}>
+                  <a href={f.url} target="_blank" rel="noopener noreferrer" className="faucet-link">
+                    {f.name}
+                    <IconExternal size={14} />
+                  </a>
+                  <span className="text-tertiary"> — {f.note}</span>
+                </li>
+              ))}
+            </ul>
+          </div>
           <p className="text-tertiary">
-            Want practice {chain.usdc.symbol} too? Circle&rsquo;s faucet sends test USDC to this
-            same address — pick &ldquo;Solana Devnet&rdquo; there.
+            Your balance updates on its own a minute or so after the faucet sends.
           </p>
-          <a
-            className="btn btn-secondary"
-            href="https://faucet.circle.com"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Open the USDC faucet
-            <IconExternal size={15} />
-          </a>
         </div>
       </Modal>
     )

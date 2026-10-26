@@ -1,6 +1,6 @@
 # Kailah Wallet
 
-**v2.7.0** — a self-custody wallet for Bitcoin, Dogecoin, Litecoin, USDC + ETH
+**v2.7.1** — a self-custody wallet for Bitcoin, Dogecoin, Litecoin, USDC + ETH
 (Base / Ethereum / Arbitrum), BNB, Solana (SOL + USDC, with in-wallet swaps
 and native staking), and TRON (TRX + USDT) that runs entirely in the browser. No servers, no accounts, no custody: keys are
 generated on your device, encrypted with your password, and never leave it.
@@ -85,8 +85,8 @@ different name and logo.
   BIP39 phrase.
 - **Solana done natively** — ed25519 keys via SLIP-0010 at the Phantom-standard
   path (restorable in Phantom/Solflare), flat ~0.000005 SOL fees, Solana Pay QR
-  support, and a practice twin on devnet with a one-tap in-app airdrop —
-  Solana's faucet needs no captcha, so test coins are a single button.
+  support, and a practice twin on devnet; Get coins links to Solana's and
+  Circle's faucets for free test SOL and USDC.
 - **USDC on Solana** — real SPL-token support: balances, history, and sends
   that handle the token-account layer honestly (sending to a first-time USDC
   holder creates their token account; the one-time deposit is itemized on the

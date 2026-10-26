@@ -5,6 +5,8 @@ IT CHECKS EVERY TRANSACTION BEFORE SIGNING
 • Solana swaps (through Jupiter): the instructions must pass an allow-list, and an on-chain simulation must match the quote.
 • Base, Ethereum, Arbitrum and BNB Chain: no token approvals, ever. Every signature names its network.
 • A double-pay guard blocks a new send while an earlier one can't be confirmed.
+• A lookalike-address warning stops a send to an address that starts and ends like one you've paid but isn't it, the "address poisoning" scam.
+• Swaps can only move the two coins on screen: the wallet refuses any swap that would touch your other tokens.
 • Ledger (Bitcoin and Litecoin): only signatures come back from the device, each checked against the wallet's own copy of the transaction. New; tested against an emulator so far, so start with small amounts.
 
 PRACTICE MODE
@@ -24,6 +26,7 @@ ALSO
 OPEN SOURCE AND VERIFIABLE
 MIT-licensed source: https://github.com/cbmcjargon/kailah
 Builds are reproducible: rebuild a release and compare it file by file with this extension.
+The official Kailah Wallet comes only from this listing, that repository, kailah-wallet.netlify.app and wallet.photoprompting.org. A copy under the same name from anywhere else is not this wallet.
 
 PLEASE NOTE
 Kailah Wallet is maintained by one person. It has had AI-assisted security reviews, not a third-party audit, so keep amounts small. Nobody can recover a lost recovery phrase or reverse a send: write your 12 words on paper and keep them safe.

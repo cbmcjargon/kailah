@@ -504,7 +504,6 @@ export default function Dashboard({
               chain={activeSolChain}
               address={solKey.address}
               onClose={() => setActive(null)}
-              onFunded={() => onRefreshSol(activeSolChain)}
             />
           )}
 
