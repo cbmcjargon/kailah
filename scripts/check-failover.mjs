@@ -17,7 +17,13 @@
 //   E. a concurrent scan burst rides out the limit, and no request is sent to
 //      a provider while it is paused;
 //   F. a provider that never stops refusing still fails the request, within
-//      the attempt and wait limits, and never yields a made-up result.
+//      the attempt and wait limits, and never yields a made-up result;
+//   H. a backup-only provider (Litecoin's BlockCypher) serves only while every
+//      regular provider has failed or is cooling down: never raced at
+//      startup, never remembered, never used for a mere rate limit;
+//   I. the BlockCypher adapter serves Litecoin: fee estimates from the chain
+//      root, BIP125 from input sequences (never on Dogecoin), no raw-hex
+//      fetches for segwit, and one request gate shared by every chain.
 const { createFailoverClient } = await import('../src/lib/api.ts')
 
 let failures = 0
@@ -50,7 +56,7 @@ const STATS = { balance: { confirmed: 0n, unconfirmed: 0n }, txCount: 0 }
  * CORS-less 429 or a dead host); 'timeout' (AbortSignal.timeout's
  * DOMException); 'http' (the server answered with another error).
  */
-function provider(name, log, { tip = 'ok', stats = ['ok'], burstLimited = true } = {}) {
+function provider(name, log, { tip = 'ok', stats = ['ok'], burstLimited = true, backupOnly = false, logTip = false, push = 'ok' } = {}) {
   let n = 0
   const act = async (outcome) => {
     log.push(`${name}:${outcome}`)
@@ -64,8 +70,18 @@ function provider(name, log, { tip = 'ok', stats = ['ok'], burstLimited = true }
   return {
     providerName: name,
     ...(burstLimited ? { burstLimited: true } : {}),
-    getTipHeight: () => (tip === 'ok' ? Promise.resolve(100) : Promise.reject(new TypeError('Load failed'))),
+    ...(backupOnly ? { backupOnly: true } : {}),
+    getTipHeight: () => {
+      if (logTip) log.push(`${name}:tip`)
+      return tip === 'ok' ? Promise.resolve(100) : Promise.reject(new TypeError('Load failed'))
+    },
     getAddressStats: () => act(typeof stats === 'function' ? stats(n++) : stats[Math.min(n++, stats.length - 1)]),
+    broadcast: async () => {
+      log.push(`${name}:push-${push}`)
+      if (push === 'ok') return `txid-${name}`
+      if (push === 'net') throw new TypeError('Load failed')
+      throw new Error(`${name}: rejected (HTTP 400)`)
+    },
   }
 }
 const client = (providers) => createFailoverClient(providers, undefined, TUNING)
@@ -244,6 +260,141 @@ console.log('--- G. the esplora client reports what it saw ---')
   globalThis.fetch = respond(200, '157564')
   check('G5 a normal answer still parses', (await ep.getTipHeight()) === 157564)
   check('G6 esplora providers are burst-limited; the client relies on it', ep.burstLimited === true)
+  globalThis.fetch = realFetch
+}
+
+console.log('--- H. a backup-only provider ---')
+{
+  const store = new Map()
+  globalThis.localStorage = {
+    getItem: (k) => (store.has(k) ? store.get(k) : null),
+    setItem: (k, v) => void store.set(k, String(v)),
+    removeItem: (k) => void store.delete(k),
+  }
+  const pref = () => JSON.parse(store.get('kailah.provider.v1') ?? '{}')
+  const ltc = (log, primary = {}, backup = {}, key) =>
+    createFailoverClient([provider('LS', log, primary), provider('BC', log, { burstLimited: false, backupOnly: true, ...backup })], key, TUNING)
+
+  {
+    const log = []
+    const c = ltc(log, { logTip: true }, { logTip: true })
+    for (let k = 0; k < 5; k++) await c.getAddressStats('a')
+    check('H1 a healthy primary: the backup is never called, not even by a startup probe', log.every((e) => e.startsWith('LS:')) && !log.includes('BC:tip'), log.join(' '))
+  }
+  {
+    const log = []
+    const c = createFailoverClient([provider('P1', log, { logTip: true }), provider('P2', log, { logTip: true }), provider('BC', log, { burstLimited: false, backupOnly: true, logTip: true })], undefined, TUNING)
+    await c.getAddressStats('a')
+    check('H2 with two regular providers, the startup race leaves the backup out', log.includes('P1:tip') && log.includes('P2:tip') && !log.includes('BC:tip'), log.join(' '))
+  }
+  {
+    const log = []
+    const c = ltc(log, { tip: 'net', stats: ['timeout'] })
+    const { err, value, ms } = await timed(() => c.getAddressStats('a'))
+    check('H3 a primary that times out: the backup serves the request', err === null && value?.from === 'BC', err?.message ?? log.join(' '))
+    check('H4 ...without waiting (a host that never answered is down)', ms < 20, `${ms} ms`)
+    const m = log.length
+    await c.getAddressStats('a')
+    check('H5 while the primary cools down, requests go straight to the backup', first(log, m) === 'BC', log.slice(m).join(' '))
+  }
+  {
+    const build = (l) => ltc(l, { tip: 'net', stats: (n) => (n === 0 ? 'timeout' : 'ok') })
+    const setup = (cl) => cl.getAddressStats('a')
+    check('H6 once the cooldown is over, the primary is tried first again', (await firstTriedAfter(build, setup, 61_000)) === 'LS')
+  }
+  {
+    const log = []
+    const c = ltc(log, { stats: ['ok', 'rl', 'ok'] })
+    await c.getAddressStats('a')
+    const { value } = await timed(() => c.getAddressStats('a'))
+    check('H7 a primary that is only rate-limited is waited for; the backup is not used', value?.from === 'LS' && !log.some((e) => e.startsWith('BC:')), log.join(' '))
+  }
+  {
+    store.clear()
+    const log = []
+    const c = ltc(log, { tip: 'net', stats: ['timeout'] }, {}, 'ltc')
+    await c.getAddressStats('a')
+    check('H8 a backup success is not remembered as the last-good provider', pref().ltc !== 'BC', JSON.stringify(pref()))
+    store.set('kailah.provider.v1', JSON.stringify({ ltc: 'BC' }))
+    const log2 = []
+    const c2 = ltc(log2, {}, {}, 'ltc')
+    await c2.getAddressStats('a')
+    check('H9 a saved preference naming the backup is ignored: the primary goes first', first(log2, 0) === 'LS', log2.join(' '))
+  }
+  {
+    const log = []
+    const c = ltc(log, { push: 'net' })
+    const txid = await rejects(async () => (timed.value = await c.broadcast('00')))
+    check('H10 a broadcast that never reached the primary goes out through the backup', txid === null && timed.value === 'txid-BC' && log.join(' ') === 'LS:push-net BC:push-ok', log.join(' '))
+    const log2 = []
+    const c2 = ltc(log2, { push: 'http' })
+    const e = await rejects(() => c2.broadcast('00'))
+    check('H11 a primary that rejects a transaction is final: the backup is not tried', e !== null && !log2.some((x) => x.startsWith('BC:')), log2.join(' '))
+  }
+  {
+    const log = []
+    const c = ltc(log, { tip: 'net', stats: ['net'] }, { tip: 'net', stats: ['net'] })
+    const e = await rejects(() => c.getAddressStats('a'))
+    check('H12 both down: the plain-words message, no guess', /Couldn't reach the network data service/.test(e?.message ?? ''), e?.message?.slice(0, 60))
+  }
+  delete globalThis.localStorage
+}
+
+console.log('--- I. BlockCypher as the Litecoin backup ---')
+{
+  const { BlockcypherProvider } = await import('../src/lib/blockcypher.ts')
+  const { CHAINS } = await import('../src/lib/networks.ts')
+  const LTC = CHAINS.ltc
+  const DOGE = CHAINS.doge
+  const ltcSpec = LTC.providers.find((p) => p.kind === 'blockcypher')
+  check('I1 Litecoin lists BlockCypher second, as a backup only', LTC.providers[0]?.name === 'litecoinspace.org' && LTC.providers.length === 2 && ltcSpec?.backupOnly === true && ltcSpec.base === 'https://api.blockcypher.com/v1/ltc/main')
+  check('I2 Dogecoin\'s BlockCypher stays its regular provider', DOGE.providers.length === 1 && DOGE.providers[0].backupOnly !== true)
+  const realFetch = globalThis.fetch
+  const calls = []
+  const replies = new Map()
+  globalThis.fetch = async (url) => {
+    calls.push({ url: String(url), at: realNow() })
+    const path = String(url).replace(/^https:\/\/api\.blockcypher\.com\/v1\/(ltc|doge)\/main/, '')
+    // the most specific route wins ('' is the chain root)
+    const body = [...replies].filter(([k]) => (k === '' ? path === '' : path.startsWith(k))).sort((a, b) => b[0].length - a[0].length)[0]?.[1]
+    return new Response(JSON.stringify(body ?? {}), { status: 200 })
+  }
+  const ltcBc = new BlockcypherProvider(ltcSpec, LTC)
+  const dogeBc = new BlockcypherProvider(DOGE.providers[0], DOGE)
+  check('I3 the Litecoin instance reports itself backup-only', ltcBc.backupOnly === true && dogeBc.backupOnly === false)
+
+  // the chain root as BlockCypher served it for LTC on 2026-10-26
+  replies.set('', { name: 'LTC.main', height: 3201935, high_fee_per_kb: 12133, medium_fee_per_kb: 9909, low_fee_per_kb: 8585 })
+  const fees = await ltcBc.getFeeOptions()
+  check('I4 Litecoin fees come from the chain root, per vbyte, rounded up', fees.map((f) => f.rate).join(',') === '13,10,9', fees.map((f) => `${f.label} ${f.rate}`).join(', '))
+  const dogeFees = await dogeBc.getFeeOptions()
+  check('I5 Dogecoin keeps its flat configured rate', dogeFees.length === 1 && dogeFees[0].rate === DOGE.fixedFeeRate)
+  replies.set('', { name: 'LTC.main', height: 3201935 })
+  check('I6 a chain root without estimates is an error, not a made-up fee', (await rejects(() => ltcBc.getFeeOptions())) !== null)
+
+  const A = 'ltc1qjmxnz78nmc8nq77wuxh25n2es7rzm5c2rkk4wh'
+  const fullTx = (seq) => ({
+    txs: [{ hash: 'aa'.repeat(32), block_height: -1, received: '2026-10-26T10:00:00Z', fees: 1000,
+      inputs: [{ prev_hash: 'bb'.repeat(32), output_index: 0, output_value: 26674, addresses: [A], sequence: seq }],
+      outputs: [{ value: 25674, addresses: ['ltc1qmpulet0rhxmpd2sy6upd8kgw9rjt67sls0wmc3'] }] }],
+  })
+  replies.set(`/addrs/${A}/full`, fullTx(0xfffffffd))
+  const [rbf] = await ltcBc.getAddressTxs(A)
+  check('I7 a Litecoin tx whose input signals BIP125 is replaceable (Speed up works)', rbf?.rbfSignaled === true && rbf.inputs[0].address === A && rbf.height === null)
+  replies.set(`/addrs/${A}/full`, fullTx(0xffffffff))
+  check('I8 ...and one with final sequences is not', (await ltcBc.getAddressTxs(A))[0]?.rbfSignaled === false)
+  replies.set(`/addrs/${A}/full`, fullTx(0xfffffffd))
+  check('I9 on Dogecoin a low sequence still never means replaceable', (await dogeBc.getAddressTxs(A))[0]?.rbfSignaled === false)
+
+  calls.length = 0
+  replies.set(`/addrs/${A}?unspentOnly`, { txrefs: [{ tx_hash: 'cc'.repeat(32), tx_output_n: 1, value: 5000 }] })
+  const utxos = await ltcBc.getAddressUtxos(A)
+  check('I10 Litecoin (segwit) UTXOs cost one request: no raw-hex fetches', calls.length === 1 && utxos.length === 1 && utxos[0].rawTxHex === undefined, `${calls.length} request(s)`)
+
+  calls.length = 0
+  await Promise.all([ltcBc.getTipHeight(), dogeBc.getTipHeight(), ltcBc.getTipHeight(), dogeBc.getTipHeight()])
+  const gaps = calls.slice(1).map((c, k) => c.at - calls[k].at)
+  check('I11 concurrent Litecoin and Dogecoin requests queue behind one gate, 500 ms apart', calls.length === 4 && gaps.every((g) => g >= 480), gaps.join(', ') + ' ms')
   globalThis.fetch = realFetch
 }
 

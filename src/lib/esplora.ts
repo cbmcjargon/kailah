@@ -86,7 +86,7 @@ interface EsploraRecommendedFees {
 
 const MAX_FEE_RATE = 1000n
 
-function toRate(satPerVb: number): bigint {
+export function toRate(satPerVb: number): bigint {
   const n = Number.isFinite(satPerVb) ? satPerVb : 1
   const ceiled = Math.ceil(n)
   const rate = ceiled >= 1 ? BigInt(ceiled) : 1n

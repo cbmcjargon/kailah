@@ -1,10 +1,13 @@
-// BlockCypher ProviderApi implementation (Dogecoin mainnet).
+// BlockCypher ProviderApi implementation: Dogecoin mainnet (its only
+// provider) and Litecoin mainnet (backup only, behind litecoinspace.org).
 //
 // BUDGET WARNING: the free tier allows only ~100-200 requests per HOUR (not per
-// second) — every call here is precious. We serialize requests behind a 500ms
-// per-instance gate, fetch each funding tx's raw hex at most once, and cap
-// history paging. Callers should cache aggressively on top of this. There is a
-// single DOGE provider today, so failover never spreads load to a second host.
+// second) per IP, shared by every chain it serves — every call here is
+// precious. Requests to the host queue behind ONE 500ms gate shared by all
+// instances, legacy (p2pkh) funding txs' raw hex is fetched at most once each
+// (segwit needs none), and history paging is capped. Callers should cache
+// aggressively on top of this; Litecoin reaches it only while its primary is
+// failing (ProviderApi.backupOnly).
 //
 // Endpoint shapes verified live (2026-07-20):
 //   /addrs/{a}/balance                      -> { balance, unconfirmed_balance,
@@ -13,12 +16,15 @@
 //                                           -> { txrefs?, unconfirmed_txrefs? }
 //   /addrs/{a}/full?limit=50[&before=H]     -> { hasMore?, txs:[...] }
 //   /txs/{hash}?includeHex=true             -> { hash, hex }
-//   {base} (chain root)                     -> { name, height, hash }
+//   {base} (chain root)                     -> { name, height, hash,
+//                                                high/medium/low_fee_per_kb }
+//                                                (LTC fees verified 2026-10-26)
 //   POST /txs/push {"tx": hex}              -> { tx:{ hash } }; errors {"error"}
 
 import type {
   Balance,
   ChainConfig,
+  ChainId,
   FeeOption,
   ProviderApi,
   ProviderSpec,
@@ -26,6 +32,7 @@ import type {
   Utxo,
   XpubApi,
 } from './types'
+import { toRate } from './esplora'
 
 // ---------------------------------------------------------------------------
 // Wire shapes
@@ -85,20 +92,42 @@ interface BcTxHex {
 
 interface BcChainInfo {
   height: number
+  /** smallest units per 1000 bytes */
+  high_fee_per_kb?: number
+  medium_fee_per_kb?: number
+  low_fee_per_kb?: number
 }
 
 interface BcPushResult {
   tx?: { hash?: string }
 }
 
-// Space every request >= 500ms apart to respect the hourly free-tier budget.
+// Space every request to the host >= 500ms apart, across all chains' instances.
 const MIN_REQUEST_GAP_MS = 500
+// Dogecoin does not implement BIP125 replace-by-fee; Litecoin does.
+const NO_BIP125: ReadonlySet<ChainId> = new Set<ChainId>(['doge'])
 // Cap history paging: two /full pages (~100 txs) is plenty for a personal
 // wallet and bounds free-tier spend.
 const MAX_TX_PAGES = 2
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+// One queue per host: callers take turns, so concurrent requests (a Litecoin
+// failover scan, a Dogecoin poll) never fire together and blow the per-second
+// limit, and Dogecoin and Litecoin spend the same budget at one pace.
+const lastRequestAt = new Map<string, number>()
+const queues = new Map<string, Promise<void>>()
+
+function throttle(host: string): Promise<void> {
+  const turn = (queues.get(host) ?? Promise.resolve()).then(async () => {
+    const wait = (lastRequestAt.get(host) ?? 0) + MIN_REQUEST_GAP_MS - Date.now()
+    if (wait > 0) await sleep(wait)
+    lastRequestAt.set(host, Date.now())
+  })
+  queues.set(host, turn)
+  return turn
 }
 
 /** BlockCypher uses block_height -1 for unconfirmed txs. */
@@ -117,25 +146,21 @@ export class BlockcypherProvider implements ProviderApi {
   readonly providerName = 'blockcypher'
   // No account (xpub) endpoint on the free tier — keep the seam open.
   readonly xpub: XpubApi | undefined = undefined
+  readonly backupOnly: boolean
 
   private readonly base: string
+  private readonly host: string
   private readonly chain: ChainConfig
-  private lastRequestAt = 0
 
   constructor(spec: ProviderSpec, chain: ChainConfig) {
     this.chain = chain
     this.base = spec.base
-  }
-
-  /** Serialize + space requests behind the shared per-instance gate. */
-  private async throttle(): Promise<void> {
-    const wait = this.lastRequestAt + MIN_REQUEST_GAP_MS - Date.now()
-    if (wait > 0) await sleep(wait)
-    this.lastRequestAt = Date.now()
+    this.host = new URL(spec.base).host
+    this.backupOnly = spec.backupOnly === true
   }
 
   private async getJson<T>(path: string): Promise<T> {
-    await this.throttle()
+    await throttle(this.host)
     // Hard deadline so an unreachable BlockCypher fails over in seconds
     // instead of stalling the scan for the browser's connect timeout.
     const signal =
@@ -200,6 +225,8 @@ export class BlockcypherProvider implements ProviderApi {
 
     // Legacy (p2pkh) signing needs each funding tx's full raw hex. Fetch once
     // per DISTINCT txid, through the throttle, to conserve the hourly budget.
+    // Segwit signing only needs the prevout amount (as in esplora.ts).
+    if (this.chain.addressType === 'p2wpkh') return utxos
     const distinct = [...new Set(utxos.map((u) => u.txid))]
     const hexByTxid = new Map<string, string>()
     for (const txid of distinct) {
@@ -226,7 +253,7 @@ export class BlockcypherProvider implements ProviderApi {
       const info = await this.getJson<BcAddressFull>(`/addrs/${enc}/full?limit=50${q}`)
       const txs = info.txs ?? []
       for (const t of txs) {
-        if (!collected.has(t.hash)) collected.set(t.hash, toRawTxInfo(t))
+        if (!collected.has(t.hash)) collected.set(t.hash, toRawTxInfo(t, !NO_BIP125.has(this.chain.id)))
       }
       if (!info.hasMore || txs.length === 0) break
       // `before` is exclusive (returns txs strictly below this height); seed the
@@ -254,16 +281,27 @@ export class BlockcypherProvider implements ProviderApi {
   }
 
   async getFeeOptions(): Promise<FeeOption[]> {
-    // No fee-estimation call for DOGE — the chain config carries a flat rate.
-    const rate = this.chain.fixedFeeRate
-    if (rate === undefined) {
-      throw new Error(`${this.chain.name} is missing fixedFeeRate in its chain config`)
+    // DOGE: no fee-estimation call — the chain config carries a flat rate.
+    const fixed = this.chain.fixedFeeRate
+    if (fixed !== undefined) return [{ label: 'Standard', eta: '~1 min', rate: fixed }]
+    // LTC: the chain root's per-1000-byte estimates, as per-vbyte rates with
+    // the same rounding, floor and cap as esplora's.
+    const info = await this.getJson<BcChainInfo>('')
+    const perVb = (perKb: number | undefined): bigint => {
+      if (typeof perKb !== 'number' || !(perKb > 0)) {
+        throw new Error(`blockcypher returned no fee estimate for ${this.chain.name}`)
+      }
+      return toRate(perKb / 1000)
     }
-    return [{ label: 'Standard', eta: '~1 min', rate }]
+    return [
+      { label: 'Fast', eta: '~10 min', rate: perVb(info.high_fee_per_kb) },
+      { label: 'Normal', eta: '~30 min', rate: perVb(info.medium_fee_per_kb) },
+      { label: 'Slow', eta: '~1 hour', rate: perVb(info.low_fee_per_kb) },
+    ]
   }
 
   async broadcast(txHex: string): Promise<string> {
-    await this.throttle()
+    await throttle(this.host)
     const res = await fetch(`${this.base}/txs/push`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -292,7 +330,7 @@ export class BlockcypherProvider implements ProviderApi {
 // ---------------------------------------------------------------------------
 // BlockCypher /full tx -> normalized RawTxInfo
 
-function toRawTxInfo(t: BcFullTx): RawTxInfo {
+function toRawTxInfo(t: BcFullTx, bip125: boolean): RawTxInfo {
   return {
     txid: t.hash,
     height: heightOrNull(t.block_height),
@@ -309,7 +347,9 @@ function toRawTxInfo(t: BcFullTx): RawTxInfo {
       address: o.addresses?.[0] ?? null,
       value: BigInt(o.value),
     })),
-    // Dogecoin does not implement BIP125 replace-by-fee.
-    rbfSignaled: false,
+    // BIP125: any input with sequence < 0xfffffffe signals replaceability
+    // (never on Dogecoin, which doesn't implement it).
+    rbfSignaled:
+      bip125 && t.inputs.some((i) => typeof i.sequence === 'number' && i.sequence < 0xfffffffe),
   }
 }

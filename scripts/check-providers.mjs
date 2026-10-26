@@ -5,11 +5,14 @@
 // asserts the normalized shapes (RawTxInfo, Balance, FeeOption, tip height) plus
 // FailoverClient behavior and fetchPriceHistory. NEVER broadcasts.
 //
-// Run from the repo root: npx tsx scripts/check-providers.mjs
+// Run from the repo root: npx tsx scripts/check-providers.mjs [btc|btc-testnet|ltc|doge|failover|prices]
+// (one name runs only that section: BlockCypher's hourly budget and
+// mempool.space's IP blocks make a full run something to do sparingly).
 
 import { NET_ISSUE, isNetworkIssue, installLiveGuard } from './_live.mjs'
 installLiveGuard('check-providers')
 import { EsploraProvider } from '../src/lib/esplora.ts'
+import { BlockcypherProvider } from '../src/lib/blockcypher.ts'
 import { createFailoverClient, getClient } from '../src/lib/api.ts'
 import { fetchPriceHistory } from '../src/lib/prices.ts'
 import { CHAINS } from '../src/lib/networks.ts'
@@ -19,6 +22,9 @@ const BTC_ADDR = 'bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu'
 const TESTNET4_ADDR = 'tb1q6rz28mcfaxtmd6v789l9rrlrusdprr9pqcpvkl'
 const LTC_ADDR = 'ltc1qjmxnz78nmc8nq77wuxh25n2es7rzm5c2rkk4wh'
 const DOGE_ADDR = 'DBus3bamQjgJULBJtYXpEzDWQRwF5iwxgC'
+
+const ONLY = process.argv[2]
+const want = (section) => ONLY === undefined || ONLY === section
 
 let failures = 0
 function check(label, ok, detail) {
@@ -129,6 +135,22 @@ async function tryProvider(label, fn) {
 }
 
 async function main() {
+  if (want('btc')) await btcSection()
+  if (want('btc-testnet')) await testnetSection()
+  if (want('ltc')) await ltcSection()
+  if (want('doge')) await dogeSection()
+  if (want('failover')) await failoverSection()
+  if (want('prices')) await pricesSection()
+
+  console.log('')
+  if (failures > 0) {
+    console.error(`${failures} check(s) failed`)
+    process.exit(1)
+  }
+  console.log('All provider checks passed')
+}
+
+async function btcSection() {
   // --- BTC mainnet: exercise BOTH providers directly to prove failover parity.
   const [specA, specB] = CHAINS.btc.providers
   const hostOf = (spec) => new URL(spec.base ?? spec.url ?? 'https://unknown').hostname
@@ -154,8 +176,10 @@ async function main() {
   } else {
     console.log('SKIP  btc: provider parity — needs both providers reachable')
   }
+}
 
-  // --- testnet4 + LTC via the real getClient() failover factory path.
+async function testnetSection() {
+  // --- testnet4 via the real getClient() failover factory path.
   const tnClient = getClient(CHAINS['btc-testnet'])
   tnClient.__addr = TESTNET4_ADDR
   // getClient returns a FailoverClient (AddressApi surface), not a raw provider —
@@ -167,11 +191,50 @@ async function main() {
       tnClient.activeProvider(),
     )
   }
+}
 
+async function ltcSection() {
+  // --- LTC via the real getClient() failover factory path (litecoinspace).
   const ltcClient = getClient(CHAINS.ltc)
   ltcClient.__addr = LTC_ADDR
-  await tryProvider('ltc/getClient', () => checkEsploraProvider('ltc/getClient', ltcClient))
+  const primary = await tryProvider('ltc/getClient', () => checkEsploraProvider('ltc/getClient', ltcClient))
 
+  // --- LTC's backup, BlockCypher, on its own: it only serves Litecoin while
+  //     litecoinspace is failing, so this is the one place it is exercised
+  //     live. About 8 requests against the shared hourly budget.
+  console.log('\n=== ltc/blockcypher (backup) ===')
+  const bcSpec = CHAINS.ltc.providers.find((p) => p.backupOnly === true)
+  check('ltc: a backup-only BlockCypher provider is configured', bcSpec?.kind === 'blockcypher', bcSpec?.base)
+  if (!bcSpec) return
+  const bc = new BlockcypherProvider(bcSpec, CHAINS.ltc)
+  await tryProvider('ltc/blockcypher', async () => {
+    const stats = await bc.getAddressStats(LTC_ADDR)
+    check('ltc/blockcypher: getAddressStats handles an ltc1 address', typeof stats.balance.confirmed === 'bigint' && stats.txCount > 0, `confirmed=${stats.balance.confirmed} txCount=${stats.txCount}`)
+    if (primary) {
+      check('ltc: BlockCypher and litecoinspace agree on the balance and tx count', stats.balance.confirmed === primary.stats.balance.confirmed && stats.txCount === primary.stats.txCount, `bc ${stats.balance.confirmed}/${stats.txCount} vs ls ${primary.stats.balance.confirmed}/${primary.stats.txCount}`)
+    }
+    const txs = await bc.getAddressTxs(LTC_ADDR)
+    assertRawTxs('ltc/blockcypher', txs)
+    check('ltc/blockcypher: tx inputs and outputs carry ltc1 addresses', txs.some((t) => t.inputs.some((i) => i.address?.startsWith('ltc1')) && t.outputs.some((o) => o.address?.startsWith('ltc1'))))
+    const utxos = await bc.getAddressUtxos(LTC_ADDR)
+    check('ltc/blockcypher: getAddressUtxos parses (segwit: no raw hex)', Array.isArray(utxos) && utxos.every((u) => typeof u.value === 'bigint' && u.rawTxHex === undefined), `${utxos.length} utxo(s)`)
+    const tip = await bc.getTipHeight()
+    check('ltc/blockcypher: getTipHeight is a large int', Number.isInteger(tip) && tip > 2_000_000, `tip=${tip}`)
+    const fees = await bc.getFeeOptions()
+    check('ltc/blockcypher: three fee rates, fast >= normal >= slow >= 1', fees.length === 3 && fees[0].rate >= fees[1].rate && fees[1].rate >= fees[2].rate && fees[2].rate >= 1n, fees.map((f) => `${f.label} ${f.rate}`).join(', '))
+    // a dead primary in front of the real backup: the backup answers, and the
+    // primary stays the one tried first (a backup is never made active)
+    const fo = createFailoverClient([
+      new EsploraProvider({ name: 'dead-primary', kind: 'esplora', base: 'https://nonexistent.invalid/api', pageSize: 50 }, CHAINS.ltc),
+      bc,
+    ])
+    const foStats = await fo.getAddressStats(LTC_ADDR)
+    check('ltc: with the primary dead, the request is served by the backup', foStats.txCount === stats.txCount, `txCount=${foStats.txCount}`)
+    check('ltc: ...and the backup is not made the active provider', fo.activeProvider() === 'dead-primary', fo.activeProvider())
+  })
+}
+
+async function dogeSection() {
   // --- DOGE (BlockCypher). Conserve the ~100-200 req/HOUR free tier: hit
   //     stats, txs, tip, fees only. getAddressUtxos is skipped here because it
   //     fetches one raw-hex request per distinct funding txid — expensive
@@ -199,7 +262,9 @@ async function main() {
     `rate=${dFees[0]?.rate}`,
   )
   console.log('  (getAddressUtxos intentionally skipped for doge to protect the hourly budget)')
+}
 
+async function failoverSection() {
   // --- FailoverClient actually falls over: bad-first provider, real second.
   console.log('\n=== failover ===')
   const badSpec = { name: 'bad-first', kind: 'esplora', base: 'https://nonexistent.invalid/api', pageSize: 25 }
@@ -223,7 +288,9 @@ async function main() {
   // dead one — a plain success confirms last-good stickiness.
   const foTip = await failover.getTipHeight()
   check('failover: sticky active provider serves the next call', Number.isInteger(foTip) && foTip > 100000, `tip=${foTip}`)
+}
 
+async function pricesSection() {
   // --- price history for the sparklines.
   console.log('\n=== prices ===')
   const hist = await fetchPriceHistory('BTC')
@@ -239,13 +306,6 @@ async function main() {
       hist[0].t < hist[hist.length - 1].t,
     `t range ${hist[0]?.t}…${hist[hist.length - 1]?.t}`,
   )
-
-  console.log('')
-  if (failures > 0) {
-    console.error(`${failures} check(s) failed`)
-    process.exit(1)
-  }
-  console.log('All provider checks passed')
 }
 
 main().catch((err) => {

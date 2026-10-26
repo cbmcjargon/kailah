@@ -1,6 +1,6 @@
 # Kailah Wallet — maintenance notes
 
-Self-custody browser wallet, v2.6.0: four engines — UTXO (BTC/DOGE/LTC),
+Self-custody browser wallet, v2.6.1: four engines — UTXO (BTC/DOGE/LTC),
 EVM (USDC+ETH on Base/Ethereum/Arbitrum + BNB on BSC, no explorer API there),
 Solana (SOL + SPL USDC + Jupiter swaps + native staking via hand-built
 stake-program instructions in solstake.ts), TRON (TRX + USDT-TRC20 + Stake 2.0 via tron.ts/tronstake.ts — the node builds raw txs and the wallet DECODES the protobuf bytes
@@ -107,6 +107,13 @@ not feature building, unless the user asks for something new.
   layer multiplies requests, and mempool.space and mempool.emzy.de block a
   whole IP for a while after heavy bursts (2026-10-25). Keep live testnet
   scans and burst tests rare.
+- Litecoin's BlockCypher provider is backupOnly (ProviderApi.backupOnly):
+  used only while litecoinspace.org has failed or is cooling down, never
+  raced at startup, never remembered, never used for a mere rate limit.
+  BlockCypher requests from every chain share one 500 ms queue (one per-IP
+  budget, ~100/hr). A full LTC scan through it costs ~70 requests for the
+  test wallet, so browser-test a failover with Dogecoin's BlockCypher blocked.
+  `check-providers.mjs ltc` runs only the Litecoin section.
 - Networks shown (src/lib/netprefs.ts, kailah.sec.netprefs): hidden networks
   are never scanned or polled — every scan/poll/refresh loop in App.tsx goes
   through shownIn() (check-netprefs E1 enforces it) — and an engine chunk

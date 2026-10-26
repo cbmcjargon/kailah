@@ -90,6 +90,8 @@ export interface ProviderSpec {
   pageSize?: number
   /** esplora only: prefer a different base for broadcast (testnet4 CORS quirk) */
   broadcastBase?: string
+  /** a backup only (ProviderApi.backupOnly) */
+  backupOnly?: boolean
 }
 
 export interface DerivedKey {
@@ -345,6 +347,14 @@ export interface ProviderApi extends AddressApi {
    * is hourly) and a retry seconds later can't help.
    */
   burstLimited?: boolean
+  /**
+   * Used only while every regular provider for the chain has failed or is
+   * cooling down: never raced at startup, never remembered as the last-good
+   * provider, and a regular provider that is merely rate-limited is waited
+   * for instead. For a host whose budget is small and shared (BlockCypher,
+   * ~100 requests an hour across every chain it serves).
+   */
+  backupOnly?: boolean
 }
 
 /** getClient(chain) v2: failover over an ordered ProviderApi list. */

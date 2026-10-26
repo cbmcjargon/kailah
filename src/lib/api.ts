@@ -1,8 +1,9 @@
 // api.ts — getClient(chain): a FailoverClient over the chain's ordered
 // ProviderApi list (types.ts / networks.ts). Providers are tried in order; the
-// last-good one is remembered and tried first next time. Only BTC mainnet has a
-// genuine second provider today — the others run single-provider through the
-// same client so the seam is uniform.
+// last-good one is remembered and tried first next time. BTC mainnet has a
+// genuine second provider and Litecoin a backup-only one (BlockCypher,
+// ProviderApi.backupOnly); the others run single-provider through the same
+// client so the seam is uniform.
 
 import type {
   AccountUtxo,
@@ -84,7 +85,8 @@ class FailoverClientImpl implements FailoverClient {
     if (persistKey !== undefined) {
       const preferred = readProviderPref(persistKey)
       if (preferred !== null) {
-        const i = providers.findIndex((p) => p.providerName === preferred)
+        // a backup is never the starting provider, even if an older build saved it
+        const i = providers.findIndex((p) => p.providerName === preferred && p.backupOnly !== true)
         if (i >= 0) this.activeIndex = i
       }
     }
@@ -151,12 +153,15 @@ class FailoverClientImpl implements FailoverClient {
 
   private ensureProbed(): Promise<void> {
     this.probePromise ??= (async () => {
-      // A single-provider chain (DOGE) has no choice to make — skip the
-      // probe entirely; on BlockCypher's hourly budget every request counts.
-      if (this.providers.length < 2) return
+      // A chain with one regular provider (DOGE, LTC) has no choice to make —
+      // skip the probe entirely; a backup is never raced (BlockCypher's hourly
+      // budget: every request counts).
+      const regular = this.providers.map((_, i) => i).filter((i) => !this.isBackup(i))
+      if (regular.length < 2) return
       try {
         const winner = await Promise.any(
-          this.providers.map(async (p, i) => {
+          regular.map(async (i) => {
+            const p = this.providers[i]!
             const tip = await Promise.race([
               p.getTipHeight(),
               new Promise<never>((_, reject) =>
@@ -177,6 +182,10 @@ class FailoverClientImpl implements FailoverClient {
       }
     })()
     return this.probePromise
+  }
+
+  private isBackup(i: number): boolean {
+    return this.providers[i]?.backupOnly === true
   }
 
   /** Active provider first, then healthy rest, then cooled-down last. */
@@ -231,9 +240,14 @@ class FailoverClientImpl implements FailoverClient {
       const now = Date.now()
       const candidates = this.order().filter((i) => !done.has(i))
       if (candidates.length === 0) break
-      const i = candidates.find((c) => (this.pauseUntil[c] ?? 0) <= now)
+      // A backup steps in only once no regular provider can serve this
+      // request (each has failed it or is cooling down); one that is merely
+      // paused for a rate limit is waited for instead.
+      const regularLeft = candidates.some((c) => !this.isBackup(c) && (this.downUntil[c] ?? 0) <= now)
+      const eligible = regularLeft ? candidates.filter((c) => !this.isBackup(c)) : candidates
+      const i = eligible.find((c) => (this.pauseUntil[c] ?? 0) <= now)
       if (i === undefined) {
-        const wake = Math.min(...candidates.map((c) => this.pauseUntil[c] ?? 0))
+        const wake = Math.min(...eligible.map((c) => this.pauseUntil[c] ?? 0))
         if (wake > giveUpAt) break
         await new Promise((r) => setTimeout(r, wake - now))
         continue
@@ -242,10 +256,14 @@ class FailoverClientImpl implements FailoverClient {
       const provider = this.providers[i]
       try {
         const result = await op(provider)
-        if (this.activeIndex !== i && this.persistKey !== undefined) {
-          writeProviderPref(this.persistKey, provider.providerName)
+        if (!this.isBackup(i)) {
+          // a backup's success is never remembered: the next request tries
+          // the regular providers first again
+          if (this.activeIndex !== i && this.persistKey !== undefined) {
+            writeProviderPref(this.persistKey, provider.providerName)
+          }
+          this.activeIndex = i
         }
-        this.activeIndex = i
         this.downUntil[i] = 0
         this.lastOkAt[i] = Date.now()
         this.strikes[i] = 0
@@ -336,7 +354,7 @@ class FailoverClientImpl implements FailoverClient {
       const provider = this.providers[i]
       try {
         const txid = await provider.broadcast(txHex)
-        this.activeIndex = i
+        if (!this.isBackup(i)) this.activeIndex = i
         return txid
       } catch (err) {
         if (err instanceof TypeError) {

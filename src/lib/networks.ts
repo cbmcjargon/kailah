@@ -7,8 +7,9 @@ import type { ChainConfig, ChainId, NetMode } from './types'
 //
 // Providers are ordered; api.ts fails over down the list. CORS for every base
 // was verified live from the wallet origin (2026-07-20). Only BTC mainnet has
-// a genuine second provider; the others run single-provider through the same
-// failover client. Scanning is per-address gap-limit (see scanner.ts), which
+// a genuine second provider (testnet4's backup can't serve address lookups);
+// Litecoin has a backup-only one (BlockCypher, 2026-10-26); the others run
+// single-provider through the same failover client. Scanning is per-address gap-limit (see scanner.ts), which
 // works uniformly on every one of these esplora/blockcypher backends.
 
 // SLIP-0132 version bytes (kept for interoperability/export display).
@@ -108,6 +109,10 @@ export const CHAINS: Record<ChainId, ChainConfig> = {
     mainnet: true,
     providers: [
       { name: 'litecoinspace.org', kind: 'esplora', base: 'https://litecoinspace.org/api', pageSize: 50 },
+      // Backup only: its free budget (~100 requests an hour) is shared with
+      // Dogecoin, so it serves Litecoin only while litecoinspace is failing
+      // (it timed out for the owner, 2026-10-26).
+      { name: 'blockcypher', kind: 'blockcypher', base: 'https://api.blockcypher.com/v1/ltc/main', backupOnly: true },
     ],
     explorerTx: (t) => `https://litecoinspace.org/tx/${t}`,
     explorerAddr: (a) => `https://litecoinspace.org/address/${a}`,

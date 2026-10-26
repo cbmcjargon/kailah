@@ -1,6 +1,6 @@
 # Kailah Wallet
 
-**v2.6.0** — a self-custody wallet for Bitcoin, Dogecoin, Litecoin, USDC + ETH
+**v2.6.1** — a self-custody wallet for Bitcoin, Dogecoin, Litecoin, USDC + ETH
 (Base / Ethereum / Arbitrum), BNB, Solana (SOL + USDC, with in-wallet swaps
 and native staking), and TRON (TRX + USDT) that runs entirely in the browser. No servers, no accounts, no custody: keys are
 generated on your device, encrypted with your password, and never leave it.
