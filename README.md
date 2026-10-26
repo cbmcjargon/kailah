@@ -1,6 +1,6 @@
 # Kailah Wallet
 
-**v2.5.1** — a self-custody wallet for Bitcoin, Dogecoin, Litecoin, USDC + ETH
+**v2.6.0** — a self-custody wallet for Bitcoin, Dogecoin, Litecoin, USDC + ETH
 (Base / Ethereum / Arbitrum), BNB, Solana (SOL + USDC, with in-wallet swaps
 and native staking), and TRON (TRX + USDT) that runs entirely in the browser. No servers, no accounts, no custody: keys are
 generated on your device, encrypted with your password, and never leave it.
@@ -152,6 +152,12 @@ different name and logo.
 - **Send** — live address validation (with wrong-chain and MWEB detection),
   camera QR scanning (BIP21 payment URIs, amount autofill), MAX sweep, fee
   selection, mandatory review screen.
+- **Lookalike-address warning** — on every network's send form: an address
+  that starts and ends like one you've paid (or one of your own) but isn't
+  it stops the send until you confirm you've checked it. That's the
+  "address poisoning" scam, where a lookalike sends you dust so it shows up in
+  your history. Only sends you signed make an address trusted, so the
+  attacker's dust, a TRON zero-value USDT "send" or a fake-token "send" can't.
 - **Speed up (RBF)** — replace a stuck Bitcoin/Litecoin transaction with a
   higher-fee version, with the BIP125 rules enforced client-side.
 - **Buy** — curated links to licensed onramps (Banxa pre-fills your address)
@@ -318,6 +324,7 @@ Verification suites (run with `npx tsx scripts/<name>.mjs`):
 | check-solswap.mjs | independent ATA re-derivation, a REAL devnet USDC send, live Jupiter Swap V2 builds in both directions, the full prepareSwap gate on mainnet (simulation only, including a first-time USDC holder), a route through a third token, the fee wallet swapping for itself, and adversarial tests on live routes: a quote promising more than its route, a route whose slippage was raised, and one whose fee was redirected are all refused |
 | check-netprefs.mjs | networks-shown choice: encrypted and seed-bound, cleared by erase, practice mirroring, the funds/history classifier that never hides a funded or unreadable network, which engine chunks load for a choice (and that the static ids/labels match the engines), and source checks that every scan/poll loop filters hidden networks and every engine load is gated |
 | check-swapgate.mjs | the Jupiter Swap V2 gate, offline, on two recorded /build answers: honest builds compile to exactly the instructions Jupiter described and sign byte-exactly; any change to the decoded amount, quoted output, slippage, platform fee, positive-slippage share, variant or authority is refused, as are "other"/tip instructions, foreign signers, a second Jupiter instruction, Approve, a CloseAccount paying someone else, unlisted programs, stake accounts, lookup tables that disagree with the chain, and a simulation short of the decoded floor; the fee is exactly 0.5% (none for the fee wallet itself), and a token account opened for an intermediate token is closed in the same transaction |
+| check-lookalike.mjs | the send form's lookalike-address check, offline: the real poisoning seen on a Solana wallet is caught; addresses you've paid, your own, new ones and people who paid you don't warn; history an attacker can write (incoming dust, TRON zero-value USDT, EVM custom-token rows) never makes an address trusted; 0x/EVM case, bech32 prefix and case, TRON's T, and the 3-and-3 threshold |
 | check-failover.mjs | rate limit vs outage in the provider failover: a provider that pushes back (a 429, or the bare network error a browser shows for a CORS-less 429) is paused and retried, a healthy backup covers the pause, timeouts get one retry, a dead provider fails over at once with a 60 s cooldown, BlockCypher's hourly limit is never retried, and a request never waits or retries past its limits |
 | check-providers.mjs | live API shapes + failover (spends BlockCypher budget — run sparingly) |
 

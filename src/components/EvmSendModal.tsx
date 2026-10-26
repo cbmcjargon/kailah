@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from 'react'
-import type { DetectedToken, EvmChainConfig, EvmKey, PreparedEvmSend } from '../lib/evm'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import type { DetectedToken, EvmChainConfig, EvmKey, EvmTx, PreparedEvmSend } from '../lib/evm'
 import {
   broadcastEvmSend,
   evmToUsd,
@@ -14,11 +14,15 @@ import CopyButton from './CopyButton'
 import QrScanner from './LazyQrScanner'
 import { IconBack, IconCheck, IconExternal, IconQrScan, IconWarning, Spinner } from './Icons'
 import { errMessage } from './ui'
+import LookalikeWarning, { useLookalike } from './LookalikeWarning'
+import { EVM_FORMAT, knownFromEvm } from '../lib/lookalike'
 
 interface EvmSendModalProps {
   chain: EvmChainConfig
   evmKey: EvmKey
   balances: { token: bigint | null; gas: bigint | null } | null
+  /** this chain's history, for the lookalike-address check */
+  txs: EvmTx[]
   tokenPrice: number | undefined
   gasPrice: number | undefined
   /** when set, the modal sends this detected custom ERC-20 (no asset pills) */
@@ -42,6 +46,7 @@ export default function EvmSendModal({
   chain,
   evmKey,
   balances,
+  txs,
   tokenPrice,
   gasPrice,
   customToken,
@@ -73,6 +78,8 @@ export default function EvmSendModal({
     asset === 'token' ? (customToken?.symbol ?? chain.token.symbol) : chain.gas.symbol
   const destTrimmed = dest.trim()
   const destValid = destTrimmed !== '' && isValidEvmAddress(destTrimmed)
+  const known = useMemo(() => knownFromEvm(evmKey.address, txs), [evmKey.address, txs])
+  const lookalike = useLookalike(destValid ? destTrimmed : '', known, EVM_FORMAT)
 
   let parsedAmount: bigint | null = null
   let amountError: string | null = null
@@ -103,7 +110,7 @@ export default function EvmSendModal({
       ? evmToUsd(parsedAmount, decimals, price)
       : null
 
-  const canContinue = destValid && (sendMax || parsedAmount !== null)
+  const canContinue = destValid && lookalike.ok && (sendMax || parsedAmount !== null)
 
   const handleContinue = () => {
     if (!canContinue) return
@@ -265,6 +272,15 @@ export default function EvmSendModal({
               </span>
             )}
           </label>
+
+          {lookalike.match !== null && (
+            <LookalikeWarning
+              address={destTrimmed}
+              match={lookalike.match}
+              checked={lookalike.checked}
+              onCheckedChange={lookalike.setChecked}
+            />
+          )}
 
           <label className="field">
             <span className="field-label">Amount</span>

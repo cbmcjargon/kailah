@@ -880,6 +880,60 @@ textarea.input {
   margin-bottom: 2px;
 }
 
+/* ---- lookalike-address warning (LookalikeWarning.tsx) ------------------------ */
+
+.lookalike-warning p {
+  margin: 6px 0 0;
+}
+
+.lookalike-pair {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 4px 10px;
+  margin: 10px 0 0;
+}
+
+.lookalike-pair dt {
+  color: #fda4a4;
+  white-space: nowrap;
+}
+
+.lookalike-pair dd {
+  margin: 0;
+  min-width: 0;
+}
+
+.lookalike-addr {
+  word-break: break-all;
+}
+
+/* the shared start and end are what fool the eye; the middle is what differs */
+.lookalike-same {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.lookalike-diff {
+  color: #fecaca;
+  background: rgba(248, 113, 113, 0.22);
+  border-radius: 3px;
+}
+
+.lookalike-ack {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  margin-top: 10px;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.lookalike-ack input {
+  margin: 2px 0 0;
+  accent-color: var(--danger);
+  flex-shrink: 0;
+}
+
 /* ---- word grid ------------------------------------------------------------- */
 
 .word-grid-wrap {

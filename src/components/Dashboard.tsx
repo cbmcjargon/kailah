@@ -11,7 +11,7 @@ import type {
 import { CHAINS } from '../lib/networks'
 import { hardwareSlotKey } from '../lib/hwaccount'
 import { evmToUsd } from '../lib/units'
-import type { DetectedToken, EvmChainConfig, EvmChainId, EvmKey, EvmUiState } from '../lib/evm'
+import type { DetectedToken, EvmChainConfig, EvmChainId, EvmKey, EvmTx, EvmUiState } from '../lib/evm'
 import type { SolChainConfig, SolChainId, SolKey, SolUiState } from '../lib/sol'
 import type { TronChainConfig, TronChainId, TronKey, TronUiState } from '../lib/tron'
 import type { Engine, EvmEngine, SolEngine, TronEngine } from '../engines'
@@ -31,6 +31,9 @@ const SendModal = lazy(() => import('./SendModal'))
 const BuyModal = lazy(() => import('./BuyModal'))
 const TxDetailModal = lazy(() => import('./TxDetailModal'))
 const BumpModal = lazy(() => import('./BumpModal'))
+
+/** stable empty history, so the EVM send form's lookalike check isn't recomputed every render */
+const EMPTY_EVM_TXS: EvmTx[] = []
 
 interface DashboardProps {
   mode: NetMode
@@ -625,6 +628,7 @@ export default function Dashboard({
                     ? { token: evmStates[activeEvmChain.id]!.token, gas: evmStates[activeEvmChain.id]!.gas }
                     : null
                 }
+                txs={evmStates[activeEvmChain.id]?.txs ?? EMPTY_EVM_TXS}
                 tokenPrice={prices[activeEvmChain.token.priceSymbol]}
                 gasPrice={prices[activeEvmChain.gas.priceSymbol]}
                 {...(active.kind === 'evm-send-custom' && { customToken: active.token })}

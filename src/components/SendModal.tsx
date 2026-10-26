@@ -23,6 +23,8 @@ import HardwareReview from './HardwareReview'
 import LedgerPrompt, { useDevice } from './LedgerPrompt'
 import { IconBack, IconCheck, IconExternal, IconQrScan, IconShield, IconWarning, Spinner } from './Icons'
 import { coinsToUsd, errMessage } from './ui'
+import LookalikeWarning, { useLookalike } from './LookalikeWarning'
+import { knownFromUtxo, UTXO_FORMAT } from '../lib/lookalike'
 
 interface SendModalProps {
   chain: ChainConfig
@@ -99,6 +101,11 @@ export default function SendModal({
   // ---- form validation -----------------------------------------------------
   const destTrimmed = dest.trim()
   const destValid = destTrimmed !== '' && isValidAddress(destTrimmed, chain)
+  const known = useMemo(
+    () => knownFromUtxo(accountState?.addresses.map((a) => a.address) ?? [], accountState?.txs ?? []),
+    [accountState],
+  )
+  const lookalike = useLookalike(destValid ? destTrimmed : '', known, UTXO_FORMAT)
 
   let parsedAmount: bigint | null = null
   let amountError: string | null = null
@@ -133,7 +140,7 @@ export default function SendModal({
           : null
 
   const canContinue =
-    destValid && fees !== null && fees.length > 0 && (sendMax || parsedAmount !== null)
+    destValid && lookalike.ok && fees !== null && fees.length > 0 && (sendMax || parsedAmount !== null)
 
   // ---- step transitions ----------------------------------------------------
   const handleContinue = () => {
@@ -289,6 +296,15 @@ export default function SendModal({
               </span>
             )}
           </label>
+
+          {lookalike.match !== null && (
+            <LookalikeWarning
+              address={destTrimmed}
+              match={lookalike.match}
+              checked={lookalike.checked}
+              onCheckedChange={lookalike.setChecked}
+            />
+          )}
 
           <label className="field">
             <span className="field-label">Amount</span>

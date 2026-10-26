@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import type { PreparedSolSend, SolAsset, SolChainConfig, SolKey, SolUiState } from '../lib/sol'
 import {
   broadcastSolSend,
@@ -17,6 +17,8 @@ import CopyButton from './CopyButton'
 import QrScanner from './LazyQrScanner'
 import { IconBack, IconCheck, IconExternal, IconQrScan, IconWarning, Spinner } from './Icons'
 import { errMessage } from './ui'
+import LookalikeWarning, { useLookalike } from './LookalikeWarning'
+import { knownFromSol, SOL_FORMAT } from '../lib/lookalike'
 
 interface SolSendModalProps {
   chain: SolChainConfig
@@ -67,6 +69,8 @@ export default function SolSendModal({
 
   const destTrimmed = dest.trim()
   const destValid = destTrimmed !== '' && isValidSolAddress(destTrimmed)
+  const known = useMemo(() => knownFromSol(solKey.address, state.txs), [solKey.address, state.txs])
+  const lookalike = useLookalike(destValid ? destTrimmed : '', known, SOL_FORMAT)
 
   let parsedAmount: bigint | null = null
   let amountError: string | null = null
@@ -94,7 +98,7 @@ export default function SolSendModal({
       ? evmToUsd(parsedAmount, decimals, assetPrice)
       : null
 
-  const canContinue = destValid && (sendMax || parsedAmount !== null)
+  const canContinue = destValid && lookalike.ok && (sendMax || parsedAmount !== null)
 
   const handleContinue = () => {
     if (!canContinue) return
@@ -274,6 +278,15 @@ export default function SolSendModal({
               </span>
             )}
           </label>
+
+          {lookalike.match !== null && (
+            <LookalikeWarning
+              address={destTrimmed}
+              match={lookalike.match}
+              checked={lookalike.checked}
+              onCheckedChange={lookalike.setChecked}
+            />
+          )}
 
           <label className="field">
             <span className="field-label">Amount</span>

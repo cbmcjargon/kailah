@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import type { PreparedTronSend, TronAsset, TronChainConfig, TronKey, TronUiState } from '../lib/tron'
 import {
   broadcastTronSend,
@@ -15,6 +15,8 @@ import CopyButton from './CopyButton'
 import QrScanner from './LazyQrScanner'
 import { IconBack, IconCheck, IconExternal, IconQrScan, IconWarning, Spinner } from './Icons'
 import { errMessage } from './ui'
+import LookalikeWarning, { useLookalike } from './LookalikeWarning'
+import { knownFromTron, TRON_FORMAT } from '../lib/lookalike'
 
 interface TronSendModalProps {
   chain: TronChainConfig
@@ -64,6 +66,8 @@ export default function TronSendModal({
 
   const destTrimmed = dest.trim()
   const destValid = destTrimmed !== '' && isValidTronAddress(destTrimmed)
+  const known = useMemo(() => knownFromTron(tronKey.address, state.txs), [tronKey.address, state.txs])
+  const lookalike = useLookalike(destValid ? destTrimmed : '', known, TRON_FORMAT)
 
   let parsedAmount: bigint | null = null
   let amountError: string | null = null
@@ -91,7 +95,7 @@ export default function TronSendModal({
       ? evmToUsd(parsedAmount, decimals, assetPrice)
       : null
 
-  const canContinue = destValid && parsedAmount !== null && amountError === null
+  const canContinue = destValid && lookalike.ok && parsedAmount !== null && amountError === null
 
   const handleContinue = () => {
     if (!canContinue || parsedAmount === null) return
@@ -214,6 +218,15 @@ export default function TronSendModal({
               </span>
             )}
           </label>
+
+          {lookalike.match !== null && (
+            <LookalikeWarning
+              address={destTrimmed}
+              match={lookalike.match}
+              checked={lookalike.checked}
+              onCheckedChange={lookalike.setChecked}
+            />
+          )}
 
           <label className="field">
             <span className="field-label">Amount</span>

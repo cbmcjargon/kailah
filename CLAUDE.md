@@ -1,6 +1,6 @@
 # Kailah Wallet — maintenance notes
 
-Self-custody browser wallet, v2.5.1: four engines — UTXO (BTC/DOGE/LTC),
+Self-custody browser wallet, v2.6.0: four engines — UTXO (BTC/DOGE/LTC),
 EVM (USDC+ETH on Base/Ethereum/Arbitrum + BNB on BSC, no explorer API there),
 Solana (SOL + SPL USDC + Jupiter swaps + native staking via hand-built
 stake-program instructions in solstake.ts), TRON (TRX + USDT-TRC20 + Stake 2.0 via tron.ts/tronstake.ts — the node builds raw txs and the wallet DECODES the protobuf bytes
@@ -36,7 +36,7 @@ not feature building, unless the user asks for something new.
   committing, and never `git add -A` right after a deploy without checking.
   The public snapshot's leak scan refuses that path (it caught it once,
   2026-10-25).
-- Tests: `npm run check:offline` (keys, txbuild, txv2, qrparse, vault, scanner, hw, pending, netprefs, failover, swapgate —
+- Tests: `npm run check:offline` (keys, txbuild, txv2, qrparse, vault, scanner, hw, pending, netprefs, failover, swapgate, lookalike —
   no network; this is what CI runs on every push) and `npm run check:live`
   (account, evm, sol, solswap, solstake, tron — real networks; a provider being
   down or rate-limited prints SKIP, never FAIL). check-providers.mjs is run by
@@ -86,6 +86,11 @@ not feature building, unless the user asks for something new.
   account. Routes through a third token get a CloseAccount appended for the
   intermediate token account Jupiter opens (intermediateCloses); without it
   the stranded rent trips the SOL-cost bound and the swap is refused.
+- Lookalike-address warning (lib/lookalike.ts, LookalikeWarning.tsx) on all
+  four send forms. Only rows this wallet signed make an address trusted
+  ("sent"): never incoming rows, TRON zero-value USDT "out" rows, or EVM
+  custom-token rows, since an attacker can create all three. It reads only
+  the history the form already has (no extra requests).
 - All amounts are bigint smallest-units everywhere. No floats in money math.
 - Secrets (mnemonic, private keys) exist only in memory; never log/store them.
   Private keys are zeroed on lock/erase; erase must clear every kailah.* key.
