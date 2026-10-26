@@ -68,6 +68,6 @@ whatever the license allows.
 ## Contact
 
 To ask about a use not covered here, or to report a copy that breaks this
-policy: security@photoprompting.org.
+policy, open an issue at https://github.com/cbmcjargon/kailah/issues.
 
 This policy may change; changes are published in this repository.

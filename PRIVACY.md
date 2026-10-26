@@ -1,6 +1,6 @@
 # Privacy policy
 
-Effective 2026-10-25. Applies to Kailah Wallet: the web app at
+Effective 2026-10-26. Applies to Kailah Wallet: the web app at
 https://kailah-wallet.netlify.app and https://wallet.photoprompting.org, and
 the Kailah Wallet Chrome extension.
 
@@ -103,4 +103,6 @@ repository, https://github.com/cbmcjargon/kailah, with a new effective date.
 
 ## Contact
 
-security@photoprompting.org
+Open an issue at https://github.com/cbmcjargon/kailah/issues. To report a
+privacy problem privately, use the private reporting described in
+SECURITY.md.

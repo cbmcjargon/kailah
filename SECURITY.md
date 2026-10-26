@@ -8,9 +8,10 @@ feedback it can get. Thank you for taking the time.
 Report privately. Please don't open a public issue, discussion or pull request
 for a security problem.
 
-- **Preferred:** GitHub private vulnerability reporting. Open this
-  repository's **Security** tab and choose **Report a vulnerability**.
-- **Email:** security@photoprompting.org
+Use GitHub private vulnerability reporting: open this repository's
+**Security** tab and choose **Report a vulnerability**, or go straight to
+https://github.com/cbmcjargon/kailah/security/advisories/new. Only you and the
+maintainer can see the report. There is no security email address.
 
 A useful report says:
 
