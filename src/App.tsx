@@ -284,25 +284,36 @@ export default function App({ mnemonic, sessionRef, onLock, onErase }: AppProps)
   evmStatesRef.current = evmStates
   const evmSeqRef = useRef<Partial<Record<EvmChainId, number>>>({})
 
-  // One ed25519 key per seed for the Solana engine (Phantom-standard path).
-  const solKey = useMemo<SolKey | null>(
-    () => (sol.lib === null ? null : sol.lib.deriveSolKey(mnemonic)),
+  // One ed25519 key per seed for the Solana engine (Phantom-standard path),
+  // and a separate one for the practice cluster (coin type 1, like Bitcoin's
+  // testnet): nothing signed in practice mode can ever spend real coins.
+  const solKeys = useMemo<{ real: SolKey; practice: SolKey } | null>(
+    () =>
+      sol.lib === null
+        ? null
+        : { real: sol.lib.deriveSolKey(mnemonic), practice: sol.lib.deriveSolKey(mnemonic, 0, true) },
     [sol.lib, mnemonic],
   )
-  const solKeyRef = useRef(solKey)
-  solKeyRef.current = solKey
+  const solKey = solKeys === null ? null : mode === 'practice' ? solKeys.practice : solKeys.real
+  const solKeysRef = useRef(solKeys)
+  solKeysRef.current = solKeys
 
   const solStatesRef = useRef(solStates)
   solStatesRef.current = solStates
   const solSeqRef = useRef<Partial<Record<SolChainId, number>>>({})
 
-  // One secp256k1 key per seed for the TRON engine (TronLink-standard path).
-  const tronKey = useMemo<TronKey | null>(
-    () => (tron.lib === null ? null : tron.lib.deriveTronKey(mnemonic)),
+  // One secp256k1 key per seed for the TRON engine (TronLink-standard path),
+  // and a separate one for Nile, for the same reason as Solana's.
+  const tronKeys = useMemo<{ real: TronKey; practice: TronKey } | null>(
+    () =>
+      tron.lib === null
+        ? null
+        : { real: tron.lib.deriveTronKey(mnemonic), practice: tron.lib.deriveTronKey(mnemonic, true) },
     [tron.lib, mnemonic],
   )
-  const tronKeyRef = useRef(tronKey)
-  tronKeyRef.current = tronKey
+  const tronKey = tronKeys === null ? null : mode === 'practice' ? tronKeys.practice : tronKeys.real
+  const tronKeysRef = useRef(tronKeys)
+  tronKeysRef.current = tronKeys
 
   const tronStatesRef = useRef(tronStates)
   tronStatesRef.current = tronStates
@@ -569,8 +580,9 @@ export default function App({ mnemonic, sessionRef, onLock, onErase }: AppProps)
   const refreshSol = useCallback(
     (chain: SolChainConfig, opts?: { silent?: boolean; quick?: boolean }) => {
       const lib = solRef.current
-      const key = solKeyRef.current
-      if (lib === null || key === null) return
+      // the key for THIS chain's mode, whatever mode the UI shows right now
+      const key = chain.mainnet ? solKeysRef.current?.real : solKeysRef.current?.practice
+      if (lib === null || key === undefined) return
       const seq = (solSeqRef.current[chain.id] ?? 0) + 1
       solSeqRef.current[chain.id] = seq
       const isCurrent = () => solSeqRef.current[chain.id] === seq
@@ -650,8 +662,8 @@ export default function App({ mnemonic, sessionRef, onLock, onErase }: AppProps)
   const refreshTron = useCallback(
     (chain: TronChainConfig, opts?: { silent?: boolean; quick?: boolean }) => {
       const lib = tronRef.current
-      const key = tronKeyRef.current
-      if (lib === null || key === null) return
+      const key = chain.mainnet ? tronKeysRef.current?.real : tronKeysRef.current?.practice
+      if (lib === null || key === undefined) return
       const seq = (tronSeqRef.current[chain.id] ?? 0) + 1
       tronSeqRef.current[chain.id] = seq
       const isCurrent = () => tronSeqRef.current[chain.id] === seq
@@ -932,8 +944,10 @@ export default function App({ mnemonic, sessionRef, onLock, onErase }: AppProps)
   const wipe = useCallback(() => {
     for (const acc of Object.values(accountsRef.current)) acc.zero()
     evmKeyRef.current?.zero()
-    solKeyRef.current?.zero()
-    tronKeyRef.current?.zero()
+    solKeysRef.current?.real.zero()
+    solKeysRef.current?.practice.zero()
+    tronKeysRef.current?.real.zero()
+    tronKeysRef.current?.practice.zero()
     for (const hw of hwAccountsRef.current) hw.zero()
     orphanBalanceFetches()
     lastTotalsRef.current = {}

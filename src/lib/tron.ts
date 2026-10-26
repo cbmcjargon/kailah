@@ -29,6 +29,8 @@ import { bytesToHex, hexToBytes } from '@noble/hashes/utils'
 import { secp256k1 } from '@noble/curves/secp256k1'
 import { formatEvmAmount } from './units'
 import type { NetMode } from './types'
+import { recordSentTo } from './sentlog'
+import { agoText, dropPending, recordPending, tronInFlightBlock } from './pending'
 
 const b58check = createBase58check(sha256)
 
@@ -101,6 +103,14 @@ export function tronChainsForMode(mode: NetMode): TronChainConfig[] {
 // Keys + addresses.
 
 export const TRON_DERIVATION_PATH = "m/44'/195'/0'/0/0"
+/**
+ * Practice mode (Nile) signs with a different key, at BIP44's testnet coin
+ * type: the node builds the raw transaction and nothing the wallet can check
+ * binds it to Nile (its ref_block is the node's word), so a hostile Nile node
+ * could otherwise get a mainnet-valid signature from the real key (audit
+ * 2026-10-26, H3). No mainnet wallet derives TRON at coin type 1.
+ */
+export const TRON_PRACTICE_PATH = "m/44'/1'/0'/0/0"
 
 export interface TronKey {
   address: string
@@ -117,9 +127,9 @@ export function tronAddressFromPublicKey(uncompressedPub: Uint8Array): string {
   return b58check.encode(payload)
 }
 
-export function deriveTronKey(mnemonic: string): TronKey {
+export function deriveTronKey(mnemonic: string, practice = false): TronKey {
   // step-wise derivation: seed, root and intermediates wiped as it goes
-  const node = deriveNodeWiped(mnemonic, TRON_DERIVATION_PATH)
+  const node = deriveNodeWiped(mnemonic, practice ? TRON_PRACTICE_PATH : TRON_DERIVATION_PATH)
   if (!node.privateKey) throw new Error('TRON key derivation failed')
   const privateKey = new Uint8Array(node.privateKey)
   node.wipePrivateData() // we keep only our copy
@@ -431,11 +441,16 @@ function decodeContract(bytes: Uint8Array): DecodedTronTx['contracts'][number] {
     tokenId: type === 'TriggerSmartContract' ? (inner.get(6)?.varint ?? 0n) : 0n,
     resource:
       type === 'FreezeBalanceV2Contract' || type === 'UnfreezeBalanceV2Contract'
-        ? (inner.get(3)?.varint ?? 0n) === 1n
-          ? 'ENERGY'
-          : 'BANDWIDTH'
+        ? decodeResource(inner.get(3)?.varint ?? 0n)
         : null,
   }
+}
+
+/** protocol.ResourceCode: 0 BANDWIDTH, 1 ENERGY; anything else is not something this wallet asked for. */
+function decodeResource(v: bigint): 'BANDWIDTH' | 'ENERGY' {
+  if (v === 0n) return 'BANDWIDTH'
+  if (v === 1n) return 'ENERGY'
+  throw new Error(UNEXPECTED)
 }
 
 /** Decode protocol.Transaction.raw (the exact bytes that get signed). */
@@ -464,16 +479,30 @@ export function decodeTronRawTx(rawHex: string): DecodedTronTx {
 }
 
 /**
+ * How far ahead a transaction's expiration may sit. The node sets ~60 s;
+ * the chain's own maximum is 24 h, which is how long a captured signature
+ * would stay replayable. Ten minutes leaves room for clock skew and bounds
+ * the in-flight ledger's hold to the same (audit 2026-10-26, M4).
+ */
+export const TRON_MAX_EXPIRATION_MS = 10 * 60_000
+
+/**
  * Envelope checks shared by every signing path: fee_limit must be exactly
  * what the flow pins (0 for bandwidth-only contracts — an inflated limit is
- * budget a hostile node could burn as energy), and expiration must sit within
- * a day of now, so signed bytes can't be kept valid-for-broadcast far beyond
- * the ~minute the node intends.
+ * budget a hostile node could burn as energy), and expiration must sit
+ * within TRON_MAX_EXPIRATION_MS of now. A device clock that runs fast would
+ * make a fresh transaction look expired, so the past is tolerated by the
+ * same margin: the chain refuses anything truly expired anyway.
  */
 export function assertTronEnvelope(decoded: DecodedTronTx, feeLimit: bigint): void {
   if (decoded.feeLimit !== feeLimit) throw new Error(UNEXPECTED)
-  const dayAhead = BigInt(Date.now() + 24 * 3600 * 1000)
-  if (decoded.expiration <= 0n || decoded.expiration > dayAhead) throw new Error(UNEXPECTED)
+  const now = Date.now()
+  if (
+    decoded.expiration <= BigInt(now - TRON_MAX_EXPIRATION_MS) ||
+    decoded.expiration > BigInt(now + TRON_MAX_EXPIRATION_MS)
+  ) {
+    throw new Error(UNEXPECTED)
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -498,6 +527,30 @@ export interface PreparedTronSend {
   /** verbatim node response pieces needed to broadcast */
   rawData: unknown
   txID: string
+  /** the transaction's own expiration (unix ms), from the verified bytes */
+  expiration: number
+}
+
+/** True once the node knows this transaction (pool or chain). A failed call throws. */
+export async function tronTxSeen(chain: TronChainConfig, txid: string): Promise<boolean> {
+  const r = await tronCall<{ txID?: unknown }>(chain, '/wallet/gettransactionbyid', { value: txid, visible: true })
+  return typeof r.txID === 'string'
+}
+
+/**
+ * Refuse a new TRON send or stake while a recent attempt on this chain is
+ * neither seen by the node nor past its own expiration: TRON has no nonce,
+ * so a rebuilt transaction would land beside the first if the first's
+ * answer was merely lost (audit 2026-10-26, H2).
+ */
+export async function assertNoTronInFlight(chain: TronChainConfig): Promise<void> {
+  const block = await tronInFlightBlock(chain.id, (txid) => tronTxSeen(chain, txid))
+  if (block === null) return
+  throw new Error(
+    block.reason === 'pending'
+      ? `A transaction from ${agoText(block.entry.ts)} may still go through — its window hasn't closed. Wait a few minutes, then try again; sending now could pay twice.`
+      : `Couldn't check whether your transaction from ${agoText(block.entry.ts)} went through. Wait a minute and try again — sending without knowing could pay twice.`,
+  )
 }
 
 const MISMATCH =
@@ -537,6 +590,7 @@ export async function prepareTronSend(
     throw new Error('That is your own address — sending to yourself only burns fees.')
   }
   if (amount <= 0n) throw new Error('Enter an amount to send.')
+  await assertNoTronInFlight(chain)
 
   const [balance, usdtBalance, toAccount] = await Promise.all([
     getTronBalance(chain, key.address),
@@ -583,6 +637,7 @@ export async function prepareTronSend(
       rawDataHex: r.raw_data_hex,
       rawData: r.raw_data,
       txID: verifyTxId(r.raw_data_hex, r.txID),
+      expiration: Number(decoded.expiration),
     }
   }
 
@@ -664,6 +719,7 @@ export async function prepareTronSend(
     rawDataHex: tx.raw_data_hex,
     rawData: tx.raw_data,
     txID: verifyTxId(tx.raw_data_hex, tx.txID),
+    expiration: Number(decoded.expiration),
   }
 }
 
@@ -673,6 +729,17 @@ export async function broadcastTronSend(
 ): Promise<string> {
   // txID = sha256(raw bytes) — recomputed at prepare; sign exactly that.
   const digest = hexToBytes(prepared.txID)
+  const entry = {
+    kind: 'tron' as const,
+    chainId: prepared.chain.id,
+    txid: prepared.txID,
+    to: prepared.to,
+    expiration: prepared.expiration,
+    ts: Date.now(),
+  }
+  // recorded BEFORE the send so even a timed-out attempt leaves a trace
+  recordPending(entry)
+  recordSentTo(prepared.chain.id, prepared.to)
   const sig = secp256k1.sign(digest, key.privateKey)
   const signature = bytesToHex(sig.toCompactRawBytes()) + (sig.recovery === 1 ? '01' : '00')
   const r = await tronCall<{ result?: boolean; code?: string; message?: string }>(
@@ -686,7 +753,13 @@ export async function broadcastTronSend(
       visible: true,
     },
   )
+  // The node already holds it (a lost answer to an earlier try): that IS success.
+  if (r.result !== true && r.code === 'DUP_TRANSACTION') return prepared.txID
   if (r.result !== true) {
+    // The node answered with a rejection, so nothing was taken: the record
+    // would only block the user for nothing. (A network failure above threw
+    // before this point and keeps it.)
+    dropPending(entry)
     let detail = r.message ?? r.code ?? 'the node rejected the transaction'
     try {
       // node messages arrive hex-encoded

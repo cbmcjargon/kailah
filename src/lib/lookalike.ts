@@ -2,7 +2,7 @@
 //
 // Contract:
 //   findLookalike(candidate, known, format): Lookalike | null
-//   knownFromUtxo / knownFromEvm / knownFromSol / knownFromTron → KnownAddress[]
+//   knownAddresses(own, counterparties, sentTo): KnownAddress[]
 //
 // The scam: right after you pay someone, an attacker sends you a tiny amount
 // from an address that starts and ends like the one you paid (observed on the
@@ -12,21 +12,17 @@
 //
 // So the send form warns when the address typed or pasted shares its start
 // and end with an address from this account's history (or one of its own
-// addresses) but isn't it. Two rules keep the attacker from slipping through:
-//   - only sends this wallet actually signed make an address trusted
-//     ("sent"). An address that merely SENT you something is not: the
-//     poisoner did exactly that. Neither is a zero-value transfer that shows
-//     up as "out" (TRON USDT transferFrom with 0) or any custom-token row on
-//     EVM: anyone can emit those in your name;
-//   - a match against an untrusted address still warns, and says when the
-//     typed address is one that sent you something.
-// It reads only the history each send screen already holds (no extra
-// requests), so it sees as far back as that history goes.
+// addresses) but isn't it. What makes an address TRUSTED (never warned about)
+// is only the wallet's own send log (sentlog.ts): a history row, whatever its
+// direction, never does, because the data service that serves the history
+// could plant a "sent" row to silence the warning (audit 2026-10-26). A
+// match against an untrusted address still warns, and says when the typed
+// address is one that appears in the history.
 //
 // Pure: no engine imports, so any send modal can use it without pulling an
 // engine chunk forward.
 
-/** How an address appears in this account's history. */
+/** How an address is known: ours, paid by this wallet, or merely seen in history. */
 export type Relation = 'own' | 'sent' | 'other'
 
 export interface KnownAddress {
@@ -70,7 +66,7 @@ export interface Lookalike {
   /** the known address the candidate resembles */
   known: string
   relation: Relation
-  /** the candidate itself sent this account something (never paid by it) */
+  /** the candidate itself appears in this account's history (never paid by it) */
   seenIncoming: boolean
   /** raw characters at the candidate's start and end that match `known` */
   sameStart: number
@@ -101,8 +97,9 @@ function overlap(a: string, b: string): { start: number; end: number } {
 const PRIORITY: Record<Relation, number> = { sent: 0, own: 1, other: 2 }
 
 /**
- * The known address `candidate` imitates, or null. An address this account
- * has paid before, or one of its own, is trusted and never warns.
+ * The known address `candidate` imitates, or null. An address this wallet
+ * has paid before (its own send log), or one of its own, is trusted and never
+ * warns.
  */
 export function findLookalike(
   candidate: string,
@@ -140,67 +137,28 @@ export function findLookalike(
   return best
 }
 
-// ---------------------------------------------------------------------------
-// What each engine's history says. Structural types, so this module needs no
-// engine import; each matches the engine's own tx row.
-
-interface Row {
-  direction: 'in' | 'out' | 'self'
-  counterparty: string | null
-}
-
-function collect(own: string[], rows: { address: string | null; relation: Relation }[]): KnownAddress[] {
+/**
+ * The address set a send form checks against: the account's own addresses
+ * ('own'), the addresses the wallet itself has sent to ('sent', from
+ * sentlog.ts), and every counterparty its history shows, in either direction
+ * ('other'). Trust never comes from the history.
+ */
+export function knownAddresses(
+  own: string[],
+  counterparties: (string | null)[],
+  sentTo: string[],
+): KnownAddress[] {
   const out: KnownAddress[] = own.map((address) => ({ address, relation: 'own' as const }))
-  const ownSet = new Set(own)
-  for (const r of rows) {
-    if (r.address && !ownSet.has(r.address)) out.push({ address: r.address, relation: r.relation })
+  const taken = new Set(own)
+  for (const address of sentTo) {
+    if (taken.has(address)) continue
+    taken.add(address)
+    out.push({ address, relation: 'sent' })
+  }
+  for (const address of counterparties) {
+    if (!address || taken.has(address)) continue
+    taken.add(address)
+    out.push({ address, relation: 'other' })
   }
   return out
-}
-
-/** UTXO: every derived address is ours; an "out" row was signed by us. */
-export function knownFromUtxo(ownAddresses: string[], txs: Row[]): KnownAddress[] {
-  return collect(
-    ownAddresses,
-    txs.map((t) => ({ address: t.counterparty, relation: t.direction === 'out' ? 'sent' : 'other' })),
-  )
-}
-
-/**
- * EVM: native sends and pinned-token (USDC) sends are ours. A custom-token
- * row can be emitted by any contract in anyone's name, so it never trusts.
- */
-export function knownFromEvm(
-  own: string,
-  txs: (Row & { asset: 'token' | 'gas'; tokenSymbol?: string })[],
-): KnownAddress[] {
-  return collect(
-    [own],
-    txs.map((t) => ({
-      address: t.counterparty,
-      relation: t.direction === 'out' && (t.asset === 'gas' || t.tokenSymbol === undefined) ? 'sent' : 'other',
-    })),
-  )
-}
-
-/** Solana: an "out" row means our balance went down, which needs our signature. */
-export function knownFromSol(own: string, txs: Row[]): KnownAddress[] {
-  return collect(
-    [own],
-    txs.map((t) => ({ address: t.counterparty, relation: t.direction === 'out' ? 'sent' : 'other' })),
-  )
-}
-
-/**
- * TRON: a zero-value USDT "out" row is the classic poisoning trick
- * (transferFrom of 0 needs no allowance), so only non-zero sends trust.
- */
-export function knownFromTron(own: string, txs: (Row & { amount: bigint })[]): KnownAddress[] {
-  return collect(
-    [own],
-    txs.map((t) => ({
-      address: t.counterparty,
-      relation: t.direction === 'out' && t.amount !== 0n ? 'sent' : 'other',
-    })),
-  )
 }

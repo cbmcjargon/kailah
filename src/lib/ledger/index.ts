@@ -316,6 +316,8 @@ export async function verifyAddressOnLedger(
   index: number,
   source: TransportSource,
   onStatus?: (s: LedgerStatus) => void,
+  /** the exact string the screen shows: it must equal the derivation AND the device */
+  displayed?: string,
 ): Promise<void> {
   const info = HARDWARE_CHAINS[account.record.chain]
   await withLedger(source, info.appName, onStatus, async (t) => {
@@ -323,6 +325,9 @@ export async function verifyAddressOnLedger(
     const opened = await openAppFor(t, account.record.chain)
     await assertSameAccount(opened, account)
     const expected = account.address(branch, index).address
+    if (displayed !== undefined && displayed !== expected) {
+      throw new LedgerError('wrong-device', "The address on this screen isn't the one this account derives. Don't use it.")
+    }
     onStatus?.('confirm')
     const shown = await showAddress(
       opened,

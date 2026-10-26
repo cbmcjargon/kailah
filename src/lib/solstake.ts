@@ -21,10 +21,15 @@
 // waiting out the epoch. All of that is stated in the UI, not hidden.
 
 import { sha256 } from '@noble/hashes/sha2'
+import { recordPending } from './pending'
 import { base58 } from '@scure/base'
 import { concatBytes, utf8ToBytes } from '@noble/hashes/utils'
 import * as solLib from 'micro-sol-signer'
-import { formatSol, getSolBalance, solRpc, type SolChainConfig, type SolKey } from './sol'
+import { formatSol, getSolBalance, solRpc, type SolChainConfig, type SolKey,
+  assertNoSolInFlight,
+  blockHeightOf,
+  SolBroadcastError,
+} from './sol'
 
 export const STAKE_PROGRAM = 'Stake11111111111111111111111111111111111111'
 const SYSVAR_CLOCK = 'SysvarC1ock11111111111111111111111111111111'
@@ -263,6 +268,8 @@ export interface PreparedStakeAction {
   chain: SolChainConfig
   kind: 'create' | 'deactivate' | 'withdraw'
   stakeAccount: string
+  /** the blockhash's last valid block height: when this attempt can no longer land */
+  lastValidBlockHeight: number
   /** delegated lamports for create; withdrawn lamports for withdraw; 0 else */
   amount: bigint
   rentLamports: bigint
@@ -304,6 +311,7 @@ export async function prepareCreateStake(
   amount: bigint,
   votePubkey: string,
 ): Promise<PreparedStakeAction> {
+  await assertNoSolInFlight(chain)
   const [freeSlot, minStake, balance, rentRes, mainRentRes, bh] = await Promise.all([
     emptyStakeSlotIndex(chain, key.address),
     getMinimumStake(chain),
@@ -312,7 +320,7 @@ export async function prepareCreateStake(
       () => null,
     ),
     solRpc<number>(chain, 'getMinimumBalanceForRentExemption', [0]).catch(() => null),
-    solRpc<{ value: { blockhash: string } }>(chain, 'getLatestBlockhash', [
+    solRpc<{ value: { blockhash: string; lastValidBlockHeight?: unknown } }>(chain, 'getLatestBlockhash', [
       { commitment: 'confirmed' },
     ]),
   ])
@@ -358,6 +366,7 @@ export async function prepareCreateStake(
   return {
     chain,
     kind: 'create',
+    lastValidBlockHeight: blockHeightOf(bh.value.lastValidBlockHeight),
     stakeAccount,
     amount,
     rentLamports: rent,
@@ -372,7 +381,8 @@ export async function prepareDeactivate(
   key: SolKey,
   account: StakeAccountView,
 ): Promise<PreparedStakeAction> {
-  const bh = await solRpc<{ value: { blockhash: string } }>(chain, 'getLatestBlockhash', [
+  await assertNoSolInFlight(chain)
+  const bh = await solRpc<{ value: { blockhash: string; lastValidBlockHeight?: unknown } }>(chain, 'getLatestBlockhash', [
     { commitment: 'confirmed' },
   ])
   const unsigned = solLib.createTx(
@@ -383,6 +393,7 @@ export async function prepareDeactivate(
   return {
     chain,
     kind: 'deactivate',
+    lastValidBlockHeight: blockHeightOf(bh.value.lastValidBlockHeight),
     stakeAccount: account.address,
     amount: 0n,
     rentLamports: 0n,
@@ -402,7 +413,8 @@ export async function prepareWithdraw(
       'This stake is still cooling down — withdrawing works after the current epoch ends (up to ~2 days).',
     )
   }
-  const bh = await solRpc<{ value: { blockhash: string } }>(chain, 'getLatestBlockhash', [
+  await assertNoSolInFlight(chain)
+  const bh = await solRpc<{ value: { blockhash: string; lastValidBlockHeight?: unknown } }>(chain, 'getLatestBlockhash', [
     { commitment: 'confirmed' },
   ])
   // Withdraw everything: the account closes and rent comes back too.
@@ -414,6 +426,7 @@ export async function prepareWithdraw(
   return {
     chain,
     kind: 'withdraw',
+    lastValidBlockHeight: blockHeightOf(bh.value.lastValidBlockHeight),
     stakeAccount: account.address,
     amount: account.lamports,
     rentLamports: 0n,
@@ -427,9 +440,22 @@ export async function broadcastStakeAction(
   key: SolKey,
   prepared: PreparedStakeAction,
 ): Promise<string> {
-  const [, signed] = solLib.signTx(key.privateKey, prepared.unsigned)
-  return solRpc<string>(prepared.chain, 'sendTransaction', [
-    signed,
-    { encoding: 'base64', preflightCommitment: 'confirmed' },
-  ])
+  const [txid, signed] = solLib.signTx(key.privateKey, prepared.unsigned)
+  // recorded BEFORE the send: a create-stake whose answer is lost must not
+  // be rebuilt into a second stake (audit 2026-10-26, L12)
+  recordPending({
+    kind: 'sol',
+    chainId: prepared.chain.id,
+    signature: txid,
+    ts: Date.now(),
+    lastValidBlockHeight: prepared.lastValidBlockHeight,
+  })
+  try {
+    return await solRpc<string>(prepared.chain, 'sendTransaction', [
+      signed,
+      { encoding: 'base64', preflightCommitment: 'confirmed' },
+    ])
+  } catch (e) {
+    throw new SolBroadcastError(e instanceof Error ? e.message : String(e), txid, signed)
+  }
 }

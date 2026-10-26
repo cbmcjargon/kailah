@@ -1,6 +1,6 @@
 # Kailah Wallet — maintenance notes
 
-Self-custody browser wallet, v2.6.1: four engines — UTXO (BTC/DOGE/LTC),
+Self-custody browser wallet, v2.7.0: four engines — UTXO (BTC/DOGE/LTC),
 EVM (USDC+ETH on Base/Ethereum/Arbitrum + BNB on BSC, no explorer API there),
 Solana (SOL + SPL USDC + Jupiter swaps + native staking via hand-built
 stake-program instructions in solstake.ts), TRON (TRX + USDT-TRC20 + Stake 2.0 via tron.ts/tronstake.ts — the node builds raw txs and the wallet DECODES the protobuf bytes
@@ -36,7 +36,7 @@ not feature building, unless the user asks for something new.
   committing, and never `git add -A` right after a deploy without checking.
   The public snapshot's leak scan refuses that path (it caught it once,
   2026-10-25).
-- Tests: `npm run check:offline` (keys, txbuild, txv2, qrparse, vault, scanner, hw, pending, netprefs, failover, swapgate, lookalike —
+- Tests: `npm run check:offline` (keys, txbuild, txv2, qrparse, vault, scanner, hw, pending, netprefs, failover, swapgate, lookalike, trondecode —
   no network; this is what CI runs on every push) and `npm run check:live`
   (account, evm, sol, solswap, solstake, tron — real networks; a provider being
   down or rate-limited prints SKIP, never FAIL). check-providers.mjs is run by
@@ -87,10 +87,16 @@ not feature building, unless the user asks for something new.
   intermediate token account Jupiter opens (intermediateCloses); without it
   the stranded rent trips the SOL-cost bound and the swap is refused.
 - Lookalike-address warning (lib/lookalike.ts, LookalikeWarning.tsx) on all
-  four send forms. Only rows this wallet signed make an address trusted
-  ("sent"): never incoming rows, TRON zero-value USDT "out" rows, or EVM
-  custom-token rows, since an attacker can create all three. It reads only
-  the history the form already has (no extra requests).
+  four send forms. An address is trusted ("sent") only when the wallet's own
+  send log says it paid it; history rows never make one trusted (a lying
+  data service could plant a "sent" row). It reads only the history the
+  form already has (no extra requests).
+- Practice-mode keys are separate: Solana devnet and TRON Nile derive at
+  coin type 1 (SOL_PRACTICE_PATH / TRON_PRACTICE_PATH), the UTXO testnet
+  already did. A chain's binding comes from the node (Solana's blockhash,
+  TRON's ref_block), so a practice signature from the REAL key would be
+  mainnet-valid if the practice node lied (audit 2026-10-26). App.tsx holds
+  both keys and picks by mode; wipe() zeroes both.
 - All amounts are bigint smallest-units everywhere. No floats in money math.
 - Secrets (mnemonic, private keys) exist only in memory; never log/store them.
   Private keys are zeroed on lock/erase; erase must clear every kailah.* key.
@@ -125,6 +131,21 @@ not feature building, unless the user asks for something new.
   whose scan found funds or history, or couldn't tell.
 - Sends always build from a fresh scan (no stale-utxo fallback) and change goes
   to the next unused change address.
+- The in-flight ledger (lib/pending.ts) covers all four engines: every
+  broadcast is recorded BEFORE it goes out, and a new send is refused while
+  an attempt may still land (EVM: every attempt per nonce stays recorded,
+  a same-nonce retry outbids by 10 %, "unknown" blocks for 10 min; Solana:
+  held until the RPC's block height passes the blockhash's last valid
+  height, and a failed broadcast is retried with the SAME bytes; TRON: until
+  the tx's own expiration, bounded to 10 min; UTXO: 30 min, provider txSeen).
+  Speed up first proves the pending tx carries OUR signatures
+  (hwsign.assertSignedByUs): the provider picks what it shows as pending.
+- The swap gate pins the Jupiter instruction's source/destination accounts
+  and mints to the owner's ATAs, accepts v2 routes only, allows no top-level
+  token transfer, and lets helper instructions move value only between the
+  owner's own accounts; the input side must move by exactly the input.
+- The lookalike check trusts only the wallet's own send log (lib/sentlog.ts),
+  never history rows.
 - Test wallet for dev flows: the public BIP39 vector phrase (abandon ×11 +
   about), password irrelevant — NEVER for real funds; erase after testing. Its
   testnet4/mainnet accounts have real history useful for exercising the UI.

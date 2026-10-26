@@ -17,7 +17,7 @@ import { sha256 } from '@noble/hashes/sha2'
 import type { AccountKeys, AddressKey, ChainConfig, DerivedKey } from './types'
 
 /** Collapse whitespace and lowercase so pasted phrases validate reliably. */
-function normalizeMnemonic(m: string): string {
+export function normalizeMnemonic(m: string): string {
   return m.trim().toLowerCase().split(/\s+/).join(' ')
 }
 

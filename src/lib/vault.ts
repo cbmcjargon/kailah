@@ -26,7 +26,8 @@ const IV_BYTES = 12
 // measured 1.9 s here — 4-6 s on a phone — too slow for every unlock.) Bounds below reject a tampered
 // record before it can hang unlock for minutes or exhaust memory.
 const ARGON = { m: 32768, t: 3, p: 1 } as const
-const ARGON_BOUNDS = { m: [8192, 1048576], t: [1, 10], p: [1, 4] } as const
+// m up to 256 MiB: a tampered record can't make unlock exhaust a phone's memory
+const ARGON_BOUNDS = { m: [8192, 262144], t: [1, 10], p: [1, 4] } as const
 
 const KDF_V1 = 'pbkdf2-sha256'
 const KDF_V2 = 'argon2id'

@@ -687,6 +687,106 @@ The gate makes the fee impossible to raise or redirect:
   measured the fee on live mainnet routes at exactly 0.5%, and a live route
   with its fee redirected is refused.
 
+### Second audit, 2026-10-26 — seven adversarial reviews, fixed in v2.7.0
+
+Six parallel AI-assisted reviews (UTXO, Ledger, EVM, Solana/swaps, TRON,
+delivery/UI/extension) plus a direct review of the vault and key handling,
+over v2.6.1; every finding below was re-verified by reading the code and
+re-running each reviewer's probe before it was accepted. Still not a
+third-party audit. Totals: 2 critical, 5 high, 8 medium, 14 low. All of the
+critical, high and medium findings and most of the low ones are fixed in the
+commits following `abc903f`; what held, and what remains, is listed after.
+
+**Theme 1 — the wallet kept no record of what it had signed.** It asked the
+data service "which transactions are mine / did my send go out?" and
+trusted the answer.
+
+- **CRITICAL — Speed up signed a provider-forged original.** `decodeVerifiedTx`
+  bound the pending transaction's bytes to its txid, but the txid itself
+  came from the provider's history, and nothing checked that the inputs
+  carried our signatures: a fabricated "pending" payment (our real coins, a
+  garbage witness, any outputs) became a real, signed replacement — on seed
+  accounts and, with the Ledger showing the forged recipient, on hardware
+  accounts. Fix: `hwsign.assertSignedByUs` verifies every input's witness
+  signature against the wallet's own BIP143 digest before a bump is planned.
+  A provider cannot forge our signatures. (check-txv2 J, check-hw J)
+- **HIGH — EVM same-nonce retry forgot the first attempt.** The in-flight
+  ledger overwrote the entry at that nonce, and the retry did not outbid the
+  first attempt, so a node holding the first refused the "replacement"; once
+  the modal closed, a new send at the next nonce was allowed and both could
+  mine. Fix: every attempt per nonce stays recorded, a retry outbids by 10 %,
+  a mined attempt settles its whole nonce, an attempt the node claims never
+  to have seen blocks for ten minutes, and a node's explicit rejection drops
+  the record. (check-pending A10, C2)
+- **HIGH — TRON had no in-flight record at all**; an ambiguous broadcast was
+  reported as "nothing was sent" and the retry rebuilt a different
+  transaction (TRON has no nonce). Fix: recorded before broadcast, refused
+  while unseen and unexpired, DUP_TRANSACTION counts as success; the
+  expiration bound is now ten minutes, not the chain's 24 h. (check-pending F,
+  check-trondecode B)
+- **MEDIUM — UTXO sends had no in-flight record** (a lost answer, then a
+  rebuilt second payment). Fix: recorded before broadcast; a new send is
+  refused for up to 30 minutes while the provider doesn't report the txid.
+- **MEDIUM — Solana: the guard's expiry was a wall-clock guess** and a retry
+  built a fresh transaction. Fix: entries expire by the blockhash's last
+  valid block height; after a failed broadcast the modals re-send the SAME
+  bytes. Stake actions are recorded too. (check-pending A14b-f, G)
+- **LOW — the lookalike warning trusted "sent" rows from the data service.**
+  Fix: trust comes only from the wallet's own send log (`sentlog.ts`).
+
+**Theme 2 — the swap gate's allow-list was one opcode too wide, and it
+didn't pin which accounts move.**
+
+- **CRITICAL — a hostile `/build` could add an SPL `Transfer` /
+  `TransferChecked` out of ANY token account the owner holds** (USDT, JUP,
+  …) to any destination: the owner's one signature authorized it and the
+  balance diff watched only SOL and USDC. Fix: those opcodes are gone (Jupiter
+  moves tokens by CPI); helper instructions may move value only between the
+  owner's accounts. (check-swapgate J)
+- **HIGH — the older `route` / `shared_accounts_route` forms were decoded
+  from their last 19 bytes**, while the program reads from the front and
+  ignores trailing bytes. Fix: v2 forms only.
+- **HIGH — the swap's source/destination accounts and mints were never
+  pinned**, and the spend bounds were one-sided. Fix: pinned to the owner's
+  ATAs for the requested mints; the input side must move by exactly the
+  input.
+- **MEDIUM — no sanity check of the quote against the wallet's own price
+  feed.** Fix: the output is shown in USD and a quote more than 3 % under
+  market needs an explicit acknowledgement.
+
+**Theme 3 — practice and real mode shared one key on Solana and TRON**, and
+the chain binding (Solana's blockhash, TRON's ref_block) came from the node
+unverified, so a hostile practice node could obtain a mainnet-valid
+signature. **HIGH.** Fix: practice networks derive at BIP44's testnet coin
+type, as Bitcoin's testnet already did. (check-keys)
+
+**Also fixed:** EVM token sends to the token's own contract or the zero
+address are refused and a contract recipient is flagged (MEDIUM); a
+page-level CSP is generated into the web build so a host that drops the
+header can't drop the policy (MEDIUM); PRIVACY.md no longer overstates the
+CSP and lists every onramp that receives the address or a referral
+(MEDIUM/LOW); CI runs with read-only permissions and SHA-pinned actions;
+explorer links only ever carry a well-formed id; the gate compiles against
+the lookup-table entries Jupiter listed, not beyond; SOL sends refuse token
+and program accounts; Solana Pay `reference` and `memo` are carried; the
+TRON resource enum is strict; Speed up's fee pills are locked while a Ledger
+signs; "Verify on Ledger" compares the exact string on screen; Argon2
+parameters are bounded to 256 MiB.
+
+**What held:** the vault and key lifecycle; ordinary sends on every network;
+the TRON decoder against 44 hostile mutations; the EVM signing path (pinned
+chainId, one signing call, no approvals reachable); the Ledger protocol
+(only signatures come back, each verified against our own digest); the
+service worker, CSP hosts, Trusted Types, extension permissions and the
+dependency set.
+
+**Remaining:** the mirror serves `index.html` without `Cache-Control` (a
+stale page after a redeploy self-heals on reload; chunks are content-hashed);
+a fully lying single RPC can still make Solana's guard believe a send was
+seen; the on-chain behaviour behind the two swap findings (Anchor ignoring
+trailing bytes; the program accepting an arbitrary mint pair) was reasoned,
+not exercised live.
+
 ### Residual risks, as of 2026-10-22
 
 1. **Web delivery trust.** Whoever controls Netlify, DNS or the VPS can still

@@ -256,6 +256,55 @@ export function canonicalVerifiedSignature(
   return out
 }
 
+/** Why a pending transaction can't be sped up: it isn't this wallet's. */
+export const NOT_OURS =
+  "This transaction wasn't signed by this wallet, so it can't be sped up from here."
+
+/**
+ * Prove a pending transaction is ours before rebuilding it: every input's
+ * witness must be exactly [signature, our public key] and the signature
+ * must verify against the wallet's own BIP143 digest for that input. The
+ * data service chooses which transaction it shows as pending and can forge
+ * its bytes; it cannot forge our signatures (audit 2026-10-26, C1).
+ */
+export function assertSignedByUs(
+  chain: ChainConfig,
+  rawTxHex: string,
+  inputs: { publicKey: Uint8Array; value: bigint }[],
+): void {
+  if (chain.addressType !== 'p2wpkh') throw new Error(NOT_OURS)
+  let tx: Transaction
+  try {
+    tx = Transaction.fromRaw(hexToBytes(rawTxHex), {
+      allowUnknownOutputs: true,
+      allowUnknownInputs: true,
+      disableScriptCheck: true,
+    })
+  } catch {
+    throw new Error(NOT_OURS)
+  }
+  if (tx.inputsLength !== inputs.length) throw new Error(NOT_OURS)
+  inputs.forEach((inp, i) => {
+    const w = tx.getInput(i).finalScriptWitness
+    const pub = w?.[1]
+    if (
+      w === undefined ||
+      w.length !== 2 ||
+      pub === undefined ||
+      pub.length !== inp.publicKey.length ||
+      !pub.every((b, j) => b === inp.publicKey[j])
+    ) {
+      throw new Error(NOT_OURS)
+    }
+    const digest = tx.preimageWitnessV0(i, p2pkh(inp.publicKey).script, SIGHASH_ALL, inp.value)
+    try {
+      canonicalVerifiedSignature(w[0]!, digest, inp.publicKey)
+    } catch {
+      throw new Error(NOT_OURS)
+    }
+  })
+}
+
 /** The unsigned btc-signer transaction for a plan — same construction as buildTxV2's segwit branch. */
 export function unsignedTransaction(unsigned: UnsignedTx): Transaction {
   const { chain } = unsigned

@@ -18,7 +18,15 @@
 // broadcast as raw bytes; the private key is held as bytes we can zero.
 
 import { deriveNodeWiped } from './keys'
-import { agoText, evmInFlightBlock, recordPending, type EvmAttemptStatus } from './pending'
+import {
+  agoText,
+  dropPending,
+  evmInFlightBlock,
+  evmReplacementFloor,
+  recordPending,
+  type EvmAttemptStatus,
+} from './pending'
+import { recordSentTo } from './sentlog'
 import { formatEvmAmount } from './units'
 import { bytesToHex } from '@noble/hashes/utils'
 import {
@@ -31,6 +39,8 @@ import {
   type PublicClient,
   type Hex,
   keccak256,
+  BaseError,
+  RpcRequestError,
   TransactionNotFoundError,
   TransactionReceiptNotFoundError,
 } from 'viem'
@@ -434,6 +444,9 @@ interface BsTxItem {
   status?: string
 }
 
+/** a transaction hash as the explorer links expect it; anything else from the API is dropped */
+const EVM_HASH = /^0x[0-9a-fA-F]{64}$/
+
 function blockscoutBase(chain: EvmChainConfig): string | undefined {
   return chain.blockscoutBase
 }
@@ -466,7 +479,8 @@ export async function fetchEvmHistory(chain: EvmChainConfig, address: Hex): Prom
       const from = (t.from?.hash ?? '').toLowerCase()
       const to = (t.to?.hash ?? '').toLowerCase()
       const value = BigInt(t.total?.value ?? '0')
-      if (value === 0n || !t.transaction_hash) continue
+      // the hash becomes an explorer link: only a real 32-byte hash gets through
+      if (value === 0n || !t.transaction_hash || !EVM_HASH.test(t.transaction_hash)) continue
       const direction = from === me && to === me ? 'self' : from === me ? 'out' : 'in'
       const row: EvmTx = {
         hash: t.transaction_hash,
@@ -490,7 +504,7 @@ export async function fetchEvmHistory(chain: EvmChainConfig, address: Hex): Prom
   if (txsRes.status === 'fulfilled') {
     for (const t of txsRes.value.items ?? []) {
       const value = BigInt(t.value ?? '0')
-      if (value === 0n || !t.hash) continue // contract calls (incl. our USDC sends) carry 0 ETH
+      if (value === 0n || !t.hash || !EVM_HASH.test(t.hash)) continue // contract calls (incl. our USDC sends) carry 0 ETH
       const from = (t.from?.hash ?? '').toLowerCase()
       const to = (t.to?.hash ?? '').toLowerCase()
       const direction = from === me && to === me ? 'self' : from === me ? 'out' : 'in'
@@ -540,6 +554,8 @@ export interface PreparedEvmSend {
   /** present when this send moves a custom ERC-20 */
   customToken?: DetectedToken
   to: Hex
+  /** the recipient is a contract: tokens sent to one are lost unless it can hold them */
+  recipientIsContract: boolean
   amount: bigint
   /** total network fee in wei (gasLimit x maxFeePerGas, the worst case) */
   feeWei: bigint
@@ -591,9 +607,11 @@ export async function prepareEvmSend(args: EvmSendArgs): Promise<PreparedEvmSend
   if (block !== null) {
     const p = block.entry
     throw new Error(
-      block.reason === 'pending'
-        ? `A send from ${agoText(p.ts)} (to ${p.to.slice(0, 8)}…) is still waiting to confirm on ${chain.networkName}. Wait for it to confirm before sending again — sending now could pay twice.`
-        : `Couldn't check whether your send from ${agoText(p.ts)} (to ${p.to.slice(0, 8)}…) is still waiting on ${chain.networkName}. Try again in a moment — sending without knowing could pay twice.`,
+      block.reason === 'mined'
+        ? `Your send from ${agoText(p.ts)} (to ${p.to.slice(0, 8)}…) went through after all — there is nothing more to send.`
+        : block.reason === 'pending'
+          ? `A send from ${agoText(p.ts)} (to ${p.to.slice(0, 8)}…) may still be on its way on ${chain.networkName}. Wait for it to confirm, or for ten minutes, before sending again — sending now could pay twice.`
+          : `Couldn't check whether your send from ${agoText(p.ts)} (to ${p.to.slice(0, 8)}…) is still waiting on ${chain.networkName}. Try again in a moment — sending without knowing could pay twice.`,
     )
   }
   // Headroom on the market fee so a small gas-price move can't strand the tx —
@@ -603,11 +621,28 @@ export async function prepareEvmSend(args: EvmSendArgs): Promise<PreparedEvmSend
   // market on all five chains while bounding a 21k-gas send to ~0.021 ETH.
   const MAX_FEE_PER_GAS = 1_000_000_000_000n // 1000 gwei
   const MAX_PRIORITY_PER_GAS = 100_000_000_000n // 100 gwei
-  const rawPriority = fees.maxPriorityFeePerGas
-  const rawMax = (fees.maxFeePerGas * 15n) / 10n
+  let rawPriority = fees.maxPriorityFeePerGas
+  let rawMax = (fees.maxFeePerGas * 15n) / 10n
+  // A same-nonce retry only replaces the earlier attempt if it outbids it;
+  // at the market rate a node that holds the first attempt would refuse the
+  // second as underpriced, and the two would not be mutually exclusive.
+  const floor = args.reuseNonce !== undefined ? evmReplacementFloor(chain.chainId, args.reuseNonce) : null
+  if (floor !== null) {
+    if (floor.maxFeePerGas > MAX_FEE_PER_GAS || floor.maxPriorityFeePerGas > MAX_PRIORITY_PER_GAS) {
+      throw new Error(
+        'Replacing the earlier attempt would need a fee above the wallet\u2019s ceiling. Wait for it to confirm or drop out, then send again.',
+      )
+    }
+    if (floor.maxFeePerGas > rawMax) rawMax = floor.maxFeePerGas
+    if (floor.maxPriorityFeePerGas > rawPriority) rawPriority = floor.maxPriorityFeePerGas
+  }
   const maxFeePerGas = rawMax > MAX_FEE_PER_GAS ? MAX_FEE_PER_GAS : rawMax
   const maxPriorityFeePerGas =
     rawPriority > MAX_PRIORITY_PER_GAS ? MAX_PRIORITY_PER_GAS : rawPriority
+  // Tokens handed to a contract are gone unless it was built to hold them;
+  // handed to the token's own contract, or to nobody, they always are.
+  const recipientCode = await client.getCode({ address: to }).catch(() => undefined)
+  const recipientIsContract = recipientCode !== undefined && recipientCode !== '0x'
 
   if (asset === 'token') {
     // Custom tokens re-read their live balance from their own contract; the
@@ -615,6 +650,14 @@ export async function prepareEvmSend(args: EvmSendArgs): Promise<PreparedEvmSend
     const tokenContract = customToken?.address ?? chain.token.address
     const symbol = customToken?.symbol ?? chain.token.symbol
     const decimals = customToken?.decimals ?? chain.token.decimals
+    if (to.toLowerCase() === tokenContract.toLowerCase()) {
+      throw new Error(
+        `That is the ${symbol} token's own contract address, not a wallet. ${symbol} sent there is lost for good.`,
+      )
+    }
+    if (/^0x0{40}$/i.test(to)) {
+      throw new Error('That is the zero address. Anything sent there is lost for good.')
+    }
     const tokenBalance = customToken
       ? await client.readContract({
           address: tokenContract,
@@ -670,6 +713,7 @@ export async function prepareEvmSend(args: EvmSendArgs): Promise<PreparedEvmSend
       asset,
       ...(customToken !== undefined && { customToken }),
       to,
+      recipientIsContract,
       amount,
       feeWei,
       request: {
@@ -690,8 +734,7 @@ export async function prepareEvmSend(args: EvmSendArgs): Promise<PreparedEvmSend
   // 21k would simply revert and burn the fee on every attempt.
   let gasLimit = 21_000n
   if (balances.gas > 0n) {
-    const code = await client.getCode({ address: to }).catch(() => undefined)
-    if (code !== undefined && code !== '0x') {
+    if (recipientIsContract) {
       const est = await client.estimateGas({ account: key.address, to, value: 1n })
       gasLimit = (est * 12n) / 10n
       if (gasLimit > 400_000n) {
@@ -713,6 +756,7 @@ export async function prepareEvmSend(args: EvmSendArgs): Promise<PreparedEvmSend
     chain,
     asset,
     to,
+    recipientIsContract,
     amount,
     feeWei,
     request: {
@@ -761,16 +805,39 @@ export async function broadcastEvmSend(key: EvmKey, prepared: PreparedEvmSend): 
   // BEFORE broadcasting so even a timed-out send leaves a trace the next
   // prepare can check against the chain.
   const hash = keccak256(signed)
-  recordPending({
-    kind: 'evm',
+  const entry = {
+    kind: 'evm' as const,
     chainId: prepared.chain.chainId,
     nonce: prepared.request.nonce,
     hash,
     to: prepared.to,
     ts: Date.now(),
-  })
-  await client.sendRawTransaction({ serializedTransaction: signed })
+    maxFeePerGas: prepared.request.maxFeePerGas.toString(),
+    maxPriorityFeePerGas: prepared.request.maxPriorityFeePerGas.toString(),
+  }
+  recordPending(entry)
+  recordSentTo(prepared.chain.id, prepared.to)
+  try {
+    await client.sendRawTransaction({ serializedTransaction: signed })
+  } catch (e) {
+    // A node that ANSWERED with a rejection never took the transaction, so
+    // the record would only block the user for nothing — unless the answer
+    // says a transaction at this nonce already exists, which is the very
+    // case the record is for. Timeouts and network errors keep it.
+    if (isDefiniteRejection(e)) dropPending(entry)
+    throw e
+  }
   return hash
+}
+
+/** The node replied, and its reply means the bytes were not accepted (and nothing at that nonce is known). */
+function isDefiniteRejection(e: unknown): boolean {
+  if (!(e instanceof BaseError)) return false
+  const rpc = e.walk((err) => err instanceof RpcRequestError) as RpcRequestError | null
+  if (rpc === null) return false
+  return !/already known|known transaction|replacement|underpriced|nonce too low|same hash/i.test(
+    `${rpc.message} ${rpc.details ?? ''}`,
+  )
 }
 
 // ---------------------------------------------------------------------------

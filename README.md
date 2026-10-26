@@ -1,6 +1,6 @@
 # Kailah Wallet
 
-**v2.6.1** — a self-custody wallet for Bitcoin, Dogecoin, Litecoin, USDC + ETH
+**v2.7.0** — a self-custody wallet for Bitcoin, Dogecoin, Litecoin, USDC + ETH
 (Base / Ethereum / Arbitrum), BNB, Solana (SOL + USDC, with in-wallet swaps
 and native staking), and TRON (TRX + USDT) that runs entirely in the browser. No servers, no accounts, no custody: keys are
 generated on your device, encrypted with your password, and never leave it.
@@ -143,7 +143,10 @@ different name and logo.
   the sender must pick the right one. Practice mode has a Base Sepolia twin
   with faucets.
 - **Practice mode** — starts on Bitcoin's test network with faucet links, so you
-  can learn with worthless coins before touching real money.
+  can learn with worthless coins before touching real money. Practice
+  networks sign with their own keys (BIP44's testnet coin type, as Bitcoin's
+  testnet does), so nothing signed in practice mode can ever spend real
+  coins, whatever a test-network service returns.
 - **HD address rotation** — a fresh receive address per payment (BIP84 for
   BTC/LTC, BIP44 for DOGE); change returns to fresh change addresses; gap-limit
   scanning with a warm cache.
@@ -323,6 +326,7 @@ Verification suites (run with `npx tsx scripts/<name>.mjs`):
 | check-hw.mjs | hardware signing against scripts/ledger-emulator.mjs (device side of both Ledger protocols): framing, merkle/client commands, wallet policy, xpub import (LTC assembled from legacy replies), sends and RBF bumps byte-identical to the software path on BTC/testnet/LTC, a btc-signer-parsed PSBTv2 mock, device display = review screen, and every refusal (tampered digest, wrong key/index, bad DER, lying provider, other Ledger, rejected, locked, wrong app) |
 | check-solswap.mjs | independent ATA re-derivation, a REAL devnet USDC send, live Jupiter Swap V2 builds in both directions, the full prepareSwap gate on mainnet (simulation only, including a first-time USDC holder), a route through a third token, the fee wallet swapping for itself, and adversarial tests on live routes: a quote promising more than its route, a route whose slippage was raised, and one whose fee was redirected are all refused |
 | check-netprefs.mjs | networks-shown choice: encrypted and seed-bound, cleared by erase, practice mirroring, the funds/history classifier that never hides a funded or unreadable network, which engine chunks load for a choice (and that the static ids/labels match the engines), and source checks that every scan/poll loop filters hidden networks and every engine load is gated |
+| check-trondecode.mjs | the TRON decoder on hand-built protobuf bytes, offline: the honest transfer decodes exactly; expiration is bounded to ten minutes either side of now; the Stake 2.0 resource enum is strict; unknown fields, a Permission_id and a data/memo field are refused |
 | check-swapgate.mjs | the Jupiter Swap V2 gate, offline, on two recorded /build answers: honest builds compile to exactly the instructions Jupiter described and sign byte-exactly; any change to the decoded amount, quoted output, slippage, platform fee, positive-slippage share, variant or authority is refused, as are "other"/tip instructions, foreign signers, a second Jupiter instruction, Approve, a CloseAccount paying someone else, unlisted programs, stake accounts, lookup tables that disagree with the chain, and a simulation short of the decoded floor; the fee is exactly 0.5% (none for the fee wallet itself), and a token account opened for an intermediate token is closed in the same transaction |
 | check-lookalike.mjs | the send form's lookalike-address check, offline: the real poisoning seen on a Solana wallet is caught; addresses you've paid, your own, new ones and people who paid you don't warn; history an attacker can write (incoming dust, TRON zero-value USDT, EVM custom-token rows) never makes an address trusted; 0x/EVM case, bech32 prefix and case, TRON's T, and the 3-and-3 threshold |
 | check-failover.mjs | rate limit vs outage in the provider failover: a provider that pushes back (a 429, or the bare network error a browser shows for a CORS-less 429) is paused and retried, a healthy backup covers the pause, timeouts get one retry, a dead provider fails over at once with a 60 s cooldown, BlockCypher's hourly limit is never retried, and a request never waits or retries past its limits |

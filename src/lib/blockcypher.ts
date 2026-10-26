@@ -178,11 +178,23 @@ export class BlockcypherProvider implements ProviderApi {
       } catch {
         // keep raw body text
       }
-      throw new Error(
-        reason ? `blockcypher: ${reason}` : `blockcypher API error (HTTP ${res.status})`,
+      throw Object.assign(
+        new Error(reason ? `blockcypher: ${reason}` : `blockcypher API error (HTTP ${res.status})`),
+        // an explicit not-found, which txSeen reads as "not seen"
+        res.status === 404 ? { notFound: true } : {},
       )
     }
     return JSON.parse(text) as T
+  }
+
+  async txSeen(txid: string): Promise<boolean> {
+    try {
+      await this.getJson<BcTxHex>(`/txs/${encodeURIComponent(txid)}?limit=1&instart=0&outstart=0`)
+      return true
+    } catch (e) {
+      if ((e as { notFound?: unknown } | null)?.notFound === true) return false
+      throw e
+    }
   }
 
   // -------------------------------------------------------------------------

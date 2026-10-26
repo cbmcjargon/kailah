@@ -483,7 +483,11 @@ export default function TronStakeModal({
             <IconWarning size={20} />
             <div>
               <strong>Not completed</strong>
-              <p>{step.message} Nothing further was sent — going back rebuilds fresh.</p>
+              <p>{step.message}</p>
+              <p>
+                If the network took it before the error, it can still go through. The wallet
+                checks for that before it lets you try again.
+              </p>
             </div>
           </div>
           <div className="btn-row">

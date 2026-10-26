@@ -1,6 +1,6 @@
 # Privacy policy
 
-Effective 2026-10-26. Applies to Kailah Wallet: the web app at
+Effective 2026-10-27. Applies to Kailah Wallet: the web app at
 https://kailah-wallet.netlify.app and https://wallet.photoprompting.org, and
 the Kailah Wallet Chrome extension.
 
@@ -30,8 +30,11 @@ storage too.
 
 ## What leaves your device, and to whom
 
-The browser enforces the list of services the wallet may contact (its
-Content Security Policy), so nothing else can be reached.
+The browser enforces the list of services the wallet may fetch from (its
+Content Security Policy). That bounds what the wallet's own code can reach;
+it is not a guarantee against code that should not be in the wallet at all,
+which is why the builds are reproducible and the dependencies pinned (see
+"Verifying a build" in the README).
 
 - **Blockchain data services and network nodes.** They receive the public
   addresses the wallet looks up, the signed transactions you choose to send,
@@ -56,10 +59,11 @@ Content Security Policy), so nothing else can be reached.
   That transfer is part of the public transaction, like the swap itself.
 - **Sites you choose to open.** Buy and exchange pages, block explorers and
   test-coin faucets are third-party sites with their own privacy policies.
-  - The Banxa buy link includes your receive address, so it is filled in for
-    you; Banxa receives it when you open the link.
-  - The Strike and Kraken links are referral links, and the developer may
-    receive a referral reward. The wallet tags each one "Invite link".
+  - The Banxa and Guardarian buy links include your receive address, so it
+    is filled in for you; that site receives it when you open the link.
+  - The Strike, Kraken and Gemini links are referral links, and the
+    developer may receive a referral reward. The wallet tags each one
+    "Invite link".
 - **Hosting (web app only):**
   - **kailah-wallet.netlify.app** is served by Netlify, which processes
     standard request logs under its own privacy policy.

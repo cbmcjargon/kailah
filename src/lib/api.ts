@@ -334,6 +334,10 @@ class FailoverClientImpl implements FailoverClient {
     return this.run('getTipHeight', (p) => p.getTipHeight())
   }
 
+  txSeen(txid: string): Promise<boolean> {
+    return this.run('txSeen', (p) => p.txSeen(txid))
+  }
+
   getFeeOptions(): Promise<FeeOption[]> {
     return this.run('getFeeOptions', (p) => p.getFeeOptions())
   }

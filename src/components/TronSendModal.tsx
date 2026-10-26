@@ -16,7 +16,8 @@ import QrScanner from './LazyQrScanner'
 import { IconBack, IconCheck, IconExternal, IconQrScan, IconWarning, Spinner } from './Icons'
 import { errMessage } from './ui'
 import LookalikeWarning, { useLookalike } from './LookalikeWarning'
-import { knownFromTron, TRON_FORMAT } from '../lib/lookalike'
+import { knownAddresses, TRON_FORMAT } from '../lib/lookalike'
+import { sentToAddresses } from '../lib/sentlog'
 
 interface TronSendModalProps {
   chain: TronChainConfig
@@ -66,7 +67,10 @@ export default function TronSendModal({
 
   const destTrimmed = dest.trim()
   const destValid = destTrimmed !== '' && isValidTronAddress(destTrimmed)
-  const known = useMemo(() => knownFromTron(tronKey.address, state.txs), [tronKey.address, state.txs])
+  const known = useMemo(
+    () => knownAddresses([tronKey.address], state.txs.map((t) => t.counterparty), sentToAddresses(chain.id)),
+    [tronKey.address, state.txs, chain.id],
+  )
   const lookalike = useLookalike(destValid ? destTrimmed : '', known, TRON_FORMAT)
 
   let parsedAmount: bigint | null = null
@@ -372,9 +376,11 @@ export default function TronSendModal({
             <IconWarning size={20} />
             <div>
               <strong>Broadcast failed</strong>
+              <p>{step.message}</p>
               <p>
-                {step.message} Nothing further was sent — go back to rebuild fresh if you want
-                to retry.
+                If the network took it before the error, it can still go through. The wallet
+                checks for that before it lets you send again, so going back to retry can&rsquo;t
+                pay twice.
               </p>
             </div>
           </div>

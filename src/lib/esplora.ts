@@ -156,13 +156,27 @@ export class EsploraProvider implements ProviderApi {
     const text = await res.text()
     if (!res.ok) {
       const reason = text.trim().slice(0, 200)
-      throw new Error(
-        reason
-          ? `${this.providerName}: ${reason}`
-          : `${this.providerName} API error (HTTP ${res.status})`,
+      throw Object.assign(
+        new Error(
+          reason
+            ? `${this.providerName}: ${reason}`
+            : `${this.providerName} API error (HTTP ${res.status})`,
+        ),
+        // an explicit not-found, which txSeen reads as "not seen"
+        res.status === 404 ? { notFound: true } : {},
       )
     }
     return text
+  }
+
+  async txSeen(txid: string): Promise<boolean> {
+    try {
+      await this.getText(`/tx/${encodeURIComponent(txid)}/status`)
+      return true
+    } catch (e) {
+      if ((e as { notFound?: unknown } | null)?.notFound === true) return false
+      throw e
+    }
   }
 
   private async getJson<T>(path: string): Promise<T> {

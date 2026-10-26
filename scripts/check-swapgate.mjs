@@ -24,7 +24,11 @@
 //   G. the fee wallet itself swaps with no fee (its USDC account is the fee
 //      account), and nothing else can claim that exemption;
 //   H. a route through a third token closes the token account it opens, so
-//      its rent comes back instead of tripping the SOL-cost bound.
+//      its rent comes back instead of tripping the SOL-cost bound;
+//   J. the audit of 2026-10-26: no top-level token transfers, no lamports to
+//      anyone but us, token accounts opened only for us, the older `route`
+//      forms refused, the swap's source/destination/mints pinned to our own
+//      accounts, and the input side must move by exactly the input.
 const store = new Map()
 globalThis.localStorage = {
   getItem: (k) => (store.has(k) ? store.get(k) : null),
@@ -91,8 +95,15 @@ function resetWorld(direction, fixtures = FIX) {
     existing: new Set(),
     // the swap leaves a remainder in an intermediate account, so closing it fails
     dust: false,
+    // lamports in a wSOL account the owner already had (the unwrap returns them)
+    wsolLamports: 0n,
+    // the route spent this much LESS of the input than it said (0 = honest)
+    solSpendShort: 0n,
+    usdcSpendShort: 0n,
   }
 }
+const WSOL_MINT = 'So11111111111111111111111111111111111111112'
+const wsolAtaOf = (owner) => solLib.tokenAddress({ mint: WSOL_MINT, owner, tokenProgram: solLib.TOKEN_PROGRAM })
 const tokenAccountB64 = (amount) => {
   const b = new Uint8Array(165)
   new DataView(b.buffer).setBigUint64(64, amount, true)
@@ -122,6 +133,9 @@ globalThis.fetch = async (url, init) => {
       return rpcOk({ value: Number(SOL_BEFORE) })
     case 'getAccountInfo':
       if (params[0] === SWAP_FEE_ACCOUNT) return rpcOk({ value: world.feeAccountMissing ? null : { data: [tokenAccountB64(FEE_BEFORE), 'base64'] } })
+      if (params[0] === wsolAtaOf(OWNER) || params[0] === wsolAtaOf(SWAP_FEE_WALLET)) {
+        return rpcOk({ value: world.wsolLamports > 0n ? { lamports: Number(world.wsolLamports), data: ['', 'base64'] } : null })
+      }
       return rpcOk({ value: { data: [tokenAccountB64(USDC_BEFORE), 'base64'] } })
     case 'getMinimumBalanceForRentExemption':
       return rpcOk(2_039_280)
@@ -151,7 +165,11 @@ globalThis.fetch = async (url, init) => {
         userUsdc = -inA
       }
       world.fee = fee + world.feeSkew
-      const solAfter = (world.direction === 'sol-to-usdc' ? SOL_BEFORE - inA - 6_000n : SOL_BEFORE + out - 6_000n) - rent
+      const solAfter =
+        (world.direction === 'sol-to-usdc'
+          ? SOL_BEFORE - inA - 6_000n + world.wsolLamports + world.solSpendShort
+          : SOL_BEFORE + out - 6_000n) - rent
+      if (world.direction === 'usdc-to-sol') userUsdc += world.usdcSpendShort
       // the fee wallet's own USDC account IS the fee account
       const ataBefore = wanted[1] === SWAP_FEE_ACCOUNT ? FEE_BEFORE : USDC_BEFORE
       const usdcAfter = ataBefore + userUsdc + (wanted[1] === SWAP_FEE_ACCOUNT ? world.fee : 0n)
@@ -192,6 +210,19 @@ const patchU64 = (d, off, v) => new DataView(d.buffer, d.byteOffset).setBigUint6
 const disc = (name) => createHash('sha256').update(`global:${name}`).digest().subarray(0, 8)
 const ix = (programId, accounts, data) => ({ programId, accounts, data: base64.encode(new Uint8Array(data)) })
 const OTHER = '9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin'
+const ATA_PROGRAM = 'ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL'
+const allIxs = (b) => [...b.computeBudgetInstructions, ...b.setupInstructions, b.swapInstruction, ...(b.cleanupInstruction ? [b.cleanupInstruction] : [])]
+/** Re-address a recorded build to `who`: their address and their own token accounts take the taker's. */
+function retarget(w, who) {
+  const b = w.build
+  const moved = new Map([[solUsdcAta(MAINNET, OWNER), solUsdcAta(MAINNET, who)]])
+  for (const i of b.setupInstructions) {
+    if (i.programId === ATA_PROGRAM && i.accounts[2].pubkey === OWNER) {
+      moved.set(i.accounts[1].pubkey, solLib.tokenAddress({ mint: i.accounts[3].pubkey, owner: who, tokenProgram: i.accounts[5].pubkey }))
+    }
+  }
+  for (const i of allIxs(b)) for (const a of i.accounts) a.pubkey = a.pubkey === OWNER ? who : moved.get(a.pubkey) ?? a.pubkey
+}
 
 /** Resolve a compiled transaction back to {program, keys:[address…], data} with the fixture tables. */
 function resolveCompiled(txB64, tables) {
@@ -224,7 +255,6 @@ const b58 = (u8) => base58.encode(u8)
 // The chain's rent: an intermediate token account this transaction opens and
 // leaves open costs us its rent; one it also closes costs nothing, unless the
 // swap left a remainder in it (world.dust) and the close fails (null).
-const ATA_PROGRAM = 'ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL'
 const BASE_MINTS = ['So11111111111111111111111111111111111111112', MAINNET.usdc.mint]
 function strandedRent(txB64) {
   const ixs = resolveCompiled(txB64, world.tables).instructions
@@ -273,12 +303,7 @@ for (const direction of ['sol-to-usdc', 'usdc-to-sol']) {
   // the recorded taker's place so the compiled transaction can be signed.
   const throwaway = new Uint8Array(32).fill(0x37)
   const addr = solLib.getAddress(throwaway)
-  const r = await run('usdc-to-sol', (w) => {
-    const b = w.build
-    for (const i of [...b.computeBudgetInstructions, ...b.setupInstructions, b.swapInstruction, ...(b.cleanupInstruction ? [b.cleanupInstruction] : [])]) {
-      for (const a of i.accounts) if (a.pubkey === OWNER) a.pubkey = addr
-    }
-  }, addr)
+  const r = await run('usdc-to-sol', (w) => retarget(w, addr), addr)
   if (r.err) {
     check('A signing the compiled swap leaves the message untouched', false, r.err.message)
   } else {
@@ -334,7 +359,7 @@ for (const direction of ['sol-to-usdc', 'usdc-to-sol']) {
     setIxData(w, new Uint8Array([...disc('route'), 0, 0, 0, 0, ...tail]))
   }
   const ok = await run('sol-to-usdc', v1(SWAP_FEE_BPS))
-  check('B the older `route` layout with honest fields passes', ok.err === null, ok.err?.message?.slice(0, 60))
+  check('B the older `route` layout is refused even with honest fields (its fields sit after the route plan; the program ignores trailing bytes)', refused(ok) && world.simulations.length === 0, ok.err?.message?.slice(0, 50) ?? 'accepted!')
   check('B the older `route` layout with a higher fee is refused', refused(await run('sol-to-usdc', v1(100))))
   check('B the older `route` layout paying another fee account is refused', refused(await run('sol-to-usdc', v1(SWAP_FEE_BPS, OTHER))))
 }
@@ -445,14 +470,7 @@ console.log('--- G. the fee wallet swaps for itself ---')
   // address and token accounts take the recorded taker's.
   const feeWalletAta = (mint, tokenProgram) => solLib.tokenAddress({ mint, owner: SWAP_FEE_WALLET, tokenProgram })
   const asFeeWallet = (w) => {
-    const b = w.build
-    const moved = new Map([[solUsdcAta(MAINNET, OWNER), SWAP_FEE_ACCOUNT]])
-    for (const i of b.setupInstructions) {
-      if (i.programId === ATA_PROGRAM && i.accounts[2].pubkey === OWNER) moved.set(i.accounts[1].pubkey, feeWalletAta(i.accounts[3].pubkey, i.accounts[5].pubkey))
-    }
-    for (const i of [...b.computeBudgetInstructions, ...b.setupInstructions, b.swapInstruction, ...(b.cleanupInstruction ? [b.cleanupInstruction] : [])]) {
-      for (const a of i.accounts) a.pubkey = a.pubkey === OWNER ? SWAP_FEE_WALLET : moved.get(a.pubkey) ?? a.pubkey
-    }
+    retarget(w, SWAP_FEE_WALLET)
     w.feeBps = 0
   }
   check('G the fee wallet pays no fee; every other wallet pays 0.5%', swapFeeBpsFor(MAINNET, SWAP_FEE_WALLET) === 0 && swapFeeBpsFor(MAINNET, OWNER) === SWAP_FEE_BPS)
@@ -531,7 +549,69 @@ console.log('--- H. a route through a third token closes the account it opens --
   }
   for (const direction of ['sol-to-usdc', 'usdc-to-sol']) {
     const r = await run(direction, via(OTHER, USD1))
-    check(`H ${direction}: paying rent for SOMEONE ELSE's token account → refused (SOL-cost bound)`, refused(r) && world.simulations.length === 2, r.err?.message?.slice(0, 50) ?? 'accepted!')
+    check(`H ${direction}: opening a token account for SOMEONE ELSE → refused before anything is simulated`, refused(r) && world.simulations.length === 0, r.err?.message?.slice(0, 50) ?? 'accepted!')
+  }
+}
+
+console.log('--- J. the audit of 2026-10-26 ---')
+{
+  const TOKEN = solLib.TOKEN_PROGRAM, TOKEN22 = solLib.TOKEN_PROGRAM2022
+  const USDT_ATA = solLib.tokenAddress({ mint: 'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB', owner: OWNER, tokenProgram: TOKEN })
+  const u64 = (n) => { const b = new Uint8Array(8); new DataView(b.buffer).setBigUint64(0, n, true); return [...b] }
+  const transfer = (prog) => ix(prog, [{ pubkey: USDT_ATA, isSigner: false, isWritable: true }, { pubkey: OTHER, isSigner: false, isWritable: true }, { pubkey: OWNER, isSigner: true, isWritable: false }], [3, ...u64(5_000_000n)])
+  const transferChecked = (prog) => ix(prog, [{ pubkey: USDT_ATA, isSigner: false, isWritable: true }, { pubkey: 'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB', isSigner: false, isWritable: false }, { pubkey: OTHER, isSigner: false, isWritable: true }, { pubkey: OWNER, isSigner: true, isWritable: false }], [12, ...u64(5_000_000n), 6])
+  const sysTransfer = (to, lamports) => ix('11111111111111111111111111111111', [{ pubkey: OWNER, isSigner: true, isWritable: true }, { pubkey: to, isSigner: false, isWritable: true }], [2, 0, 0, 0, ...u64(lamports)])
+  const initAccount = (ownerOf) => ix(TOKEN, [{ pubkey: OTHER, isSigner: false, isWritable: true }, { pubkey: WSOL_MINT, isSigner: false, isWritable: false }, { pubkey: ownerOf, isSigner: false, isWritable: false }, { pubkey: 'SysvarRent111111111111111111111111111111111', isSigner: false, isWritable: false }], [1])
+  const initAccount3 = (ownerOf) => ix(TOKEN, [{ pubkey: OTHER, isSigner: false, isWritable: true }, { pubkey: WSOL_MINT, isSigner: false, isWritable: false }], [18, ...base58.decode(ownerOf)])
+  const beforeSim = (r) => refused(r) && world.simulations.length === 0
+  const J = [
+    ['a Token Transfer out of our USDT account, in setup', (w) => { w.build.setupInstructions.push(transfer(TOKEN)) }],
+    ['a Token TransferChecked out of our USDT account, as cleanup', (w) => { w.build.cleanupInstruction = transferChecked(TOKEN) }],
+    ['a Token-2022 TransferChecked, in setup', (w) => { w.build.setupInstructions.push(transferChecked(TOKEN22)) }],
+    ['a System Transfer of lamports to a third party', (w) => { w.build.setupInstructions.push(sysTransfer(OTHER, 400_000n)) }],
+    ['a token account initialized for someone else (InitializeAccount)', (w) => { w.build.setupInstructions.push(initAccount(OTHER)) }],
+    ['a token account initialized for someone else (InitializeAccount3)', (w) => { w.build.setupInstructions.push(initAccount3(OTHER)) }],
+    ['an ATA-program instruction that is not create (RecoverNested)', (w) => { const c = structuredClone(w.build.setupInstructions[0]); c.data = base64.encode(new Uint8Array([2])); w.build.setupInstructions.push(c) }],
+    ['the source slot pointing at a different account of ours', (w) => { swapAccts(w)[1] = { ...swapAccts(w)[1], pubkey: USDT_ATA } }],
+    ['the destination slot pointing elsewhere', (w) => { swapAccts(w)[2] = { ...swapAccts(w)[2], pubkey: OTHER } }],
+    ['the source mint changed', (w) => { swapAccts(w)[3] = { ...swapAccts(w)[3], pubkey: 'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB' } }],
+    ['the destination mint changed', (w) => { swapAccts(w)[4] = { ...swapAccts(w)[4], pubkey: 'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB' } }],
+    ['the token program slot set to Token-2022', (w) => { swapAccts(w)[5] = { ...swapAccts(w)[5], pubkey: TOKEN22 } }],
+  ]
+  for (const direction of ['sol-to-usdc', 'usdc-to-sol']) {
+    for (const [label, mutate] of J) {
+      const r = await run(direction, mutate)
+      check(`J ${direction}: ${label} → refused before anything is simulated`, beforeSim(r), r.err?.message?.slice(0, 50) ?? (world.simulations.length ? 'simulated first' : 'accepted!'))
+    }
+    const ours = await run(direction, (w) => { w.build.setupInstructions.push(sysTransfer(wsolAtaOf(OWNER), 1_000n), initAccount3(OWNER)) })
+    check(`J ${direction}: a System Transfer to our own wSOL account and a token account initialized for us still pass`, ours.err === null, ours.err?.message?.slice(0, 60))
+  }
+  {
+    // shared_accounts_route_v2: the recorded route_v2 reshaped to the shared layout
+    const shared = (mutate) => (w) => {
+      const acc = swapAccts(w)
+      const plain = (k) => ({ pubkey: acc[k].pubkey, isSigner: false, isWritable: acc[k].isWritable })
+      w.build.swapInstruction.accounts = [
+        { pubkey: OTHER, isSigner: false, isWritable: false }, acc[0], acc[1],
+        { pubkey: OTHER, isSigner: false, isWritable: true }, { pubkey: OTHER, isSigner: false, isWritable: true },
+        acc[2], plain(3), plain(4), plain(5), plain(6), plain(8), plain(9), ...acc.slice(10),
+      ]
+      const d = ixData(w)
+      setIxData(w, new Uint8Array([...disc('shared_accounts_route_v2'), 0, ...d.subarray(8)]))
+      mutate?.(w)
+    }
+    const ok = await run('sol-to-usdc', shared())
+    check('J shared_accounts_route_v2 with our accounts in its slots passes', ok.err === null && ok.prepared?.swapFee > 0n, ok.err?.message?.slice(0, 60))
+    const bad = await run('sol-to-usdc', shared((w) => { swapAccts(w)[2] = { ...swapAccts(w)[2], pubkey: USDT_ATA } }))
+    check('J shared_accounts_route_v2 with the source slot moved → refused', beforeSim(bad), bad.err?.message?.slice(0, 50) ?? 'accepted!')
+  }
+  {
+    const r1 = await run('usdc-to-sol', (w) => { w.usdcSpendShort = 1n })
+    check('J usdc-to-sol: the route spending less USDC than the input → refused', refused(r1), r1.err?.message?.slice(0, 50) ?? 'accepted!')
+    const r2 = await run('sol-to-usdc', (w) => { w.solSpendShort = 2_000n })
+    check('J sol-to-usdc: the route spending less SOL than the input → refused', refused(r2), r2.err?.message?.slice(0, 50) ?? 'accepted!')
+    const r3 = await run('sol-to-usdc', (w) => { w.wsolLamports = 3_000_000n })
+    check('J sol-to-usdc: a wSOL account we already had, returned by the unwrap, is not mistaken for a shortfall', r3.err === null, r3.err?.message?.slice(0, 60))
   }
 }
 

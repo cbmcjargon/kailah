@@ -37,6 +37,7 @@ import * as solLib from 'micro-sol-signer'
 import { base58, base64 } from '@scure/base'
 import {
   assertNoSolInFlight,
+  blockHeightOf,
   getSolBalance,
   SolBroadcastError,
   solRpc,
@@ -237,6 +238,8 @@ export interface PreparedSwap {
   swapFeeBps: number
   /** the exact bytes that were simulated; signing does not alter them */
   txBase64: string
+  /** the blockhash's last valid block height: when this attempt can no longer land */
+  lastValidBlockHeight: number
 }
 
 /** An instruction in micro-sol-signer's encoder form. */
@@ -255,6 +258,13 @@ interface JupiterSwapArgs {
   positiveSlippageBps: number
   /** the account in the instruction's user_transfer_authority slot */
   authority: string
+  /** the user's source and destination token accounts, their mints and token programs */
+  sourceAccount: string
+  destinationAccount: string
+  sourceMint: string
+  destinationMint: string
+  sourceTokenProgram: string
+  destinationTokenProgram: string
   /** the account in the platform-fee slot (a route account when there is no fee) */
   feeAccount: string | undefined
 }
@@ -433,18 +443,26 @@ const SWAP_ALLOWED_PROGRAMS = new Set<string>([
 // SPL-token instructions a swap legitimately uses. Everything else — above
 // all Approve(4), SetAuthority(6), Burn(8), ApproveChecked(13) — is refused:
 // those change nothing the simulation can see.
+// Transfer(3) and TransferChecked(12) are NOT here: the owner's one signature
+// would authorize a transfer out of ANY token account the owner holds, and
+// the simulation diff only watches SOL and USDC (audit 2026-10-26). Jupiter
+// moves tokens by CPI inside its own program, never as a top-level transfer.
 const ALLOWED_TOKEN_IX = new Set([
-  1, // InitializeAccount
-  3, // Transfer
+  1, // InitializeAccount (its owner must be us, checked below)
   9, // CloseAccount (wSOL unwrap; lamport destination must be us, checked below)
-  12, // TransferChecked
-  16, // InitializeAccount2
+  16, // InitializeAccount2 (owner in the data; must be us)
   17, // SyncNative
-  18, // InitializeAccount3
+  18, // InitializeAccount3 (owner in the data; must be us)
   21, // GetAccountDataSize
   22, // InitializeImmutableOwner
 ])
 const TOKEN_IX_CLOSE = 9
+const TOKEN_IX_INIT = 1
+const TOKEN_IX_INIT2 = 16
+const TOKEN_IX_INIT3 = 18
+const SYSTEM_IX_TRANSFER = 2
+const ATA_IX_CREATE = 0
+const ATA_IX_CREATE_IDEMPOTENT = 1
 // System-program instructions a swap legitimately uses (wSOL wrap). Assign /
 // AssignWithSeed would hand one of our accounts to another program.
 const ALLOWED_SYSTEM_IX = new Set([0, 2, 3]) // CreateAccount, Transfer, CreateAccountWithSeed
@@ -467,22 +485,35 @@ function u16le(d: Uint8Array, off: number): number {
 
 /**
  * The exact-in swap instructions of the Jupiter v6 program, keyed by their
- * 8-byte Anchor discriminator (sha256("global:<name>")), with the
- * user_transfer_authority slot. Layouts are from the program's on-chain IDL
- * (read 2026-10-25): the v1 forms put the route plan first and end with
- * in_amount u64, quoted_out_amount u64, slippage_bps u16, platform_fee_bps
- * u8; the v2 forms start with in_amount u64, quoted_out_amount u64,
- * slippage_bps u16, platform_fee_bps u16, positive_slippage_bps u16. Every
- * other Jupiter instruction (exact-out, token-ledger, claim…) is refused.
- * The fee account sits in the v1 forms' named platform_fee_account slot; the
- * v2 forms have none and take it as the first account after their named ones
- * (route_v2's slot 10 measured live with a fee, 2026-10-25).
+ * 8-byte Anchor discriminator (sha256("global:<name>")), with the slots of
+ * the accounts the gate pins. Layouts are from the program's on-chain IDL
+ * (read 2026-10-25 and again 2026-10-26): the v2 forms start with in_amount
+ * u64, quoted_out_amount u64, slippage_bps u16, platform_fee_bps u16,
+ * positive_slippage_bps u16, then the route plan. Only the v2 forms are
+ * accepted: the older `route` / `shared_accounts_route` put their fields
+ * AFTER the route plan, so a decoder has to read them from the end, while
+ * the program reads from the front and ignores trailing bytes — a build
+ * could show the gate honest numbers and the program hostile ones (audit
+ * 2026-10-26). Every other Jupiter instruction (exact-out, token-ledger,
+ * claim…) is refused. The fee account has no named slot in the v2 forms; it
+ * is the first account after their named ones (measured live, 2026-10-25).
  */
-const JUPITER_SWAPS: Record<string, { authority: number; fee: number; v2: boolean; shared: boolean }> = {
-  e517cb977ae3ad2a: { authority: 1, fee: 6, v2: false, shared: false }, // route
-  c1209b3341d69c81: { authority: 2, fee: 9, v2: false, shared: true }, // shared_accounts_route
-  bb64facc31c4af14: { authority: 0, fee: 10, v2: true, shared: false }, // route_v2
-  d19853937cfed8e9: { authority: 1, fee: 12, v2: true, shared: true }, // shared_accounts_route_v2
+interface JupiterVariant {
+  shared: boolean
+  authority: number
+  source: number
+  destination: number
+  sourceMint: number
+  destinationMint: number
+  sourceTokenProgram: number
+  destinationTokenProgram: number
+  fee: number
+}
+const JUPITER_SWAPS: Record<string, JupiterVariant> = {
+  // route_v2
+  bb64facc31c4af14: { shared: false, authority: 0, source: 1, destination: 2, sourceMint: 3, destinationMint: 4, sourceTokenProgram: 5, destinationTokenProgram: 6, fee: 10 },
+  // shared_accounts_route_v2
+  d19853937cfed8e9: { shared: true, authority: 1, source: 2, destination: 5, sourceMint: 6, destinationMint: 7, sourceTokenProgram: 8, destinationTokenProgram: 9, fee: 12 },
 }
 
 function decodeJupiterSwap(d: Uint8Array, keys: string[]): JupiterSwapArgs {
@@ -490,31 +521,28 @@ function decodeJupiterSwap(d: Uint8Array, keys: string[]): JupiterSwapArgs {
   const disc = Array.from(d.subarray(0, 8), (b) => b.toString(16).padStart(2, '0')).join('')
   const variant = JUPITER_SWAPS[disc]
   if (variant === undefined) throw new Error(MISMATCH)
-  const head = 8 + (variant.shared ? 1 : 0) // the shared forms carry an id: u8 first
-  let args: Omit<JupiterSwapArgs, 'authority' | 'feeAccount'>
-  if (variant.v2) {
-    if (d.length < head + 22 + 4) throw new Error(MISMATCH)
-    args = {
-      inAmount: u64le(d, head),
-      quotedOutAmount: u64le(d, head + 8),
-      slippageBps: u16le(d, head + 16),
-      platformFeeBps: u16le(d, head + 18),
-      positiveSlippageBps: u16le(d, head + 20),
-    }
-  } else {
-    const tail = d.length - 19
-    if (tail < head + 4) throw new Error(MISMATCH)
-    args = {
-      inAmount: u64le(d, tail),
-      quotedOutAmount: u64le(d, tail + 8),
-      slippageBps: u16le(d, tail + 16),
-      platformFeeBps: d[tail + 18]!,
-      positiveSlippageBps: 0,
-    }
+  const head = 8 + (variant.shared ? 1 : 0) // the shared form carries an id: u8 first
+  if (d.length < head + 22 + 4) throw new Error(MISMATCH)
+  const slot = (i: number): string => {
+    const k = keys[i]
+    if (k === undefined) throw new Error(MISMATCH)
+    return k
   }
-  const authority = keys[variant.authority]
-  if (authority === undefined) throw new Error(MISMATCH)
-  return { ...args, authority, feeAccount: keys[variant.fee] }
+  return {
+    inAmount: u64le(d, head),
+    quotedOutAmount: u64le(d, head + 8),
+    slippageBps: u16le(d, head + 16),
+    platformFeeBps: u16le(d, head + 18),
+    positiveSlippageBps: u16le(d, head + 20),
+    authority: slot(variant.authority),
+    sourceAccount: slot(variant.source),
+    destinationAccount: slot(variant.destination),
+    sourceMint: slot(variant.sourceMint),
+    destinationMint: slot(variant.destinationMint),
+    sourceTokenProgram: slot(variant.sourceTokenProgram),
+    destinationTokenProgram: slot(variant.destinationTokenProgram),
+    feeAccount: keys[variant.fee],
+  }
 }
 
 /** Lookup-table contents from the chain: a 56-byte header, then 32-byte addresses. */
@@ -612,15 +640,12 @@ async function verifySwapInstructions(
       // exactly one, and it must be an exact-in swap whose fields we check
       if (jupiter !== null) throw new Error(MISMATCH)
       jupiter = decodeJupiterSwap(d, (ix.keys ?? []).map(accountAt))
-    } else if (SWAP_TOKEN_PROGRAMS.includes(program)) {
-      if (d.length === 0 || !ALLOWED_TOKEN_IX.has(d[0]!)) throw new Error(MISMATCH)
-      if (d[0] === TOKEN_IX_CLOSE && accountAt(ix.keys?.[1]) !== owner) throw new Error(MISMATCH)
-    } else if (program === solLib.SYS_PROGRAM) {
-      if (d.length < 4 || !ALLOWED_SYSTEM_IX.has(u32le(d, 0))) throw new Error(MISMATCH)
     } else if (program === COMPUTE_BUDGET_PROGRAM) {
       if (d.length === 0) throw new Error(MISMATCH)
       if (d[0] === 2 && d.length >= 5) unitLimit = BigInt(u32le(d, 1))
       if (d[0] === 3 && d.length >= 9) unitPriceMicro = u64le(d, 1)
+    } else {
+      assertHelperInstruction(owner, program, d, (i) => accountAt(ix.keys?.[i]))
     }
   }
 
@@ -633,10 +658,69 @@ async function verifySwapInstructions(
   return { priorityFeeLamports, jupiter }
 }
 
-/** The decoded Jupiter swap must say exactly what we asked for. */
-function assertSwapArgs(jupiter: JupiterSwapArgs, owner: string, q: SwapQuote): void {
+/**
+ * A setup/cleanup instruction (token, system or ATA program) may only move
+ * value between the owner's own accounts. Run on the build's instructions
+ * before anything is assembled, and again on the compiled bytes.
+ */
+function assertHelperInstruction(
+  owner: string,
+  program: string,
+  d: Uint8Array,
+  keyAt: (i: number) => string,
+): void {
+  const wsolAta = solLib.tokenAddress({ mint: SOL_WRAPPED_MINT, owner, tokenProgram: solLib.TOKEN_PROGRAM })
+  if (SWAP_TOKEN_PROGRAMS.includes(program)) {
+    if (d.length === 0 || !ALLOWED_TOKEN_IX.has(d[0]!)) throw new Error(MISMATCH)
+    if (d[0] === TOKEN_IX_CLOSE && keyAt(1) !== owner) throw new Error(MISMATCH)
+    // A token account opened in this transaction belongs to us: one
+    // initialized for someone else and funded by our System Transfer would
+    // hand them the lamports (InitializeAccount names the owner as account
+    // 2; InitializeAccount2/3 carry it in the data).
+    if (d[0] === TOKEN_IX_INIT && keyAt(2) !== owner) throw new Error(MISMATCH)
+    if ((d[0] === TOKEN_IX_INIT2 || d[0] === TOKEN_IX_INIT3) && (d.length !== 33 || base58.encode(d.subarray(1)) !== owner)) {
+      throw new Error(MISMATCH)
+    }
+  } else if (program === solLib.SYS_PROGRAM) {
+    if (d.length < 4 || !ALLOWED_SYSTEM_IX.has(u32le(d, 0))) throw new Error(MISMATCH)
+    // Lamports leave our account only into our own wSOL account (the wrap)
+    // or back to us; a transfer to anyone else within the slippage band
+    // would hide in the balance diff.
+    if (u32le(d, 0) === SYSTEM_IX_TRANSFER) {
+      const to = keyAt(1)
+      if (to !== owner && to !== wsolAta) throw new Error(MISMATCH)
+    }
+  } else if (program === solLib.ASSOCIATED_TOKEN_PROGRAM) {
+    // create / create-idempotent only, and the account must be ours: we pay
+    // the rent, so an account for someone else would be a gift.
+    const kind = d.length === 0 ? ATA_IX_CREATE : d.length === 1 ? d[0] : -1
+    if (kind !== ATA_IX_CREATE && kind !== ATA_IX_CREATE_IDEMPOTENT) throw new Error(MISMATCH)
+    if (keyAt(2) !== owner) throw new Error(MISMATCH)
+  } else {
+    throw new Error(MISMATCH)
+  }
+}
+
+/**
+ * The decoded Jupiter swap must say exactly what we asked for: the amounts,
+ * slippage and fee fields, AND which accounts move — the swap must take the
+ * input from our own account of the input mint and deliver to our own
+ * account of the output mint. Without that a route could spend a different
+ * token we hold (the balance diff only watches SOL and USDC) and deliver
+ * exactly the floor (audit 2026-10-26).
+ */
+function assertSwapArgs(jupiter: JupiterSwapArgs, owner: string, q: SwapQuote, chain: SolChainConfig): void {
+  const inputMint = q.direction === 'sol-to-usdc' ? SOL_WRAPPED_MINT : chain.usdc.mint
+  const outputMint = q.direction === 'sol-to-usdc' ? chain.usdc.mint : SOL_WRAPPED_MINT
+  const ataOf = (mint: string) => solLib.tokenAddress({ mint, owner, tokenProgram: solLib.TOKEN_PROGRAM })
   if (
     jupiter.authority !== owner ||
+    jupiter.sourceAccount !== ataOf(inputMint) ||
+    jupiter.destinationAccount !== ataOf(outputMint) ||
+    jupiter.sourceMint !== inputMint ||
+    jupiter.destinationMint !== outputMint ||
+    jupiter.sourceTokenProgram !== solLib.TOKEN_PROGRAM ||
+    jupiter.destinationTokenProgram !== solLib.TOKEN_PROGRAM ||
     jupiter.inAmount !== q.inAmount ||
     jupiter.quotedOutAmount !== q.outAmount ||
     jupiter.slippageBps !== SWAP_SLIPPAGE_BPS ||
@@ -648,9 +732,6 @@ function assertSwapArgs(jupiter: JupiterSwapArgs, owner: string, q: SwapQuote): 
     throw new Error(MISMATCH)
   }
 }
-
-const ATA_IX_CREATE = 0
-const ATA_IX_CREATE_IDEMPOTENT = 1
 
 /**
  * A route through a third token (SOL → USD1 → USDC, say) has Jupiter create
@@ -765,10 +846,20 @@ export async function prepareSwap(
   for (const ix of [...priceIxs, ...body]) {
     if (ix.keys.some((k) => k.sign && k.address !== owner)) throw new Error(MISMATCH)
   }
-  // Refuse a route that doesn't say what we asked before anything is simulated
-  // (step 5 checks the same fields again on the compiled bytes).
+  // Refuse a route that doesn't say what we asked, and any helper
+  // instruction that moves value to anyone but us, before anything is
+  // simulated (step 5 checks the same again on the compiled bytes).
   if (swapIx.program !== JUPITER_V6_PROGRAM) throw new Error(MISMATCH)
-  assertSwapArgs(decodeJupiterSwap(swapIx.data, swapIx.keys.map((k) => k.address)), owner, q)
+  assertSwapArgs(decodeJupiterSwap(swapIx.data, swapIx.keys.map((k) => k.address)), owner, q, chain)
+  for (const ix of body) {
+    if (ix === swapIx) continue
+    if (ix.program === JUPITER_V6_PROGRAM || ix.program === COMPUTE_BUDGET_PROGRAM) throw new Error(MISMATCH)
+    assertHelperInstruction(owner, ix.program, ix.data, (i) => {
+      const k = ix.keys[i]
+      if (k === undefined) throw new Error(MISMATCH)
+      return k.address
+    })
+  }
   body.push(...(await intermediateCloses(chain, owner, setupIxs)))
 
   // 2. Lookup tables come from the chain; Jupiter's list must agree with it.
@@ -783,15 +874,20 @@ export async function prepareSwap(
     if (!Array.isArray(claimed) || claimed.length > actual.length || claimed.some((a, j) => a !== actual[j])) {
       throw new Error(MISMATCH)
     }
-    tables.set(t, actual)
+    // compile against the entries Jupiter listed (a verified prefix of the
+    // chain's), never against entries only the RPC vouches for
+    tables.set(t, actual.slice(0, claimed.length))
   })
 
   // 3. Assemble it ourselves: measure the compute units, then set a 1.2× limit.
-  const latest = await solRpc<{ value: { blockhash?: unknown } }>(chain, 'getLatestBlockhash', [
-    { commitment: 'confirmed' },
-  ])
+  const latest = await solRpc<{ value: { blockhash?: unknown; lastValidBlockHeight?: unknown } }>(
+    chain,
+    'getLatestBlockhash',
+    [{ commitment: 'confirmed' }],
+  )
   const blockhash = latest.value.blockhash
   if (!isAddress(blockhash)) throw new Error(FRIENDLY_NET)
+  const lastValidBlockHeight = blockHeightOf(latest.value.lastValidBlockHeight)
   const assemble = (units: number) =>
     compileSwapTx(owner, blockhash, [computeUnitLimitIx(units), ...priceIxs, ...body], tables)
   let probe: string
@@ -823,7 +919,7 @@ export async function prepareSwap(
   //    the Jupiter instruction must say exactly what we asked for.
   const { priorityFeeLamports, jupiter } = await verifySwapInstructions(chain, owner, decoded)
   const feeLamports = 5000n + priorityFeeLamports
-  assertSwapArgs(jupiter, owner, q)
+  assertSwapArgs(jupiter, owner, q, chain)
   // The floor the program enforces, from the decoded route itself. Jupiter's
   // own figure may round it up by one unit; anything else is a mismatch.
   const minOutAmount = (jupiter.quotedOutAmount * BigInt(10_000 - jupiter.slippageBps)) / 10_000n
@@ -842,11 +938,18 @@ export async function prepareSwap(
       { encoding: 'base64' },
     ]).then((r) => (r.value === null ? null : tokenAmountFromBase64(r.value.data)))
   const charged = feeBps > 0
-  const [solBefore, usdcBefore, feeBefore, ataRentRes] = await Promise.all([
+  // Lamports the unwrap hands back beyond this swap's own wrap: a wSOL
+  // account the owner already had (its rent plus whatever was in it).
+  const wsolLamports = solRpc<{ value: { lamports?: unknown } | null }>(chain, 'getAccountInfo', [
+    solLib.tokenAddress({ mint: SOL_WRAPPED_MINT, owner, tokenProgram: solLib.TOKEN_PROGRAM }),
+    { encoding: 'base64', dataSlice: { offset: 0, length: 0 } },
+  ]).then((r) => (r.value === null || typeof r.value.lamports !== 'number' ? 0n : BigInt(r.value.lamports)))
+  const [solBefore, usdcBefore, feeBefore, ataRentRes, wsolBefore] = await Promise.all([
     getSolBalance(chain, owner),
     tokenBalance(ata),
     charged ? tokenBalance(SWAP_FEE_ACCOUNT) : Promise.resolve(0n),
     solRpc<number>(chain, 'getMinimumBalanceForRentExemption', [165]).catch(() => null),
+    wsolLamports,
   ])
   const ataMissing = usdcBefore === null
   const ataRent = ataRentRes != null ? BigInt(ataRentRes) : ATA_RENT_FALLBACK
@@ -875,15 +978,18 @@ export async function prepareSwap(
     }
   }
 
-  // 8. The simulated outcome must honor the decoded floor.
+  // 8. The simulated outcome must honor the decoded floor, and the input
+  //    side must move by exactly the input: spending LESS of the shown asset
+  //    means the route took something else instead (audit 2026-10-26).
   if (q.direction === 'sol-to-usdc') {
     const maxSolCost = q.inAmount + feeLamports + (ataMissing ? ataRent : 0n) + FEE_ROUNDING_SLACK
-    if (usdcDelta < minOutAmount || solDelta < -maxSolCost) {
+    const minSolCost = q.inAmount + feeLamports - wsolBefore - FEE_ROUNDING_SLACK
+    if (usdcDelta < minOutAmount || solDelta < -maxSolCost || solDelta > -minSolCost) {
       throw new Error(MISMATCH)
     }
   } else {
     const minSolGain = minOutAmount - feeLamports - FEE_ROUNDING_SLACK
-    if (usdcDelta < -q.inAmount || solDelta < minSolGain) {
+    if (usdcDelta !== -q.inAmount || solDelta < minSolGain) {
       throw new Error(MISMATCH)
     }
   }
@@ -901,12 +1007,19 @@ export async function prepareSwap(
     swapFee,
     swapFeeBps: feeBps,
     txBase64,
+    lastValidBlockHeight,
   }
 }
 
 export async function broadcastSwap(key: SolKey, prepared: PreparedSwap): Promise<string> {
   const [txid, signed] = solLib.signTx(key.privateKey, prepared.txBase64)
-  recordPending({ kind: 'sol', chainId: prepared.chain.id, signature: txid, ts: Date.now() })
+  recordPending({
+    kind: 'sol',
+    chainId: prepared.chain.id,
+    signature: txid,
+    ts: Date.now(),
+    lastValidBlockHeight: prepared.lastValidBlockHeight,
+  })
   try {
     return await solRpc<string>(prepared.chain, 'sendTransaction', [
       signed,
@@ -915,6 +1028,6 @@ export async function broadcastSwap(key: SolKey, prepared: PreparedSwap): Promis
   } catch (e) {
     // carries the known signature so the UI can check whether this attempt
     // landed before allowing a retry (see SolBroadcastError)
-    throw new SolBroadcastError(e instanceof Error ? e.message : String(e), txid)
+    throw new SolBroadcastError(e instanceof Error ? e.message : String(e), txid, signed)
   }
 }

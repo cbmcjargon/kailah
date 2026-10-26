@@ -98,6 +98,25 @@ check(
   ltcDecoded ? `hrp ${ltcDecoded.prefix}` : 'bech32 decode failed',
 )
 
+// --- sol / tron: the real keys are unchanged; practice mode has its own ---
+// Practice networks sign with coin-type-1 keys (audit 2026-10-26, H3): a
+// hostile devnet/Nile node can't turn a practice send into a mainnet one.
+{
+  const { deriveSolKey, isValidSolAddress } = await import('../src/lib/sol.ts')
+  const { deriveTronKey, isValidTronAddress } = await import('../src/lib/tron.ts')
+  const solReal = deriveSolKey(VECTOR_MNEMONIC)
+  const solPractice = deriveSolKey(VECTOR_MNEMONIC, 0, true)
+  check('sol: the real key is the Phantom-path vector address', solReal.address === 'HAgk14JpMQLgt6rVgv7cBQFJWFto5Dqxi472uT3DKpqk', solReal.address)
+  check('sol: the practice key is a different, valid address', solPractice.address !== solReal.address && isValidSolAddress(solPractice.address), solPractice.address)
+  check('sol: the same phrase typed with capitals and extra spaces gives the same key', deriveSolKey(`  ${VECTOR_MNEMONIC.toUpperCase().replace(/ /g, '  ')} `).address === solReal.address)
+  const tronReal = deriveTronKey(VECTOR_MNEMONIC)
+  const tronPractice = deriveTronKey(VECTOR_MNEMONIC, true)
+  check('tron: the real key is the TronLink-path vector address', tronReal.address === 'TUEZSdKsoDHQMeZwihtdoBiN46zxhGWYdH', tronReal.address)
+  check('tron: the practice key is a different, valid address', tronPractice.address !== tronReal.address && isValidTronAddress(tronPractice.address), tronPractice.address)
+  for (const k of [solReal, solPractice, tronReal, tronPractice]) k.zero()
+  check('sol/tron: zero() wipes the private bytes', [solReal, solPractice, tronReal, tronPractice].every((k) => k.privateKey.every((b) => b === 0)))
+}
+
 // --- sanity: key material shape ---
 check('btc privateKey is 32 bytes', btcKey.privateKey.length === 32)
 check('btc publicKey is 33 bytes (compressed)', btcKey.publicKey.length === 33)

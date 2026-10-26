@@ -215,5 +215,29 @@ checkThrows(
 // --- whitespace trim -------------------------------------------------------
 checkParse('surrounding whitespace trimmed', `  ${BTC_ADDR}\n`, CHAINS.btc, BTC_ADDR, undefined)
 
+
+// --- Solana Pay (src/lib/sol.ts parseSolScanned): reference and memo are
+// carried (a merchant may not credit a payment without them), bad ones are
+// refused rather than dropped (audit 2026-10-26, L14).
+{
+  const { parseSolScanned } = await import('../src/lib/sol.ts')
+  const A = 'HAgk14JpMQLgt6rVgv7cBQFJWFto5Dqxi472uT3DKpqk'
+  const R1 = 'Hh8QwFUA6MtVu1qAoq12ucvFHNwCcVTV7hpWjeY1Hztb'
+  const R2 = '9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin'
+  const ok = (name, cond, detail = '') => check(`solana-pay: ${name}`, cond, detail)
+  const r = parseSolScanned(`solana:${A}?amount=0.5&reference=${R1}&reference=${R2}&memo=Order%2042&label=Shop`)
+  ok('address, amount, both references and the memo are read', r.address === A && r.amount === 500_000_000n && r.reference?.join() === [R1, R2].join() && r.memo === 'Order 42')
+  const plain = parseSolScanned(`solana:${A}?amount=1`)
+  ok('no reference/memo → neither is set', plain.reference === undefined && plain.memo === undefined)
+  const t = () => parseSolScanned(`solana:${A}?reference=not-an-address`)
+  let threw = false; try { t() } catch { threw = true }
+  ok('an invalid reference is refused, not dropped', threw)
+  threw = false; try { parseSolScanned(`solana:${A}?memo=${encodeURIComponent('x'.repeat(300))}`) } catch { threw = true }
+  ok('an oversized memo is refused', threw)
+  threw = false; try { parseSolScanned(`solana:${A}?memo=${encodeURIComponent('line\nbreak')}`) } catch { threw = true }
+  ok('a memo with control characters is refused', threw)
+  ok('five references are too many', (() => { try { parseSolScanned(`solana:${A}?` + [R1, R2, R1, R2, R1].map((x) => 'reference=' + x).join('&')); return false } catch { return true } })())
+}
+
 console.log(failures === 0 ? '\nAll checks passed.' : `\n${failures} check(s) FAILED.`)
 process.exit(failures === 0 ? 0 : 1)

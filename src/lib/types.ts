@@ -311,6 +311,12 @@ export interface AddressApi {
   getFeeOptions(): Promise<FeeOption[]>
   broadcast(txHex: string): Promise<string>
   /**
+   * Whether the backend knows this txid at all (mempool or confirmed): true,
+   * false on an explicit not-found, a throw on anything else. The in-flight
+   * ledger (pending.ts) asks this before a new send.
+   */
+  txSeen(txid: string): Promise<boolean>
+  /**
    * Who spent each output of a tx (esplora /outspends). Optional: providers
    * without it return undefined and RBF falls back to the broadcast-error
    * retry path. Needed so a bump can outbid CONFLICTING descendants it can't

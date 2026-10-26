@@ -659,6 +659,44 @@ console.log('--- Case H: per-script dust limits ---')
 // hid a reversal bug that broke every Speed up in production: decoded
 // outpoints must be the display-order ids that providers serve.
 // ===========================================================================
+// Case J: a pending transaction must carry OUR signatures before Speed up
+// rebuilds it (audit 2026-10-26, C1): the provider chooses which tx it shows
+// as pending and serves its bytes, so decodeVerifiedTx alone proves nothing
+// about who made it. hwsign.assertSignedByUs verifies every input's witness
+// signature against the wallet's own BIP143 digest under our public key.
+console.log('--- Case J: a pending tx must be signed by us ---')
+{
+  const { assertSignedByUs, NOT_OURS } = await import('../src/lib/hwsign.ts')
+  const ours = [{ publicKey: kA0.publicKey, value: uA0.value }, { publicKey: kA1.publicKey, value: uA1.value }]
+  const refuses = (label, hexStr, inputs) => {
+    let msg = ''
+    try { assertSignedByUs(btc, hexStr, inputs) } catch (e) { msg = e.message }
+    check(label, msg === NOT_OURS, msg || 'accepted!')
+  }
+  let ok = true
+  try { assertSignedByUs(btc, a.hex, ours) } catch { ok = false }
+  check('J1 the transaction buildTxV2 signed passes', ok)
+  refuses('J2 inputs in the wrong order (keys swapped) → refused', a.hex, [ours[1], ours[0]])
+  refuses('J3 a lied-about input value → refused (the digest commits to it)', a.hex, [{ ...ours[0], value: uA0.value + 1n }, ours[1]])
+  refuses('J4 one input too few → refused', a.hex, [ours[0]])
+  const forged = RawTx.decode(hex.decode(a.hex))
+  forged.witnesses = forged.witnesses.map((w, i) => (i === 0 ? [new Uint8Array(72).fill(0x42), kA0.publicKey] : w))
+  refuses('J5 a garbage signature with our public key → refused', hex.encode(RawTx.encode(forged)), ours)
+  const swapped = RawTx.decode(hex.decode(a.hex))
+  swapped.witnesses = [[swapped.witnesses[0][0], kA1.publicKey], swapped.witnesses[1]]
+  refuses('J6 a real signature under a different key → refused', hex.encode(RawTx.encode(swapped)), ours)
+  const extra = RawTx.decode(hex.decode(a.hex))
+  extra.witnesses = [[...extra.witnesses[0], new Uint8Array(1)], extra.witnesses[1]]
+  refuses('J7 a witness that is not exactly [signature, key] → refused', hex.encode(RawTx.encode(extra)), ours)
+  const stripped = RawTx.decode(hex.decode(a.hex))
+  stripped.segwitFlag = false
+  stripped.witnesses = undefined
+  refuses('J8 witness-stripped bytes → refused', hex.encode(RawTx.encode(stripped)), ours)
+  let dogeMsg = ''
+  try { assertSignedByUs(CHAINS.doge, a.hex, ours) } catch (e) { dogeMsg = e.message }
+  check('J9 a legacy (p2pkh) chain is never sped up from here', dogeMsg === NOT_OURS)
+}
+
 console.log('--- Case I: bump verification with non-palindromic txids ---')
 {
   const kI = deriveAt(btc, 0, 6)

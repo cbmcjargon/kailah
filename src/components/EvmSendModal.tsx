@@ -15,7 +15,8 @@ import QrScanner from './LazyQrScanner'
 import { IconBack, IconCheck, IconExternal, IconQrScan, IconWarning, Spinner } from './Icons'
 import { errMessage } from './ui'
 import LookalikeWarning, { useLookalike } from './LookalikeWarning'
-import { EVM_FORMAT, knownFromEvm } from '../lib/lookalike'
+import { EVM_FORMAT, knownAddresses } from '../lib/lookalike'
+import { sentToAddresses } from '../lib/sentlog'
 
 interface EvmSendModalProps {
   chain: EvmChainConfig
@@ -78,7 +79,10 @@ export default function EvmSendModal({
     asset === 'token' ? (customToken?.symbol ?? chain.token.symbol) : chain.gas.symbol
   const destTrimmed = dest.trim()
   const destValid = destTrimmed !== '' && isValidEvmAddress(destTrimmed)
-  const known = useMemo(() => knownFromEvm(evmKey.address, txs), [evmKey.address, txs])
+  const known = useMemo(
+    () => knownAddresses([evmKey.address], txs.map((t) => t.counterparty), sentToAddresses(chain.id)),
+    [evmKey.address, txs, chain.id],
+  )
   const lookalike = useLookalike(destValid ? destTrimmed : '', known, EVM_FORMAT)
 
   let parsedAmount: bigint | null = null
@@ -384,6 +388,19 @@ export default function EvmSendModal({
               </dd>
             </div>
           </dl>
+          {step.prepared.asset === 'token' && step.prepared.recipientIsContract && (
+            <div className="warning-box" role="alert">
+              <IconWarning size={20} />
+              <div>
+                <strong>The recipient is a contract, not a wallet</strong>
+                <p>
+                  Tokens sent to a contract are gone unless it was built to hold them. A Safe
+                  can; an exchange&rsquo;s deposit contract or a swap router usually can&rsquo;t.
+                  Only continue if the recipient told you a contract address on purpose.
+                </p>
+              </div>
+            </div>
+          )}
           <div className="btn-row">
             <button type="button" className="btn btn-ghost" onClick={() => setStep({ kind: 'form' })}>
               <IconBack size={16} />
@@ -453,9 +470,10 @@ export default function EvmSendModal({
               <strong>Broadcast failed</strong>
               <p>{step.message}</p>
               <p>
-                If the attempt did reach the network despite the error, it may still go through —
-                check the explorer before assuming it failed. Retrying from here replaces that
-                attempt instead of paying twice.
+                If the attempt did reach the network despite the error, it may still go through.
+                Retrying from here re-sends at the same nonce with a higher fee, so it replaces that
+                attempt rather than adding to it, and the wallet keeps checking on both before it
+                lets you send anything else.
               </p>
             </div>
           </div>

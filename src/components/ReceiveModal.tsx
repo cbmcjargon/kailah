@@ -41,7 +41,7 @@ export default function ReceiveModal({ chain, account, accountState, onClose }: 
   const [verified, setVerified] = useState<string | null>(null)
   const verify = async () => {
     if (hw === null) return
-    const ok = await device.run((onStatus) => verifyAddressOnLedger(hw, 0, index, browserTransport(true), onStatus))
+    const ok = await device.run((onStatus) => verifyAddressOnLedger(hw, 0, index, browserTransport(true), onStatus, address))
     if (ok !== null) setVerified(address)
   }
 

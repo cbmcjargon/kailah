@@ -16,6 +16,7 @@
 import { sha256 } from '@noble/hashes/sha2'
 import { bytesToHex, hexToBytes } from '@noble/hashes/utils'
 import {
+  assertNoTronInFlight,
   assertTronEnvelope,
   decodeTronRawTx,
   hexAddrToBase58,
@@ -188,17 +189,19 @@ interface BuildResult {
   txID?: string
 }
 
-function finish(
+async function finish(
   chain: TronChainConfig,
   key: TronKey,
   action: TronStakeAction,
   r: BuildResult,
   verify: (d: ReturnType<typeof decodeTronRawTx>) => boolean,
   extras: { resource?: TronResource | null; votes?: { address: string; count: bigint }[] | null; amount?: bigint },
-): PreparedTronStake {
+): Promise<PreparedTronStake> {
   if (!r.raw_data_hex) throw new Error(MISMATCH)
   const decoded = decodeTronRawTx(r.raw_data_hex)
   assertTronEnvelope(decoded, 0n) // stake ops are bandwidth-only: fee_limit stays 0
+  // one TRON transaction in flight at a time, stake actions included
+  await assertNoTronInFlight(chain)
   if (decoded.contracts.length !== 1 || decoded.contracts[0]?.owner !== key.address || !verify(decoded)) {
     throw new Error(MISMATCH)
   }
@@ -215,6 +218,7 @@ function finish(
     rawDataHex: r.raw_data_hex,
     rawData: r.raw_data,
     txID: computedId,
+    expiration: Number(decoded.expiration),
     action,
     resource: extras.resource ?? null,
     votes: extras.votes ?? null,

@@ -21,9 +21,11 @@ import { hmac } from '@noble/hashes/hmac'
 import { sha512 } from '@noble/hashes/sha2'
 import { utf8ToBytes } from '@noble/hashes/utils'
 import { mnemonicToSeedSync } from '@scure/bip39'
+import { normalizeMnemonic } from './keys'
 import * as solLib from 'micro-sol-signer'
 import { formatEvmAmount } from './units'
 import { agoText, recordPending, solInFlightBlock } from './pending'
+import { recordSentTo } from './sentlog'
 import type { NetMode } from './types'
 
 export type SolChainId = 'sol' | 'sol-devnet'
@@ -121,6 +123,16 @@ export function slip10Ed25519(seed: Uint8Array, path: number[]): Uint8Array {
 }
 
 export const SOL_DERIVATION_PATH = "m/44'/501'/0'/0'"
+/**
+ * Practice mode signs with a different key, at BIP44's testnet coin type (1,
+ * as Bitcoin's own testnet accounts do): a Solana message carries nothing
+ * that names its cluster except the blockhash, which comes from the RPC, so a
+ * hostile devnet RPC handing out a mainnet blockhash could otherwise get a
+ * mainnet-valid signature from the real key (audit 2026-10-26, H3). No
+ * mainnet wallet derives Solana at coin type 1, so this key never holds real
+ * coins.
+ */
+export const SOL_PRACTICE_PATH = "m/44'/1'/0'/0'"
 
 export interface SolKey {
   address: string
@@ -128,9 +140,11 @@ export interface SolKey {
   zero: () => void
 }
 
-export function deriveSolKey(mnemonic: string, accountIndex = 0): SolKey {
-  const seed = mnemonicToSeedSync(mnemonic)
-  const privateKey = slip10Ed25519(seed, [44, 501, accountIndex, 0])
+export function deriveSolKey(mnemonic: string, accountIndex = 0, practice = false): SolKey {
+  // normalized like every other engine's derivation (keys.ts), so a phrase
+  // typed with capitals or extra spaces can never yield a different key here
+  const seed = mnemonicToSeedSync(normalizeMnemonic(mnemonic))
+  const privateKey = slip10Ed25519(seed, [44, practice ? 1 : 501, accountIndex, 0])
   seed.fill(0)
   return {
     address: solLib.getAddress(privateKey),
@@ -254,6 +268,9 @@ interface AccountInfoResult {
   value: { owner: string } | null
 }
 
+/** a base58 ed25519 signature (64 bytes), as the explorer links expect it */
+const SOL_SIGNATURE = /^[1-9A-HJ-NP-Za-km-z]{64,88}$/
+
 /** SPL token program ids — an address owned by either is a token account. */
 const TOKEN_PROGRAM_IDS: string[] = [solLib.TOKEN_PROGRAM, solLib.TOKEN_PROGRAM2022]
 
@@ -330,6 +347,8 @@ export async function fetchSolHistory(chain: SolChainConfig, address: string): P
   const seen = new Set<string>()
   const sigs: SigInfo[] = []
   for (const s of [...ownerSigs, ...ataSigs]) {
+    // the signature becomes an explorer link: only a real one gets through
+    if (typeof s.signature !== 'string' || !SOL_SIGNATURE.test(s.signature)) continue
     if (seen.has(s.signature)) continue
     seen.add(s.signature)
     sigs.push(s)
@@ -412,6 +431,11 @@ export interface PreparedSolSend {
   chain: SolChainConfig
   asset: SolAsset
   to: string
+  /** the blockhash's last valid block height: when this attempt can no longer land */
+  lastValidBlockHeight: number
+  /** Solana Pay extras carried by the transaction, shown on the review */
+  reference: string[]
+  memo: string | null
   /** lamports for SOL sends, USDC smallest-units for USDC sends */
   amount: bigint
   feeLamports: bigint
@@ -422,6 +446,11 @@ export interface PreparedSolSend {
   blockhash: string
 }
 
+/** SPL Memo program: a note the recipient (a merchant, an exchange) matches the payment by. */
+export const MEMO_PROGRAM = 'MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr'
+/** Solana Pay caps memos; the program allows more, but a note this long is not a payment reference. */
+const MEMO_MAX_BYTES = 256
+
 export interface SolSendArgs {
   chain: SolChainConfig
   key: SolKey
@@ -429,6 +458,10 @@ export interface SolSendArgs {
   to: string
   amount: bigint
   sendMax?: boolean
+  /** Solana Pay `reference` keys: read-only accounts the recipient looks the payment up by */
+  reference?: string[]
+  /** Solana Pay `memo`: attached as an SPL Memo instruction */
+  memo?: string
 }
 
 /** Byte size of an SPL token account — rent-exemption lookup key. */
@@ -445,18 +478,24 @@ export async function prepareSolSend(args: SolSendArgs): Promise<PreparedSolSend
     throw new Error('That is your own address — sending to yourself only burns the fee.')
   }
 
-  const [balance, blockhashRes, rentMinRes] = await Promise.all([
+  const extras = payExtras(args)
+  const [balance, blockhashRes, rentMinRes, toInfo] = await Promise.all([
     getSolBalance(chain, key.address),
-    rpc<{ value: { blockhash: string } }>(chain, 'getLatestBlockhash', [
+    rpc<{ value: { blockhash: string; lastValidBlockHeight?: unknown } }>(chain, 'getLatestBlockhash', [
       { commitment: 'confirmed' },
     ]),
     rpc<number>(chain, 'getMinimumBalanceForRentExemption', [0]).catch(() => null),
+    rpc<AccountInfoResult>(chain, 'getAccountInfo', [args.to, { encoding: 'base64' }]),
   ])
+  const lastValidBlockHeight = blockHeightOf(blockhashRes.value.lastValidBlockHeight)
+  // The same trap the USDC path guards: a token account or a program's
+  // account is not a wallet, and SOL sent there is at best hard to recover.
+  assertWalletDestination(toInfo)
   const rentMin = rentMinRes != null ? BigInt(rentMinRes) : RENT_EXEMPT_MIN_FALLBACK
   const fee = SOL_BASE_FEE
 
   if (asset === 'usdc') {
-    return prepareUsdcSend(args, balance, blockhashRes.value.blockhash, rentMin)
+    return prepareUsdcSend(args, balance, blockhashRes.value.blockhash, lastValidBlockHeight, rentMin)
   }
 
   const amount = args.sendMax === true ? balance - fee : args.amount
@@ -479,12 +518,19 @@ export async function prepareSolSend(args: SolSendArgs): Promise<PreparedSolSend
     destination: args.to,
     amount,
   })
-  const unsigned = solLib.createTx(key.address, [instruction], blockhashRes.value.blockhash)
+  const unsigned = solLib.createTx(
+    key.address,
+    [withReference(instruction, extras.reference), ...memoInstructions(key.address, extras.memo)],
+    blockhashRes.value.blockhash,
+  )
 
   return {
     chain,
     asset: 'sol',
     to: args.to,
+    lastValidBlockHeight,
+    reference: extras.reference,
+    memo: extras.memo,
     amount,
     feeLamports: fee,
     rentLamports: 0n,
@@ -493,10 +539,54 @@ export async function prepareSolSend(args: SolSendArgs): Promise<PreparedSolSend
   }
 }
 
+/** A token account, a program's account: not a wallet. The system program owns plain wallets. */
+function assertWalletDestination(toInfo: AccountInfoResult): void {
+  if (toInfo.value && toInfo.value.owner !== solLib.SYS_PROGRAM) {
+    throw new Error(
+      TOKEN_PROGRAM_IDS.includes(toInfo.value.owner)
+        ? 'That address is a token account, not a wallet. Ask the recipient for their wallet address.'
+        : 'That address belongs to a program, not to a person. Ask the recipient for their wallet address.',
+    )
+  }
+}
+
+/** Validate the Solana Pay extras a scan may have carried. */
+function payExtras(args: SolSendArgs): { reference: string[]; memo: string | null } {
+  const reference = args.reference ?? []
+  if (reference.length > 4 || !reference.every(isValidSolAddress)) {
+    throw new Error('That payment request carries a reference this wallet cannot attach.')
+  }
+  const memo = args.memo ?? null
+  if (memo !== null && (utf8ToBytes(memo).length > MEMO_MAX_BYTES || /[\u0000-\u001f\u007f]/.test(memo))) {
+    throw new Error('That payment request carries a memo this wallet cannot attach.')
+  }
+  return { reference, memo: memo === '' ? null : memo }
+}
+
+type SolIx = { program: string; keys: { address: string; sign: boolean; write: boolean }[]; data: Uint8Array }
+
+/** Solana Pay references ride on the transfer as read-only, non-signing accounts. */
+function withReference<T extends SolIx>(ix: T, reference: string[]): T {
+  if (reference.length === 0) return ix
+  return { ...ix, keys: [...ix.keys, ...reference.map((address) => ({ address, sign: false, write: false }))] }
+}
+
+/** The SPL Memo instruction for a Solana Pay memo (the payer signs it). */
+function memoInstructions(signer: string, memo: string | null): SolIx[] {
+  if (memo === null) return []
+  return [{ program: MEMO_PROGRAM, keys: [{ address: signer, sign: true, write: false }], data: utf8ToBytes(memo) }]
+}
+
+/** A block height from the RPC, or the largest safe integer if it didn't say (hold the record by the clock). */
+export function blockHeightOf(v: unknown): number {
+  return typeof v === 'number' && Number.isSafeInteger(v) && v >= 0 ? v : Number.MAX_SAFE_INTEGER
+}
+
 async function prepareUsdcSend(
   args: SolSendArgs,
   solBalance: bigint,
   blockhash: string,
+  lastValidBlockHeight: number,
   rentMin: bigint,
 ): Promise<PreparedSolSend> {
   const { chain, key } = args
@@ -582,12 +672,20 @@ async function prepareUsdcSend(
       decimals: chain.usdc.decimals,
     }),
   )
+  const extras = payExtras(args)
+  const last = instructions.length - 1
+  const transfer = instructions[last]
+  if (transfer !== undefined) instructions[last] = withReference(transfer, extras.reference)
+  instructions.push(...memoInstructions(key.address, extras.memo))
   const unsigned = solLib.createTx(key.address, instructions, blockhash)
 
   return {
     chain,
     asset: 'usdc',
     to: args.to,
+    lastValidBlockHeight,
+    reference: extras.reference,
+    memo: extras.memo,
     amount,
     feeLamports: fee,
     rentLamports: rent,
@@ -605,11 +703,48 @@ async function prepareUsdcSend(
  */
 export class SolBroadcastError extends Error {
   readonly signature: string
-  constructor(message: string, signature: string) {
+  /** the signed bytes (base64), so the SAME attempt can be sent again — never a new one */
+  readonly signed: string
+  constructor(message: string, signature: string, signed: string) {
     super(message)
     this.name = 'SolBroadcastError'
     this.signature = signature
+    this.signed = signed
   }
+}
+
+/** The attempt's blockhash has expired: it can never land, and a fresh one is safe. */
+export class SolExpiredError extends Error {
+  constructor() {
+    super('That attempt has expired on the network and did not go through.')
+    this.name = 'SolExpiredError'
+  }
+}
+
+/**
+ * Send the SAME signed bytes again after a failed broadcast. Sending twice is
+ * harmless (same signature, the network keeps one); building a fresh
+ * transaction is what could pay twice. "Already processed" means the first
+ * try did land; an expired blockhash means it never will.
+ */
+export async function rebroadcastSol(chain: SolChainConfig, signature: string, signed: string): Promise<string> {
+  try {
+    await rpc<string>(chain, 'sendTransaction', [signed, { encoding: 'base64', preflightCommitment: 'confirmed' }])
+    return signature
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    if (/already (been )?processed/i.test(msg)) return signature
+    if (/blockhash not found|block height exceeded|expired/i.test(msg)) throw new SolExpiredError()
+    throw new SolBroadcastError(msg, signature, signed)
+  }
+}
+
+/** The RPC's current block height, for the ledger's expiry by blockhash validity. */
+export function solBlockHeight(chain: SolChainConfig): Promise<number> {
+  return rpc<number>(chain, 'getBlockHeight', [{ commitment: 'confirmed' }]).then((h) => {
+    if (typeof h !== 'number' || !Number.isSafeInteger(h)) throw new Error('bad block height')
+    return h
+  })
 }
 
 /** True once the network reports the signature at any confirmation level. */
@@ -628,7 +763,11 @@ export async function solTxSeen(chain: SolChainConfig, signature: string): Promi
  * Seen → fine (dropped); expired → dead (pruned by the ledger's TTL).
  */
 export async function assertNoSolInFlight(chain: SolChainConfig): Promise<void> {
-  const block = await solInFlightBlock(chain.id, (signature) => solTxSeen(chain, signature))
+  const block = await solInFlightBlock(
+    chain.id,
+    (signature) => solTxSeen(chain, signature),
+    () => solBlockHeight(chain),
+  )
   if (block === null) return
   throw new Error(
     block.reason === 'pending'
@@ -640,14 +779,21 @@ export async function assertNoSolInFlight(chain: SolChainConfig): Promise<void> 
 export async function broadcastSolSend(key: SolKey, prepared: PreparedSolSend): Promise<string> {
   const [txid, signed] = solLib.signTx(key.privateKey, prepared.unsigned)
   // recorded BEFORE the send so even a timed-out attempt leaves a trace
-  recordPending({ kind: 'sol', chainId: prepared.chain.id, signature: txid, ts: Date.now() })
+  recordPending({
+    kind: 'sol',
+    chainId: prepared.chain.id,
+    signature: txid,
+    ts: Date.now(),
+    lastValidBlockHeight: prepared.lastValidBlockHeight,
+  })
+  recordSentTo(prepared.chain.id, prepared.to)
   try {
     return await rpc<string>(prepared.chain, 'sendTransaction', [
       signed,
       { encoding: 'base64', preflightCommitment: 'confirmed' },
     ])
   } catch (e) {
-    throw new SolBroadcastError(e instanceof Error ? e.message : String(e), txid)
+    throw new SolBroadcastError(e instanceof Error ? e.message : String(e), txid, signed)
   }
 }
 
@@ -676,6 +822,10 @@ export function parseSolScanned(text: string): {
   splToken?: string
   /** the token-denominated amount, as its original decimal string */
   tokenAmount?: string
+  /** Solana Pay `reference` keys (the recipient matches the payment by them) */
+  reference?: string[]
+  /** Solana Pay `memo` */
+  memo?: string
 } {
   const trimmed = text.trim()
   if (trimmed.length === 0) throw new Error('The scanned code was empty.')
@@ -683,10 +833,27 @@ export function parseSolScanned(text: string): {
   let amount: bigint | undefined
   let splToken: string | undefined
   let tokenAmount: string | undefined
+  let reference: string[] | undefined
+  let memo: string | undefined
   const uri = /^solana:([^?]+)(?:\?(.*))?$/i.exec(trimmed)
   if (uri) {
     candidate = uri[1]!
     const q = new URLSearchParams(uri[2] ?? '')
+    // A merchant that set these may not credit a payment without them.
+    const refs = q.getAll('reference')
+    if (refs.length > 0) {
+      if (refs.length > 4 || !refs.every(isValidSolAddress)) {
+        throw new Error('That payment request carries a reference this wallet cannot attach.')
+      }
+      reference = refs
+    }
+    const m = q.get('memo')
+    if (m !== null && m !== '') {
+      if (utf8ToBytes(m).length > MEMO_MAX_BYTES || /[\u0000-\u001f\u007f]/.test(m)) {
+        throw new Error('That payment request carries a memo this wallet cannot attach.')
+      }
+      memo = m
+    }
     const raw = q.get('amount')
     const validAmount = raw !== null && /^\d*\.?\d*$/.test(raw) && raw !== '' && raw !== '.'
     const spl = q.get('spl-token')
@@ -709,6 +876,8 @@ export function parseSolScanned(text: string): {
       ...(amount !== undefined && { amount }),
       ...(splToken !== undefined && { splToken }),
       ...(tokenAmount !== undefined && { tokenAmount }),
+      ...(reference !== undefined && { reference }),
+      ...(memo !== undefined && { memo }),
     }
   }
   if (/^0x/i.test(candidate)) {

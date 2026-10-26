@@ -542,5 +542,62 @@ console.log('--- I: storage, lock, erase ---')
   check('I5 erase removes kailah.sec.hwaccounts', localStorage.getItem('kailah.sec.hwaccounts') === null && [...store.keys()].every((k) => !k.startsWith('kailah.sec.')))
 }
 
+// ===========================================================================
+console.log('--- J: Speed up refuses a provider-forged original (audit 2026-10-26) ---')
+{
+  const { OutScript, Address } = await import('@scure/btc-signer')
+  const { verifiedRawTxInfo, verifiedPrevout } = await import('../src/lib/txbuild.ts')
+  const { assertSignedByUs, NOT_OURS } = await import('../src/lib/hwsign.ts')
+  const chain = CHAINS.btc
+  const OPTS = { allowUnknownOutputs: true, allowUnknownInputs: true, disableScriptCheck: true }
+  const hexOf = new Map()
+  const client = { getRawTxHex: async (t) => { const h = hexOf.get(t); if (!h) throw new Error('unknown ' + t); return h } }
+  // one real coin of ours at 0/3, funded by a segwit tx the provider serves
+  const k03 = sw.btc.address(0, 3)
+  const fundRaw = RawTx.encode({
+    version: 2, segwitFlag: true,
+    inputs: [{ txid: new Uint8Array(32).fill(0x42), index: 0, finalScriptSig: new Uint8Array(0), sequence: 0xfffffffd }],
+    outputs: [{ amount: 100_000n, script: p2wpkh(k03.publicKey, chain.network).script }],
+    witnesses: [[new Uint8Array(71).fill(9), new Uint8Array(33).fill(2)]], lockTime: 0,
+  })
+  const fundTxid = Transaction.fromRaw(fundRaw, OPTS).id
+  hexOf.set(fundTxid, hex.encode(fundRaw))
+  const attacker = deriveAccount(OTHER, chain).address(0, 0).address
+  const myChange = sw.btc.address(1, 2)
+  // the provider's forgery: our coin, RBF-signalled, paying the attacker, garbage witness
+  const forgedRaw = RawTx.encode({
+    version: 2, segwitFlag: true,
+    inputs: [{ txid: hex.decode(fundTxid), index: 0, finalScriptSig: new Uint8Array(0), sequence: 0xfffffffd }],
+    outputs: [
+      { amount: 60_000n, script: OutScript.encode(Address(chain.network).decode(attacker)) },
+      { amount: 39_000n, script: p2wpkh(myChange.publicKey, chain.network).script },
+    ],
+    witnesses: [[new Uint8Array(72).fill(0xde), new Uint8Array(33).fill(0xad)]], lockTime: 0,
+  })
+  const forgedTxid = Transaction.fromRaw(forgedRaw, OPTS).id
+  hexOf.set(forgedTxid, hex.encode(forgedRaw))
+  // a genuine original: our own signed send of the same coin
+  const genuine = buildTxV2({
+    chain, utxos: [{ txid: fundTxid, vout: 0, value: 100_000n, address: k03.address, branch: 0, index: 3 }],
+    keyFor: () => k03, toAddress: attacker, amount: 60_000n, feeRate: 2n, sendMax: false, changeAddress: myChange.address,
+  })
+  hexOf.set(genuine.txid, genuine.hex)
+  // exactly BumpModal's preparation up to the signature check
+  const prepare = async (txid) => {
+    const rawHex = await client.getRawTxHex(txid)
+    const decoded = decodeVerifiedTx(chain, txid, rawHex)
+    const fundingHex = new Map()
+    for (const inp of decoded.inputs) if (!fundingHex.has(inp.prevTxid)) fundingHex.set(inp.prevTxid, await client.getRawTxHex(inp.prevTxid))
+    const original = verifiedRawTxInfo({ txid, height: null, time: null }, decoded, (p, v) => verifiedPrevout(chain, p, fundingHex.get(p), v))
+    const inputs = original.inputs.map((inp) => ({ publicKey: hw.btc.address(0, 3).publicKey, value: inp.value }))
+    assertSignedByUs(chain, rawHex, inputs)
+    return original
+  }
+  await rejects('J1 the forged "pending" tx is refused before any replacement is planned', () => prepare(forgedTxid), (e) => e.message === NOT_OURS)
+  let original = null
+  try { original = await prepare(genuine.txid) } catch (e) { original = e }
+  check('J2 our own pending tx passes the same check, with the device-derived keys', original !== null && !(original instanceof Error) && original.outputs.length === 2, original instanceof Error ? original.message : '')
+}
+
 console.log(`\n${failures === 0 ? 'ALL HARDWARE CHECKS PASSED' : `${failures} CHECK(S) FAILED`}`)
 process.exit(failures === 0 ? 0 : 1)

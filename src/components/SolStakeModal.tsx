@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import type { SolChainConfig, SolKey, SolUiState } from '../lib/sol'
-import { formatSol } from '../lib/sol'
+import { formatSol, rebroadcastSol, SolBroadcastError, SolExpiredError } from '../lib/sol'
 import type { PreparedStakeAction, StakeAccountView, ValidatorOption } from '../lib/solstake'
 import {
   broadcastStakeAction,
@@ -33,7 +33,7 @@ type Step =
   | { kind: 'review'; prepared: PreparedStakeAction }
   | { kind: 'broadcasting' }
   | { kind: 'success'; signature: string; prepared: PreparedStakeAction }
-  | { kind: 'failed'; message: string }
+  | { kind: 'failed'; message: string; signature?: string; signed?: string; prepared?: PreparedStakeAction }
 
 const STATE_LABEL: Record<StakeAccountView['state'], string> = {
   activating: 'Starting up — earns from the next epoch',
@@ -130,7 +130,35 @@ export default function SolStakeModal({
         if (aliveRef.current) setStep({ kind: 'success', signature, prepared })
       })
       .catch((e: unknown) => {
-        if (aliveRef.current) setStep({ kind: 'failed', message: errMessage(e) })
+        if (aliveRef.current) {
+          setStep({
+            kind: 'failed',
+            message: errMessage(e),
+            prepared,
+            ...(e instanceof SolBroadcastError && { signature: e.signature, signed: e.signed }),
+          })
+        }
+      })
+  }
+
+  // Send the SAME signed bytes again (see SolSendModal): never a rebuilt one
+  // while the first could still land.
+  const handleResend = (failed: { signature?: string; signed?: string; prepared?: PreparedStakeAction }) => {
+    if (failed.signature === undefined || failed.signed === undefined || failed.prepared === undefined) return
+    const { signature, signed, prepared } = failed
+    setStep({ kind: 'broadcasting' })
+    rebroadcastSol(chain, signature, signed)
+      .then(() => {
+        onChanged()
+        if (aliveRef.current) setStep({ kind: 'success', signature, prepared })
+      })
+      .catch((e: unknown) => {
+        if (!aliveRef.current) return
+        if (e instanceof SolExpiredError) {
+          setStep({ kind: 'failed', message: e.message, prepared })
+        } else {
+          setStep({ kind: 'failed', message: errMessage(e), prepared, signature, signed })
+        }
       })
   }
 
@@ -402,9 +430,11 @@ export default function SolStakeModal({
             <IconWarning size={20} />
             <div>
               <strong>Not completed</strong>
+              <p>{step.message}</p>
               <p>
-                {step.message} Nothing further was sent — going back rebuilds the transaction
-                fresh if you want to retry.
+                If the network took it before the error, it can still go through for about a
+                minute. &ldquo;Send again&rdquo; re-sends this same transaction; the wallet
+                won&rsquo;t build a new one while this attempt could still land.
               </p>
             </div>
           </div>
@@ -412,10 +442,19 @@ export default function SolStakeModal({
             <button type="button" className="btn btn-ghost" onClick={onClose}>
               Close
             </button>
-            <button type="button" className="btn btn-primary" onClick={() => setStep({ kind: 'list' })}>
+            <button
+              type="button"
+              className={step.signed !== undefined ? 'btn btn-secondary' : 'btn btn-primary'}
+              onClick={() => setStep({ kind: 'list' })}
+            >
               <IconBack size={16} />
               Back
             </button>
+            {step.signed !== undefined && (
+              <button type="button" className="btn btn-primary" onClick={() => handleResend(step)}>
+                Send again
+              </button>
+            )}
           </div>
         </div>
       )}

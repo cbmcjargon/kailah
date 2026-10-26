@@ -14,7 +14,9 @@ import type {
 } from '../lib/types'
 import { getClient } from '../lib/api'
 import { buildBump, decodeVerifiedTx, prepareBump, verifiedPrevout, verifiedRawTxInfo } from '../lib/txbuild'
-import { assembleSigned, buildSignRequest, fetchPrevTxs } from '../lib/hwsign'
+import { assembleSigned, assertSignedByUs, buildSignRequest, fetchPrevTxs } from '../lib/hwsign'
+import { recordPending } from '../lib/pending'
+import { recordSentTo } from '../lib/sentlog'
 import { isHardwareAccount } from '../lib/hwaccount'
 import { browserTransport, ledgerSigner } from '../lib/ledger'
 import { formatCoin } from '../lib/format'
@@ -144,8 +146,9 @@ export default function BumpModal({
       // the bump a rewritten recipient list and redirect the replacement.
       const fundingHex = new Map<string, string>()
       let original: RawTxInfo
+      let rawHex = ''
       try {
-        const rawHex = await client.getRawTxHex(scanned.txid)
+        rawHex = await client.getRawTxHex(scanned.txid)
         const decoded = decodeVerifiedTx(chain, scanned.txid, rawHex)
         for (const inp of decoded.inputs) {
           if (!fundingHex.has(inp.prevTxid)) {
@@ -221,7 +224,12 @@ export default function BumpModal({
 
       // Rebuild the original inputs as spendable utxos (rawTxHex only needed
       // for legacy chains, which never signal RBF, so this stays a no-op there).
+      // And prove the original is OURS: the provider picked which transaction
+      // to show as pending and served its bytes; only our signatures on its
+      // inputs can't be forged. Without this a fabricated "pending" payment
+      // became a real, signed replacement (audit 2026-10-26).
       const originalUtxos: AccountUtxo[] = []
+      const signedInputs: { publicKey: Uint8Array; value: bigint }[] = []
       try {
         for (const inp of original.inputs) {
           if (inp.prevTxid === null || inp.prevVout === null || inp.address === null) {
@@ -245,7 +253,9 @@ export default function BumpModal({
             if (funding !== undefined) u.rawTxHex = funding
           }
           originalUtxos.push(u)
+          signedInputs.push({ publicKey: account.address(loc.branch, loc.index).publicKey, value: inp.value })
         }
+        assertSignedByUs(chain, rawHex, signedInputs)
       } catch (e) {
         if (!cancelled) setStep({ kind: 'error', message: errMessage(e) })
         return
@@ -400,6 +410,9 @@ export default function BumpModal({
 
   const handleBroadcast = (b: BuiltTx) => {
     setStep({ kind: 'broadcasting', built: b })
+    // the replacement may land after a lost answer, like any send
+    recordPending({ kind: 'utxo', chainId: chain.id, txid: b.txid, to: b.toAddress, ts: Date.now() })
+    recordSentTo(chain.id, b.toAddress)
     client
       .broadcast(b.hex)
       .then((txid) => {
@@ -484,6 +497,8 @@ export default function BumpModal({
                     type="button"
                     aria-pressed={p.rate === selectedRate}
                     className={`fee-pill ${p.rate === selectedRate ? 'is-selected' : ''}`}
+                    // the device signs the fee it was shown; the screen must not move meanwhile
+                    disabled={device.busy}
                     onClick={() => setSelectedRate(p.rate)}
                   >
                     <span className="fee-pill-label">{p.label}</span>

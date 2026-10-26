@@ -19,6 +19,7 @@ the referral links and the swap fee unchanged.** These are:
 | --- | --- | --- |
 | Strike invite link | `https://invite.strike.me/QRPRGZ` | `src/lib/onramp.ts` (`STRIKE_INVITE_URL`) |
 | Kraken invite link | `https://proinvite.kraken.com/9f1e/rf9gcbrs` | `src/lib/onramp.ts` (`KRAKEN_INVITE_URL`) |
+| Gemini invite link | `https://exchange.gemini.com/register?referral=ben8re2e&type=referral` | `src/lib/onramp.ts` (`GEMINI_INVITE_URL`) |
 | Swap fee rate | 0.5% (`50` basis points) | `src/lib/solswap.ts` (`SWAP_FEE_BPS`) |
 | Swap fee account | `F5VXwGCmbct91xohG4CTqiXg25d23zYNQav1pB5eH2oF` (USDC, owned by `BpmzmuZieAHqCm8s183T9c397K46YqsEQKbyyNo4Wo8b`) | `src/lib/solswap.ts` (`SWAP_FEE_ACCOUNT`, `SWAP_FEE_WALLET`) |
 

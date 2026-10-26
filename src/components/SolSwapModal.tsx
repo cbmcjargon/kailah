@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import type { SolChainConfig, SolKey, SolUiState } from '../lib/sol'
-import { formatSol, formatSolUsdc, SolBroadcastError, solTxSeen } from '../lib/sol'
+import { formatSol, formatSolUsdc, rebroadcastSol, SolBroadcastError, SolExpiredError, solTxSeen } from '../lib/sol'
 import type { PreparedSwap, SwapDirection, SwapQuote } from '../lib/solswap'
 import { broadcastSwap, getSwapQuote, prepareSwap, SWAP_SLIPPAGE_BPS } from '../lib/solswap'
 import { evmToUsd } from '../lib/units'
@@ -27,7 +27,7 @@ type Step =
   | { kind: 'review'; prepared: PreparedSwap }
   | { kind: 'broadcasting' }
   | { kind: 'success'; signature: string; prepared: PreparedSwap }
-  | { kind: 'failed'; message: string; signature?: string; prepared: PreparedSwap }
+  | { kind: 'failed'; message: string; signature?: string; signed?: string; prepared: PreparedSwap }
 
 /** SOL kept back on a MAX swap so fees and a possible token account fit. */
 const MAX_SWAP_SOL_RESERVE = 5_000_000n
@@ -125,6 +125,19 @@ export default function SolSwapModal({
     parsedAmount !== null && (solToUsdc ? price : usdcPrice) !== undefined
       ? evmToUsd(parsedAmount, inDecimals, (solToUsdc ? price : usdcPrice) ?? 0)
       : null
+  // The quote against the wallet's OWN price feed. The gate proves the route
+  // does what the quote says; nothing else says whether the quote itself is
+  // fair, and a swap service quoting well under market would otherwise look
+  // honest all the way to the review screen (audit 2026-10-26, M8).
+  const outDecimals = solToUsdc ? chain.usdc.decimals : 9
+  const outPrice = solToUsdc ? usdcPrice : price
+  const outUsd =
+    quote !== null && outPrice !== undefined ? evmToUsd(quote.outAmount, outDecimals, outPrice) : null
+  const rateGapPct =
+    usdHint !== null && outUsd !== null && usdHint > 0 ? (1 - outUsd / usdHint) * 100 : null
+  const badRate = rateGapPct !== null && rateGapPct > 3
+  const [rateAckFor, setRateAckFor] = useState<string | null>(null)
+  const rateAcked = quote !== null && rateAckFor === `${quote.inAmount}:${quote.outAmount}`
 
   const handleMax = () => {
     if (inBalance === null) return
@@ -161,8 +174,30 @@ export default function SolSwapModal({
             kind: 'failed',
             message: errMessage(e),
             prepared,
-            ...(e instanceof SolBroadcastError && { signature: e.signature }),
+            ...(e instanceof SolBroadcastError && { signature: e.signature, signed: e.signed }),
           })
+        }
+      })
+  }
+
+  // Send the SAME signed bytes again: harmless if the first try landed, the
+  // only safe retry while its blockhash is still valid (a fresh quote would
+  // be a second swap).
+  const handleResend = (failed: { signature?: string; signed?: string; prepared: PreparedSwap }) => {
+    if (failed.signature === undefined || failed.signed === undefined) return
+    const { signature, signed, prepared } = failed
+    setStep({ kind: 'broadcasting' })
+    rebroadcastSol(chain, signature, signed)
+      .then(() => {
+        onSwapped()
+        if (aliveRef.current) setStep({ kind: 'success', signature, prepared })
+      })
+      .catch((e) => {
+        if (!aliveRef.current) return
+        if (e instanceof SolExpiredError) {
+          setStep({ kind: 'failed', message: e.message, prepared })
+        } else {
+          setStep({ kind: 'failed', message: errMessage(e), prepared, signature, signed })
         }
       })
   }
@@ -285,6 +320,11 @@ export default function SolSwapModal({
               <>
                 <div className="balance-main tnum" style={{ fontSize: '1.3rem' }}>
                   ≈ {fmtOut(quote.outAmount)} <span className="balance-ticker">{outSymbol}</span>
+                  {outUsd !== null && (
+                    <span className="text-tertiary" style={{ fontSize: '0.85rem', marginLeft: 8 }}>
+                      ≈ {formatUsd(outUsd)}
+                    </span>
+                  )}
                 </div>
                 <span className="field-hint">
                   At least {fmtOut(quote.minOutAmount)} {outSymbol} after slippage (
@@ -317,10 +357,33 @@ export default function SolSwapModal({
             </div>
           )}
 
+          {badRate && quote !== null && usdHint !== null && outUsd !== null && (
+            <div className="warning-box" role="alert">
+              <IconWarning size={20} />
+              <div>
+                <strong>This quote is {rateGapPct!.toFixed(1)}% below the market price</strong>
+                <p>
+                  You would get about {formatUsd(outUsd)} of {outSymbol} for {formatUsd(usdHint)} of{' '}
+                  {inSymbol}, by the wallet&rsquo;s own price feed. A route can lag the market for a
+                  moment, but a gap this size usually means the quote is wrong. Try again in a minute
+                  before accepting it.
+                </p>
+                <label className="lookalike-ack">
+                  <input
+                    type="checkbox"
+                    checked={rateAcked}
+                    onChange={(e) => setRateAckFor(e.target.checked ? `${quote.inAmount}:${quote.outAmount}` : null)}
+                  />
+                  <span>I understand I&rsquo;d be swapping below the market price</span>
+                </label>
+              </div>
+            </div>
+          )}
+
           <button
             type="submit"
             className="btn btn-primary"
-            disabled={quote === null || quoteLoading || amountError !== null}
+            disabled={quote === null || quoteLoading || amountError !== null || (badRate && !rateAcked)}
           >
             Continue
           </button>
@@ -466,10 +529,11 @@ export default function SolSwapModal({
             <IconWarning size={20} />
             <div>
               <strong>Swap not completed</strong>
+              <p>{step.message}</p>
               <p>
-                {step.message} The attempt could still land for about a minute. Going back first
-                checks whether it did — if you swap again anyway, wait a minute so a landed first
-                attempt can&rsquo;t execute twice.
+                If the network took it before the error, it can still go through for about a
+                minute. &ldquo;Send again&rdquo; re-sends this same transaction, which can&rsquo;t execute
+                twice; the wallet won&rsquo;t build a new one while this attempt could still land.
               </p>
             </div>
           </div>
@@ -479,13 +543,18 @@ export default function SolSwapModal({
             </button>
             <button
               type="button"
-              className="btn btn-primary"
+              className={step.signed !== undefined ? 'btn btn-secondary' : 'btn btn-primary'}
               disabled={retryChecking}
               onClick={() => handleRetryAfterFailure(step)}
             >
               <IconBack size={16} />
               {retryChecking ? 'Checking…' : 'Back'}
             </button>
+            {step.signed !== undefined && (
+              <button type="button" className="btn btn-primary" onClick={() => handleResend(step)}>
+                Send again
+              </button>
+            )}
           </div>
         </div>
       )}

@@ -7,7 +7,9 @@ import {
   isValidSolAddress,
   parseSolScanned,
   prepareSolSend,
+  rebroadcastSol,
   SolBroadcastError,
+  SolExpiredError,
   solTxSeen,
 } from '../lib/sol'
 import { evmToUsd } from '../lib/units'
@@ -18,7 +20,8 @@ import QrScanner from './LazyQrScanner'
 import { IconBack, IconCheck, IconExternal, IconQrScan, IconWarning, Spinner } from './Icons'
 import { errMessage } from './ui'
 import LookalikeWarning, { useLookalike } from './LookalikeWarning'
-import { knownFromSol, SOL_FORMAT } from '../lib/lookalike'
+import { knownAddresses, SOL_FORMAT } from '../lib/lookalike'
+import { sentToAddresses } from '../lib/sentlog'
 
 interface SolSendModalProps {
   chain: SolChainConfig
@@ -37,7 +40,7 @@ type Step =
   | { kind: 'review'; prepared: PreparedSolSend }
   | { kind: 'broadcasting' }
   | { kind: 'success'; signature: string; prepared: PreparedSolSend }
-  | { kind: 'failed'; message: string; signature?: string; prepared: PreparedSolSend }
+  | { kind: 'failed'; message: string; signature?: string; signed?: string; prepared: PreparedSolSend }
 
 export default function SolSendModal({
   chain,
@@ -54,6 +57,10 @@ export default function SolSendModal({
   const [dest, setDest] = useState('')
   const [amountStr, setAmountStr] = useState('')
   const [sendMax, setSendMax] = useState(false)
+  // Solana Pay extras from a scanned request; they belong to that address
+  // only, so editing the address drops them.
+  const [pay, setPay] = useState<{ address: string; reference?: string[]; memo?: string } | null>(null)
+  const payExtras = pay !== null && pay.address === dest.trim() ? pay : null
 
   const aliveRef = useRef(true)
   useEffect(() => {
@@ -69,7 +76,10 @@ export default function SolSendModal({
 
   const destTrimmed = dest.trim()
   const destValid = destTrimmed !== '' && isValidSolAddress(destTrimmed)
-  const known = useMemo(() => knownFromSol(solKey.address, state.txs), [solKey.address, state.txs])
+  const known = useMemo(
+    () => knownAddresses([solKey.address], state.txs.map((t) => t.counterparty), sentToAddresses(chain.id)),
+    [solKey.address, state.txs, chain.id],
+  )
   const lookalike = useLookalike(destValid ? destTrimmed : '', known, SOL_FORMAT)
 
   let parsedAmount: bigint | null = null
@@ -110,6 +120,8 @@ export default function SolSendModal({
       to: destTrimmed,
       amount: parsedAmount ?? 0n,
       sendMax,
+      ...(payExtras?.reference !== undefined && { reference: payExtras.reference }),
+      ...(payExtras?.memo !== undefined && { memo: payExtras.memo }),
     })
       .then((prepared) => {
         if (aliveRef.current) setStep({ kind: 'review', prepared })
@@ -132,8 +144,29 @@ export default function SolSendModal({
             kind: 'failed',
             message: errMessage(e),
             prepared,
-            ...(e instanceof SolBroadcastError && { signature: e.signature }),
+            ...(e instanceof SolBroadcastError && { signature: e.signature, signed: e.signed }),
           })
+        }
+      })
+  }
+
+  // Send the SAME signed bytes again: harmless if the first try landed (same
+  // signature), the only safe retry while its blockhash is still valid.
+  const handleResend = (failed: { signature?: string; signed?: string; prepared: PreparedSolSend }) => {
+    if (failed.signature === undefined || failed.signed === undefined) return
+    const { signature, signed, prepared } = failed
+    setStep({ kind: 'broadcasting' })
+    rebroadcastSol(chain, signature, signed)
+      .then(() => {
+        onSent()
+        if (aliveRef.current) setStep({ kind: 'success', signature, prepared })
+      })
+      .catch((e) => {
+        if (!aliveRef.current) return
+        if (e instanceof SolExpiredError) {
+          setStep({ kind: 'failed', message: e.message, prepared })
+        } else {
+          setStep({ kind: 'failed', message: errMessage(e), prepared, signature, signed })
         }
       })
   }
@@ -177,11 +210,14 @@ export default function SolSendModal({
         return 'That payment request asks for a token this wallet doesn’t support — only SOL and USDC can be sent here.'
       }
       setDest(r.address)
+      setPay({ address: r.address, ...(r.reference !== undefined && { reference: r.reference }), ...(r.memo !== undefined && { memo: r.memo }) })
       if (r.splToken !== undefined) {
         setAsset('usdc')
         if (r.tokenAmount !== undefined && !sendMax) setAmountStr(r.tokenAmount)
-      } else if (r.amount !== undefined && !sendMax && asset === 'sol') {
-        setAmountStr(formatSol(r.amount))
+      } else {
+        // a plain request is a SOL request, whatever asset was selected
+        setAsset('sol')
+        if (r.amount !== undefined && !sendMax) setAmountStr(formatSol(r.amount))
       }
       setScanOpen(false)
       return null
@@ -380,6 +416,18 @@ export default function SolSendModal({
                 <dd className="tnum">{formatSol(step.prepared.rentLamports)} SOL</dd>
               </div>
             )}
+            {step.prepared.memo !== null && (
+              <div className="review-row">
+                <dt>Memo</dt>
+                <dd className="review-addr">{step.prepared.memo}</dd>
+              </div>
+            )}
+            {step.prepared.reference.length > 0 && (
+              <div className="review-row">
+                <dt>Payment reference</dt>
+                <dd className="mono review-addr">{step.prepared.reference.join(', ')}</dd>
+              </div>
+            )}
           </dl>
           {step.prepared.rentLamports > 0n && (
             <p className="text-tertiary">
@@ -445,10 +493,11 @@ export default function SolSendModal({
             <IconWarning size={20} />
             <div>
               <strong>Broadcast failed</strong>
+              <p>{step.message}</p>
               <p>
-                {step.message} The attempt could still reach the network for about a minute.
-                Going back first checks whether it did — if you retry anyway, wait a minute so a
-                landed first attempt can&rsquo;t be paid twice.
+                If the network took it before the error, it can still go through for about a
+                minute. &ldquo;Send again&rdquo; re-sends this same transaction, which can&rsquo;t pay
+                twice; the wallet won&rsquo;t build a new one while this attempt could still land.
               </p>
             </div>
           </div>
@@ -458,13 +507,18 @@ export default function SolSendModal({
             </button>
             <button
               type="button"
-              className="btn btn-primary"
+              className={step.signed !== undefined ? 'btn btn-secondary' : 'btn btn-primary'}
               disabled={retryChecking}
               onClick={() => handleRetryAfterFailure(step)}
             >
               <IconBack size={16} />
               {retryChecking ? 'Checking…' : 'Back'}
             </button>
+            {step.signed !== undefined && (
+              <button type="button" className="btn btn-primary" onClick={() => handleResend(step)}>
+                Send again
+              </button>
+            )}
           </div>
         </div>
       )}

@@ -24,7 +24,10 @@ import LedgerPrompt, { useDevice } from './LedgerPrompt'
 import { IconBack, IconCheck, IconExternal, IconQrScan, IconShield, IconWarning, Spinner } from './Icons'
 import { coinsToUsd, errMessage } from './ui'
 import LookalikeWarning, { useLookalike } from './LookalikeWarning'
-import { knownFromUtxo, UTXO_FORMAT } from '../lib/lookalike'
+import { knownAddresses, UTXO_FORMAT } from '../lib/lookalike'
+import { sentToAddresses } from '../lib/sentlog'
+import { agoText, recordPending, utxoInFlightBlock } from '../lib/pending'
+import { recordSentTo } from '../lib/sentlog'
 
 interface SendModalProps {
   chain: ChainConfig
@@ -102,8 +105,13 @@ export default function SendModal({
   const destTrimmed = dest.trim()
   const destValid = destTrimmed !== '' && isValidAddress(destTrimmed, chain)
   const known = useMemo(
-    () => knownFromUtxo(accountState?.addresses.map((a) => a.address) ?? [], accountState?.txs ?? []),
-    [accountState],
+    () =>
+      knownAddresses(
+        accountState?.addresses.map((a) => a.address) ?? [],
+        accountState?.txs.map((t) => t.counterparty) ?? [],
+        sentToAddresses(chain.id),
+      ),
+    [accountState, chain.id],
   )
   const lookalike = useLookalike(destValid ? destTrimmed : '', known, UTXO_FORMAT)
 
@@ -147,11 +155,26 @@ export default function SendModal({
     if (!canContinue || fees === null) return
     const feeOpt = fees[Math.min(feeIdx, fees.length - 1)]
     setStep({ kind: 'preparing' })
-    // Always build from a FRESH scan — never a cached one. A stale UTXO set can
-    // include coins a previous send already spent (producing an invalid tx) and
-    // a stale change index reuses an address. If the scan fails we fail closed;
-    // the user retries rather than spending from possibly-spent inputs.
-    scanAccount(account, client)
+    // One send in flight at a time: an attempt from the last half hour that
+    // the network doesn't report yet could still land beside a new one
+    // (the failed screen's Retry re-sends the SAME bytes, which is safe).
+    utxoInFlightBlock(chain.id, (txid) => client.txSeen(txid))
+      .then((block) => {
+        if (block !== null) {
+          const p = block.entry
+          throw new Error(
+            block.reason === 'pending'
+              ? `A send from ${agoText(p.ts)} (to ${p.to.slice(0, 10)}…) may still be on its way on ${chain.name}. Wait for it to show up, or for half an hour, before sending again — sending now could pay twice.`
+              : `Couldn't check whether your send from ${agoText(p.ts)} (to ${p.to.slice(0, 10)}…) went through on ${chain.name}. Try again in a moment — sending without knowing could pay twice.`,
+          )
+        }
+        // Always build from a FRESH scan — never a cached one. A stale UTXO set
+        // can include coins a previous send already spent (producing an
+        // invalid tx) and a stale change index reuses an address. If the scan
+        // fails we fail closed; the user retries rather than spending from
+        // possibly-spent inputs.
+        return scanAccount(account, client)
+      })
       .then(async (state) => {
         if (!aliveRef.current) return
         try {
@@ -203,6 +226,10 @@ export default function SendModal({
 
   const handleBroadcast = (built: BuiltTx) => {
     setStep({ kind: 'broadcasting', built })
+    // recorded BEFORE the send: an attempt whose answer never arrives must
+    // still block the next send until the network reports it
+    recordPending({ kind: 'utxo', chainId: chain.id, txid: built.txid, to: built.toAddress, ts: Date.now() })
+    recordSentTo(chain.id, built.toAddress)
     client
       .broadcast(built.hex)
       .then((txid) => {
@@ -571,6 +598,11 @@ export default function SendModal({
             <div>
               <strong>Broadcast failed</strong>
               <p>{step.message}</p>
+              <p>
+                If the network took it before the error, it can still confirm. The wallet
+                checks for that before it lets you send again. Retry re-sends this same
+                transaction, which can't pay twice.
+              </p>
             </div>
           </div>
           <div className="btn-row">
