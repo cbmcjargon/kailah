@@ -12,28 +12,37 @@ import { IconCheck, IconShield, IconWarning } from './Icons'
 interface HardwareImportModalProps {
   mode: NetMode
   existing: HardwareAccountRecord[]
+  /** this wallet's own first receive address per chain: a Ledger on the same recovery phrase holds the same coins */
+  ownFirstAddress: (chain: HardwareChainId) => string | undefined
   onAdded: (record: HardwareAccountRecord) => void
   onClose: () => void
 }
 
-export default function HardwareImportModal({ mode, existing, onAdded, onClose }: HardwareImportModalProps) {
+export default function HardwareImportModal({ mode, existing, ownFirstAddress, onAdded, onClose }: HardwareImportModalProps) {
   const choices: HardwareChainId[] = mode === 'practice' ? ['btc-testnet'] : ['btc', 'ltc']
   const [chainId, setChainId] = useState<HardwareChainId>(choices[0]!)
   const [expect, setExpect] = useState<string | null>(null)
   const [added, setAdded] = useState<HardwareAccountRecord | null>(null)
-  const [duplicate, setDuplicate] = useState(false)
+  const [duplicate, setDuplicate] = useState<'ledger' | 'own' | null>(null)
   const device = useDevice()
   const appName = HARDWARE_CHAINS[chainId].appName
   const chain = CHAINS[chainId]
   const supported = ledgerSupport() !== null
 
   const connect = async () => {
-    setDuplicate(false)
+    setDuplicate(null)
     setExpect(null)
     const rec = await device.run((onStatus) => importLedgerAccount(chainId, browserTransport(true), onStatus, setExpect))
     if (rec === null) return
     if (existing.some((r) => r.id === rec.id)) {
-      setDuplicate(true)
+      setDuplicate('ledger')
+      return
+    }
+    // A Ledger set up with this wallet's own recovery phrase holds this
+    // wallet's own account: adding it showed every coin twice (bug audit
+    // 2026-10-27, BL44)
+    if (ownFirstAddress(rec.chain) === rec.verifiedAddress) {
+      setDuplicate('own')
       return
     }
     onAdded(rec)
@@ -126,12 +135,16 @@ export default function HardwareImportModal({ mode, existing, onAdded, onClose }
                 : 'Approve the address shown on your Ledger.'
             }
           />
-          {duplicate && (
+          {duplicate !== null && (
             <div className="device-box" role="status">
               <IconCheck size={20} />
               <div>
-                <strong>Already added</strong>
-                <p>This Ledger account is already on your dashboard.</p>
+                <strong>Already on your dashboard</strong>
+                <p>
+                  {duplicate === 'own'
+                    ? 'This Ledger uses the same recovery phrase as this wallet, so its coins are already shown on its card. Adding it would count them twice.'
+                    : 'This Ledger account is already on your dashboard.'}
+                </p>
               </div>
             </div>
           )}

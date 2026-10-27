@@ -2,6 +2,7 @@
 //
 // Contract (types.ts):
 //   txsToCsv(chain: ChainConfig, txs: TxSummary[]): string
+//   csvExportHint(networks: string[]): string
 //
 // RFC-4180 output: fields containing a comma, double-quote, CR or LF are wrapped
 // in double-quotes with embedded quotes doubled. Amounts are exact signed coin
@@ -27,12 +28,30 @@ function csvField(value: string, isNumeric = false): string {
   return v
 }
 
+/**
+ * The Settings row's hint: the networks the file will hold, by name ("One
+ * file: Bitcoin and Dogecoin history"), or "No history yet". The caller
+ * passes the networks the export covers (shown, this mode, with history), so
+ * the practice set or a hidden network is never named for history the file
+ * won't hold (bug audit 2026-10-27, BL2). A name listed twice (a seed and a
+ * Ledger account on one network) is named once.
+ */
+export function csvExportHint(networks: string[]): string {
+  const names = networks.filter((n, i) => networks.indexOf(n) === i)
+  if (names.length === 0) return 'No history yet'
+  const list = names.length === 1 ? names[0] : `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`
+  return `One file: ${list} history`
+}
+
 export function txsToCsv(chain: ChainConfig, txs: TxSummary[]): string {
+  // The amount is the net change to the wallet, so a send's fee is already
+  // in it; the fee column says so instead of inviting a double count, and an
+  // incoming row has none (the sender paid it; bug audit 2026-10-27, BL2).
   const header = [
     'Date',
     'Type',
-    `Amount ${chain.ticker}`,
-    `Fee ${chain.ticker}`,
+    `Net amount ${chain.ticker}`,
+    `Fee paid ${chain.ticker} (included in net amount)`,
     'Counterparty',
     'Txid',
     'Confirmations',
@@ -44,11 +63,13 @@ export function txsToCsv(chain: ChainConfig, txs: TxSummary[]): string {
 
   const rows = txs.map((tx) => {
     const date = tx.time !== null ? new Date(tx.time * 1000).toISOString() : 'pending'
-    // formatCoin renders the sign, so 'out' amounts come out negative.
-    const amount = formatCoin(tx.amount, chain.decimals)
-    const fee = tx.fee !== null ? formatCoin(tx.fee, chain.decimals) : ''
-    const counterparty = tx.counterparty ?? ''
-    return [date, tx.direction, amount, fee, counterparty, tx.txid, String(tx.confirmations)]
+    // formatCoin renders the sign, so 'out' amounts come out negative. A
+    // row served in part has no amount or direction to export.
+    const unknown = tx.partial === true
+    const amount = unknown ? '' : formatCoin(tx.amount, chain.decimals)
+    const fee = tx.fee !== null && tx.direction !== 'in' && !unknown ? formatCoin(tx.fee, chain.decimals) : ''
+    const counterparty = unknown ? '' : (tx.counterparty ?? '')
+    return [date, unknown ? 'unknown' : tx.direction, amount, fee, counterparty, tx.txid, String(tx.confirmations)]
   })
 
   return [header, ...rows]

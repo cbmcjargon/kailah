@@ -43,7 +43,11 @@ export class FrameReader {
 
   push(frame: Uint8Array): Uint8Array | null {
     if (frame.length < HEADER + (this.seq === 0 ? 2 : 0)) throw new Error('Short frame from device')
-    if (((frame[0]! << 8) | frame[1]!) !== this.channel) throw new Error('Frame on the wrong channel')
+    // A frame on another channel belongs to another exchange (a late reply
+    // to one that was abandoned): skip it and keep waiting for this one's,
+    // instead of failing it (bug audit 2026-10-27, BL45). Each exchange
+    // picks a random channel, so the two can't be confused.
+    if (((frame[0]! << 8) | frame[1]!) !== this.channel) return null
     if (frame[2] !== TAG) throw new Error('Unexpected frame tag')
     if (((frame[3]! << 8) | frame[4]!) !== this.seq) throw new Error('Frame out of sequence')
     let body: Uint8Array

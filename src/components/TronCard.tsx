@@ -33,6 +33,8 @@ export default function TronCard({
   onTxClick,
 }: TronCardProps) {
   const { balance, usdtBalance, txs, loading, error } = state
+  // staked or unstaking TRX: the holder's, not spendable (bug audit 2026-10-27, BM9)
+  const staked = state.staked ?? 0n
   const usd =
     balance !== null && price !== undefined && chain.mainnet
       ? evmToUsd(balance, chain.decimals, price)
@@ -91,7 +93,7 @@ export default function TronCard({
                 {usdtUsd !== null ? ` (${formatUsd(usdtUsd)})` : ''}
               </div>
             )}
-            {balance === 0n && (usdtBalance ?? 0n) === 0n && (
+            {balance === 0n && (usdtBalance ?? 0n) === 0n && staked === 0n && (
               <p className="zero-state">Nothing here yet — tap Receive to get your address.</p>
             )}
           </>
@@ -116,8 +118,16 @@ export default function TronCard({
 
       {balance !== null && (
         <button type="button" className="stake-row" onClick={onStake}>
-          <span>Stake TRX</span>
-          <span className="stake-row-hint">Earn rewards + cheaper USDT sends</span>
+          <span>
+            {staked > 0n ? (
+              <>
+                <span className="tnum">{formatTron(staked)}</span> TRX staked
+              </>
+            ) : (
+              'Stake TRX'
+            )}
+          </span>
+          <span className="stake-row-hint">{staked > 0n ? 'Manage' : 'Earn rewards + cheaper USDT sends'}</span>
         </button>
       )}
 
@@ -159,11 +169,13 @@ export default function TronCard({
                     {t.time !== null ? new Date(t.time * 1000).toLocaleDateString() : ''}
                   </span>
                 </div>
-                <span className={`tx-amount tnum ${t.amount > 0n ? 'tx-amount-in' : ''}`}>
-                  {t.amount > 0n ? '+' : ''}
+                <span className={`tx-amount tnum ${t.amount > 0n && !t.failed ? 'tx-amount-in' : ''} ${t.failed ? 'text-tertiary' : ''}`}>
+                  {/* a failed send moved nothing: its amount was only intended */}
+                  {t.amount > 0n && !t.failed ? '+' : ''}
                   {t.asset === 'usdt'
-                    ? `${formatTronUsdt(chain, t.amount)} ${chain.usdt.symbol}`
-                    : `${formatTron(t.amount)} TRX`}
+                    ? `${formatTronUsdt(chain, t.failed && t.amount < 0n ? -t.amount : t.amount)} ${chain.usdt.symbol}`
+                    : `${formatTron(t.failed && t.amount < 0n ? -t.amount : t.amount)} TRX`}
+                  {t.failed ? ' (not sent)' : ''}
                 </span>
               </button>
             ))}

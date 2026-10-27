@@ -111,7 +111,9 @@ export default function LedgerPrompt({ chainId, ui, confirmText }: LedgerPromptP
               ? 'No device selected'
               : error.kind === 'unsupported'
                 ? 'This browser can’t reach a Ledger'
-                : 'Ledger problem'
+                : error.kind === 'other'
+                  ? 'Couldn’t finish'
+                  : 'Ledger problem'
   return (
     <div className={error.kind === 'rejected' || error.kind === 'cancelled' ? 'device-box' : 'warning-box'} role="alert">
       <IconWarning size={20} />

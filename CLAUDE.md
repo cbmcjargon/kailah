@@ -1,6 +1,6 @@
 # Kailah Wallet — maintenance notes
 
-Self-custody browser wallet, v2.7.3: four engines — UTXO (BTC/DOGE/LTC),
+Self-custody browser wallet, v2.7.4: four engines — UTXO (BTC/DOGE/LTC),
 EVM (USDC+ETH on Base/Ethereum/Arbitrum + BNB on BSC, no explorer API there),
 Solana (SOL + SPL USDC + Jupiter swaps + native staking via hand-built
 stake-program instructions in solstake.ts), TRON (TRX + USDT-TRC20 + Stake 2.0 via tron.ts/tronstake.ts — the node builds raw txs and the wallet DECODES the protobuf bytes
@@ -36,7 +36,7 @@ not feature building, unless the user asks for something new.
   committing, and never `git add -A` right after a deploy without checking.
   The public snapshot's leak scan refuses that path (it caught it once,
   2026-10-25).
-- Tests: `npm run check:offline` (keys, txbuild, txv2, qrparse, vault, scanner, hw, pending, netprefs, failover, swapgate, lookalike, trondecode, bitcore —
+- Tests: `npm run check:offline` (keys, txbuild, txv2, qrparse, vault, scanner, hw, pending, netprefs, failover, swapgate, lookalike, trondecode, bitcore, amounts, sw —
   no network; this is what CI runs on every push) and `npm run check:live`
   (account, evm, sol, solswap, solstake, tron — real networks; a provider being
   down or rate-limited prints SKIP, never FAIL). check-providers.mjs is run by
@@ -59,7 +59,10 @@ not feature building, unless the user asks for something new.
 
 ## Hard rules
 - The service worker (public/sw.js) must NEVER cache application code — only
-  the static offline screen. A cached wallet is a security hole.
+  the static offline screen. A cached wallet is a security hole. The offline
+  screen's own two files (offline.css, icon.svg) are served from that cache
+  when the network fails, by exact path; check-sw runs the worker and
+  proves nothing else is cached or answered from the cache.
 - First load is code-split: Shell.tsx (welcome/lock) is the main chunk, App.tsx
   (unlocked wallet + UTXO stack) loads on unlock, and src/engines/ loads EVM,
   Solana and TRON when the dashboard renders, with modals lazy. A static value
@@ -76,8 +79,15 @@ not feature building, unless the user asks for something new.
   (Jupiter Swap V2, api.jup.ag). PRIVACY.md lists the same hosts.
 - The EVM engine (evm.ts, USDC on Base) is intentionally separate from the
   UTXO stack: account model, viem signing with pinned chainId, no address
-  rotation. Never blind-retry a failed EVM broadcast — re-prepare (fresh
-  pending nonce) so an actually-landed first attempt can't be double-sent.
+  rotation. Never blind-retry a failed EVM broadcast with a FRESH nonce: a
+  retry after an unclear failure re-signs at the SAME nonce, +10 % fee, so
+  it replaces the first attempt instead of paying twice (a fresh nonce is
+  the unsafe one). broadcastEvmSend asks each RPC itself (submitEvmTx) and
+  drops the record only when every RPC asked refused (allow-listed reasons);
+  never let viem's fallback pick the error (bug audit 2026-10-27, BM1). The
+  same-nonce retry ends once that nonce is used: an attempt on record mined
+  or reverted, the chain's mined count is past it, or every node said
+  "nonce too low" (BM14) — then the form takes a fresh nonce.
 - Swaps carry a 0.5% fee (SWAP_FEE_BPS) into SWAP_FEE_ACCOUNT (solswap.ts),
   disclosed on the form, the review screen, README, PRIVACY.md and the store
   description. Changing the rate or the account is a deliberate edit to all
@@ -105,18 +115,22 @@ not feature building, unless the user asks for something new.
   600s cadence; tip heights come from the kailah.tipcache.v1 fallback. Full
   gap scans on every poll previously burned the ~100/hr budget and produced
   CORS-less 429s that browsers report as "Load failed".
-- Rate limits are handled in ONE place, the FailoverClient (api.ts). An
-  esplora provider (burstLimited) that pushes back (a 429, or a network error
-  right after a success) is paused for every request and retried after
-  1.5/4/8 s; a provider that never answered is down for 60 s.
-  check-failover proves both. Don't add retries inside a provider: a second
+- Rate limits are handled in ONE place, the FailoverClient (api.ts). A
+  provider that pushes back (a visible 429 from any but BlockCypher, whose
+  429 means its hour is spent; or, from a burst-limited esplora host, a
+  network error right after a success) is paused for every request and
+  retried after 1.5/4/8 s; BlockCypher (budgetLimited) is never spent to
+  dodge the active provider's pause; a provider that never answered is down
+  for 60 s. The start-up probe starts on the first provider IN CONFIGURED
+  ORDER that answers, never on the fastest. check-failover proves all of it. Don't add retries inside a provider: a second
   layer multiplies requests, and mempool.space and mempool.emzy.de block a
   whole IP for a while after heavy bursts (2026-10-25). Keep live testnet
   scans and burst tests rare.
 - Litecoin's backups are backupOnly (ProviderApi.backupOnly), Bitcore first,
   then BlockCypher: used only while litecoinspace.org has failed or is
   cooling down, never raced at startup, never remembered, never used for a
-  mere rate limit. BlockCypher requests from every chain share one 500 ms
+  mere rate limit. While a backup answers, that chain polls on the slow
+  600 s cadence (FailoverClient.onBackup). BlockCypher requests from every chain share one 500 ms
   queue (one per-IP budget, ~100/hr). A full LTC scan through it costs ~70
   requests for the test wallet, so browser-test a failover with Dogecoin's
   BlockCypher blocked. `check-providers.mjs ltc` runs only the Litecoin
@@ -142,16 +156,31 @@ not feature building, unless the user asks for something new.
   names chain ids itself so the chooser never value-imports an engine;
   check-netprefs G keeps those ids/labels equal to the engine configs.
   Ledger accounts always show. An undecided wallet must never hide a network
-  whose scan found funds or history, or couldn't tell.
+  whose scan found funds or history, or couldn't tell. A history, token or
+  stake lookup that failed is "couldn't tell" (lookupFailed; EVM history that
+  couldn't be read throws rather than returning []); staked or unstaking TRX
+  is funds and an activated TRON account is history.
 - Sends always build from a fresh scan (no stale-utxo fallback) and change goes
-  to the next unused change address.
+  to the next unused change address. So does Speed up (BumpModal): it waits
+  for any attempt the network doesn't show yet (pending.utxoUnseenBlock),
+  scans, and adds only confirmed coins no pending payment spends
+  (txbuild.bumpExtraUtxos) — a stale snapshot once cancelled a payment.
 - The in-flight ledger (lib/pending.ts) covers all four engines: every
   broadcast is recorded BEFORE it goes out, and a new send is refused while
   an attempt may still land (EVM: every attempt per nonce stays recorded,
   a same-nonce retry outbids by 10 %, "unknown" blocks for 10 min; Solana:
   held until the RPC's block height passes the blockhash's last valid
   height, and a failed broadcast is retried with the SAME bytes; TRON: until
-  the tx's own expiration, bounded to 10 min; UTXO: 30 min, provider txSeen).
+  the tx's own window ends on THIS device's clock (holdUntil), bounded to
+  10 min, and "Send again" re-posts the same signed body; UTXO: 30 min,
+  provider txSeen — esplora must ask /tx/:txid, never /tx/:txid/status, which
+  answers 200 for any txid). An attempt whose broadcast got no definite
+  answer is marked `failed`; if the network later shows it, the next send
+  throws EarlierSendLanded ("went through after all") until the user
+  dismisses it — never drop it silently (bug audit 2026-10-27, BH1). A node's
+  explicit refusal drops the record. Solana's height comes from
+  getEpochInfo (publicnode's getBlockHeight returns the slot). Every check
+  re-reads the ledger from storage (refreshSecure): other windows write it.
   Speed up first proves the pending tx carries OUR signatures
   (hwsign.assertSignedByUs): the provider picks what it shows as pending.
 - The swap gate pins the Jupiter instruction's source/destination accounts

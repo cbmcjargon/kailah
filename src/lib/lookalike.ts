@@ -33,6 +33,8 @@ export interface KnownAddress {
 /** Per-network normalization: case and the fixed prefix every address shares. */
 export interface AddressFormat {
   caseInsensitive: boolean
+  /** case-insensitive for some of the network's addresses only (UTXO bech32) */
+  foldCase?: (address: string) => boolean
   /** characters at the start that carry no identity (0x, bc1q, T), or none */
   fixedPrefix: (address: string) => number
 }
@@ -53,10 +55,16 @@ export const SOL_FORMAT: AddressFormat = {
 // version are shared by every address of that kind, and bech32 is
 // case-insensitive. Base58 addresses (1…, 3…, D…, L…) keep their first
 // character: it is only a version byte, but it is also what people see.
-const BECH32 = /^([a-z]{2,5})1[qp]/i
+// Only this wallet's real bech32 prefixes, in one case throughout (bech32
+// forbids mixed case), and only on the UTXO networks: any address that
+// merely started like one (a Solana or TRON address, a legacy "Ltc1q…")
+// was lowercased, which silenced the warning (bug audit 2026-10-27, BM12).
+const BECH32 = /^(?:(?:bc|tb|ltc)1[qp][02-9ac-hj-np-z]+|(?:BC|TB|LTC)1[QP][02-9AC-HJ-NP-Z]+)$/
+const BECH32_HEAD = /^(?:bc|tb|ltc)1[qp]/i
 export const UTXO_FORMAT: AddressFormat = {
   caseInsensitive: false,
-  fixedPrefix: (a) => BECH32.exec(a)?.[0].length ?? 0,
+  foldCase: (a) => BECH32.test(a),
+  fixedPrefix: (a) => (BECH32.test(a) ? (BECH32_HEAD.exec(a)?.[0].length ?? 0) : 0),
 }
 
 /** Matching start and end both at least this long (after the fixed prefix). */
@@ -75,7 +83,7 @@ export interface Lookalike {
 
 function normalize(address: string, format: AddressFormat): string {
   const a = address.trim()
-  return format.caseInsensitive || BECH32.test(a) ? a.toLowerCase() : a
+  return format.caseInsensitive || format.foldCase?.(a) === true ? a.toLowerCase() : a
 }
 
 function body(address: string, format: AddressFormat): { text: string; skip: number } {

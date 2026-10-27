@@ -10,10 +10,10 @@ import type {
 } from '../lib/types'
 import { getClient } from '../lib/api'
 import { scanAccount } from '../lib/scanner'
-import { formatCoin, formatUsd, parseCoinAmount } from '../lib/format'
+import { formatCoin, formatTypedAmount, formatUsd, readTypedAmount } from '../lib/format'
 import { buildTxV2, isValidAddress, prepareTxV2 } from '../lib/txbuild'
 import { assembleSigned, buildSignRequest, fetchPrevTxs } from '../lib/hwsign'
-import { isHardwareAccount } from '../lib/hwaccount'
+import { isHardwareAccount, ledgerAccountKey } from '../lib/hwaccount'
 import { browserTransport, ledgerSigner } from '../lib/ledger'
 import { parseScannedPayment } from '../lib/qrparse'
 import Modal from './Modal'
@@ -26,8 +26,9 @@ import { coinsToUsd, errMessage } from './ui'
 import LookalikeWarning, { useLookalike } from './LookalikeWarning'
 import { knownAddresses, UTXO_FORMAT } from '../lib/lookalike'
 import { sentToAddresses } from '../lib/sentlog'
-import { agoText, recordPending, utxoInFlightBlock } from '../lib/pending'
-import { recordSentTo } from '../lib/sentlog'
+import { agoText, EarlierSendLanded, utxoInFlightBlock, type Pending } from '../lib/pending'
+import { broadcastUtxo, UtxoBroadcastError } from '../lib/utxosend'
+import PrepareError from './PrepareError'
 
 interface SendModalProps {
   chain: ChainConfig
@@ -44,13 +45,13 @@ interface SendModalProps {
 type Step =
   | { kind: 'form' }
   | { kind: 'preparing' }
-  | { kind: 'prepare-error'; message: string }
+  | { kind: 'prepare-error'; message: string; landed?: Pending }
   | { kind: 'review'; built: BuiltTx }
   // hardware account: reviewed unsigned; the device signs on demand
   | { kind: 'hw-review'; unsigned: UnsignedTx; prevTxs: Map<string, Uint8Array> }
   | { kind: 'broadcasting'; built: BuiltTx }
   | { kind: 'success'; built: BuiltTx; txid: string }
-  | { kind: 'failed'; built: BuiltTx; message: string }
+  | { kind: 'failed'; built: BuiltTx; message: string; definite: boolean }
 
 export default function SendModal({
   chain,
@@ -64,6 +65,8 @@ export default function SendModal({
   const [scanOpen, setScanOpen] = useState(false)
   const [dest, setDest] = useState('')
   const [amountStr, setAmountStr] = useState('')
+  // what a scanned code's amount needs from the user (it couldn't be read)
+  const [scanNote, setScanNote] = useState<string | null>(null)
   const [sendMax, setSendMax] = useState(false)
   const [feeIdx, setFeeIdx] = useState(0)
   const [fees, setFees] = useState<FeeOption[] | null>(null)
@@ -115,17 +118,9 @@ export default function SendModal({
   )
   const lookalike = useLookalike(destValid ? destTrimmed : '', known, UTXO_FORMAT)
 
-  let parsedAmount: bigint | null = null
-  let amountError: string | null = null
-  if (!sendMax && amountStr.trim() !== '') {
-    try {
-      const v = parseCoinAmount(amountStr.trim(), chain.decimals)
-      if (v > 0n) parsedAmount = v
-      else amountError = 'Amount must be more than zero'
-    } catch (e) {
-      amountError = errMessage(e)
-    }
-  }
+  const typed = sendMax ? { amount: null, error: null } : readTypedAmount(amountStr, chain.decimals, chain.ticker, '0.5')
+  const parsedAmount = typed.amount
+  const amountError = typed.error
 
   // MAX sweeps every UTXO, confirmed and pending alike — mirror that in the
   // hint (clamped at zero for a net-negative pending delta).
@@ -158,10 +153,13 @@ export default function SendModal({
     // One send in flight at a time: an attempt from the last half hour that
     // the network doesn't report yet could still land beside a new one
     // (the failed screen's Retry re-sends the SAME bytes, which is safe).
-    utxoInFlightBlock(chain.id, (txid) => client.txSeen(txid))
+    utxoInFlightBlock(chain.id, (txid) => client.txSeen(txid), ledgerAccountKey(account))
       .then((block) => {
         if (block !== null) {
           const p = block.entry
+          if (block.reason === 'landed') {
+            throw new EarlierSendLanded(p, `Your send from ${agoText(p.ts)} (to ${p.to.slice(0, 10)}…) on ${chain.name}`)
+          }
           throw new Error(
             block.reason === 'pending'
               ? `A send from ${agoText(p.ts)} (to ${p.to.slice(0, 10)}…) may still be on its way on ${chain.name}. Wait for it to show up, or for half an hour, before sending again — sending now could pay twice.`
@@ -216,28 +214,45 @@ export default function SendModal({
           })
           setStep({ kind: 'review', built })
         } catch (e) {
-          if (aliveRef.current) setStep({ kind: 'prepare-error', message: errMessage(e) })
+          // With some coins unreadable (a data service busy, or BlockCypher's
+          // budget spent: Dogecoin's coins need its raw transactions), "not
+          // enough funds" isn't true. Say what is (bug audit 2026-10-27, BM5).
+          const message =
+            state.incomplete?.utxos === true && /^Insufficient funds/.test(errMessage(e))
+              ? "Couldn't load every coin in the wallet just now — a network data service is busy or rate-limited — so this send can't be built yet. Your coins are safe; try again in a few minutes."
+              : errMessage(e)
+          if (aliveRef.current) setStep({ kind: 'prepare-error', message })
         }
       })
       .catch((e) => {
-        if (aliveRef.current) setStep({ kind: 'prepare-error', message: errMessage(e) })
+        if (aliveRef.current) {
+          setStep({
+            kind: 'prepare-error',
+            message: errMessage(e),
+            landed: e instanceof EarlierSendLanded ? e.entry : undefined,
+          })
+        }
       })
   }
 
   const handleBroadcast = (built: BuiltTx) => {
     setStep({ kind: 'broadcasting', built })
-    // recorded BEFORE the send: an attempt whose answer never arrives must
-    // still block the next send until the network reports it
-    recordPending({ kind: 'utxo', chainId: chain.id, txid: built.txid, to: built.toAddress, ts: Date.now() })
-    recordSentTo(chain.id, built.toAddress)
-    client
-      .broadcast(built.hex)
+    // recorded BEFORE the send (broadcastUtxo): an attempt whose answer never
+    // arrives must still block the next send until the network reports it
+    broadcastUtxo(client, chain, built, { account: ledgerAccountKey(account) })
       .then((txid) => {
         onSent()
         if (aliveRef.current) setStep({ kind: 'success', built, txid })
       })
       .catch((e) => {
-        if (aliveRef.current) setStep({ kind: 'failed', built, message: errMessage(e) })
+        if (aliveRef.current) {
+          setStep({
+            kind: 'failed',
+            built,
+            message: errMessage(e),
+            definite: e instanceof UtxoBroadcastError && e.definite,
+          })
+        }
       })
   }
 
@@ -260,9 +275,17 @@ export default function SendModal({
     try {
       const scanned = parseScannedPayment(text, chain)
       setDest(scanned.address)
-      if (scanned.amount !== undefined && !sendMax) {
-        setAmountStr(formatCoin(scanned.amount, chain.decimals))
+      // A code's amount is the payment: it replaces MAX and anything typed
+      // before; one that couldn't be read clears the field rather than
+      // leaving an old amount beside the new address (bug audit BL3).
+      if (scanned.amount !== undefined) {
+        setSendMax(false)
+        setAmountStr(formatTypedAmount(scanned.amount, chain.decimals))
+      } else if (scanned.amountUnreadable === true) {
+        setSendMax(false)
+        setAmountStr('')
       }
+      setScanNote(scanned.amountUnreadable === true ? "The code's amount couldn't be read. Type the amount the recipient asked for." : null)
       setScanOpen(false)
       return null
     } catch (e) {
@@ -355,6 +378,7 @@ export default function SendModal({
                 MAX
               </button>
             </div>
+            {scanNote !== null && amountStr === '' && !sendMax && <span className="field-hint">{scanNote}</span>}
             {amountError !== null && !sendMax && (
               <span className="field-hint field-hint-error">{amountError}</span>
             )}
@@ -432,23 +456,13 @@ export default function SendModal({
       )}
 
       {step.kind === 'prepare-error' && (
-        <div className="stack">
-          <div className="warning-box" role="alert">
-            <IconWarning size={20} />
-            <div>
-              <strong>Couldn&rsquo;t prepare this transaction</strong>
-              <p>{step.message}</p>
-            </div>
-          </div>
-          <button
-            type="button"
-            className="btn btn-secondary"
-            onClick={() => setStep({ kind: 'form' })}
-          >
-            <IconBack size={16} />
-            Back
-          </button>
-        </div>
+        <PrepareError
+          title="Couldn’t prepare this transaction"
+          message={step.message}
+          landed={step.landed}
+          onBack={() => setStep({ kind: 'form' })}
+          onSendAgain={handleContinue}
+        />
       )}
 
       {step.kind === 'review' && (
@@ -596,26 +610,35 @@ export default function SendModal({
           <div className="warning-box" role="alert">
             <IconWarning size={20} />
             <div>
-              <strong>Broadcast failed</strong>
+              <strong>{step.definite ? 'The network refused it' : 'Broadcast failed'}</strong>
               <p>{step.message}</p>
-              <p>
-                If the network took it before the error, it can still confirm. The wallet
-                checks for that before it lets you send again. Retry re-sends this same
-                transaction, which can't pay twice.
-              </p>
+              {!step.definite && (
+                <p>
+                  If the network took it before the error, it can still confirm. Retry re-sends
+                  this same transaction, which can't pay twice. Before any new send, the wallet
+                  checks whether this one went through and tells you if it did.
+                </p>
+              )}
             </div>
           </div>
           <div className="btn-row">
             <button type="button" className="btn btn-ghost" onClick={onClose}>
               Close
             </button>
-            <button
-              type="button"
-              className="btn btn-primary"
-              onClick={() => handleBroadcast(step.built)}
-            >
-              Retry
-            </button>
+            {step.definite ? (
+              <button type="button" className="btn btn-primary" onClick={() => setStep({ kind: 'form' })}>
+                <IconBack size={16} />
+                Back
+              </button>
+            ) : (
+              <button
+                type="button"
+                className="btn btn-primary"
+                onClick={() => handleBroadcast(step.built)}
+              >
+                Retry
+              </button>
+            )}
           </div>
         </div>
       )}

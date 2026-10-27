@@ -2,13 +2,17 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import type { DetectedToken, EvmChainConfig, EvmKey, EvmTx, PreparedEvmSend } from '../lib/evm'
 import {
   broadcastEvmSend,
+  EvmBroadcastError,
+  EvmNonceSettled,
+  evmErrorText,
+  EvmSendWaiting,
   evmToUsd,
   formatEvmAmount,
   isValidEvmAddress,
   parseEvmScanned,
   prepareEvmSend,
 } from '../lib/evm'
-import { formatUsd } from '../lib/format'
+import { formatCoin, formatTypedAmount, formatUsd, readTypedAmount } from '../lib/format'
 import Modal from './Modal'
 import CopyButton from './CopyButton'
 import QrScanner from './LazyQrScanner'
@@ -17,6 +21,8 @@ import { errMessage } from './ui'
 import LookalikeWarning, { useLookalike } from './LookalikeWarning'
 import { EVM_FORMAT, knownAddresses } from '../lib/lookalike'
 import { sentToAddresses } from '../lib/sentlog'
+import { agoText, EarlierSendLanded, type Pending, type PendingEvm } from '../lib/pending'
+import PrepareError from './PrepareError'
 
 interface EvmSendModalProps {
   chain: EvmChainConfig
@@ -37,11 +43,11 @@ type Asset = 'token' | 'gas'
 type Step =
   | { kind: 'form' }
   | { kind: 'preparing' }
-  | { kind: 'prepare-error'; message: string }
+  | { kind: 'prepare-error'; message: string; landed?: Pending; waiting?: PendingEvm }
   | { kind: 'review'; prepared: PreparedEvmSend }
   | { kind: 'broadcasting' }
   | { kind: 'success'; hash: string; prepared: PreparedEvmSend }
-  | { kind: 'failed'; prepared: PreparedEvmSend; message: string }
+  | { kind: 'failed'; prepared: PreparedEvmSend; message: string; definite: boolean }
 
 export default function EvmSendModal({
   chain,
@@ -60,6 +66,9 @@ export default function EvmSendModal({
   // at this same nonce so it REPLACES the first attempt instead of paying a
   // second time if the first actually reached the network (see EvmSendArgs).
   const [retryNonce, setRetryNonce] = useState<number | null>(null)
+  // An earlier send still waiting to confirm, which this one is to replace
+  // (the same nonce at a higher fee: only one of the two can go through).
+  const [replacing, setReplacing] = useState<PendingEvm | null>(null)
   const [asset, setAsset] = useState<Asset>(chain.gasPrimary === true ? 'gas' : 'token')
   const [dest, setDest] = useState('')
   const [amountStr, setAmountStr] = useState('')
@@ -85,25 +94,9 @@ export default function EvmSendModal({
   )
   const lookalike = useLookalike(destValid ? destTrimmed : '', known, EVM_FORMAT)
 
-  let parsedAmount: bigint | null = null
-  let amountError: string | null = null
-  if (!sendMax && amountStr.trim() !== '') {
-    const t = amountStr.trim()
-    if (!/^\d*\.?\d*$/.test(t) || t === '' || t === '.') {
-      amountError = 'Enter a plain number, like 12.50'
-    } else {
-      const [whole = '0', frac = ''] = t.split('.')
-      if (frac.length > decimals) {
-        amountError = `${symbol} has at most ${decimals} decimal places`
-      } else {
-        parsedAmount = BigInt(whole + frac.padEnd(decimals, '0'))
-        if (parsedAmount <= 0n) {
-          parsedAmount = null
-          amountError = 'Amount must be more than zero'
-        }
-      }
-    }
-  }
+  const typed = sendMax ? { amount: null, error: null } : readTypedAmount(amountStr, decimals, symbol, '12.50')
+  const parsedAmount = typed.amount
+  const amountError = typed.error
 
   // Custom tokens are never priced — a fake USD value is exactly the bait
   // scam airdrops rely on.
@@ -116,7 +109,7 @@ export default function EvmSendModal({
 
   const canContinue = destValid && lookalike.ok && (sendMax || parsedAmount !== null)
 
-  const handleContinue = () => {
+  const handleContinue = (nonce: number | null = retryNonce) => {
     if (!canContinue) return
     setStep({ kind: 'preparing' })
     prepareEvmSend({
@@ -127,13 +120,25 @@ export default function EvmSendModal({
       asset,
       ...(customToken !== undefined && { customToken }),
       sendMax,
-      ...(retryNonce !== null && { reuseNonce: retryNonce }),
+      ...(nonce !== null && { reuseNonce: nonce }),
     })
       .then((prepared) => {
         if (aliveRef.current) setStep({ kind: 'review', prepared })
       })
       .catch((e) => {
-        if (aliveRef.current) setStep({ kind: 'prepare-error', message: errMessage(e) })
+        if (!aliveRef.current) return
+        // the attempt a retry meant to replace has settled on chain: its
+        // nonce is used, so the next try must take a fresh one
+        if (e instanceof EvmNonceSettled) {
+          setRetryNonce(null)
+          setReplacing(null)
+        }
+        setStep({
+          kind: 'prepare-error',
+          message: evmErrorText(e, chain),
+          landed: e instanceof EarlierSendLanded ? e.entry : undefined,
+          waiting: e instanceof EvmSendWaiting ? e.entry : undefined,
+        })
       })
   }
 
@@ -144,16 +149,25 @@ export default function EvmSendModal({
         onSent()
         if (aliveRef.current) {
           setRetryNonce(null)
+          setReplacing(null)
           setStep({ kind: 'success', hash, prepared })
         }
       })
       .catch((e) => {
         if (aliveRef.current) {
-          // The failure may hide a transaction that actually reached the
-          // mempool (e.g. a timeout after acceptance), so any retry must
-          // reuse this nonce rather than take a fresh one.
-          setRetryNonce(prepared.request.nonce)
-          setStep({ kind: 'failed', prepared, message: errMessage(e) })
+          const definite = e instanceof EvmBroadcastError && e.definite
+          // An unclear failure may hide a transaction that actually reached
+          // the mempool (e.g. a timeout after acceptance), so any retry must
+          // reuse this nonce rather than take a fresh one. A refusal by every
+          // node took nothing, so it changes nothing about the nonce, unless
+          // it was "nonce too low": that nonce is used, and a retry at it
+          // could only be refused again (bug audit 2026-10-27, BM14).
+          if (!definite) setRetryNonce(prepared.request.nonce)
+          else if (e.nonceUsed) {
+            setRetryNonce(null)
+            setReplacing(null)
+          }
+          setStep({ kind: 'failed', prepared, message: evmErrorText(e, chain), definite })
         }
       })
   }
@@ -161,6 +175,27 @@ export default function EvmSendModal({
   const handleScanDecoded = (text: string): string | null => {
     try {
       const r = parseEvmScanned(text, chain.chainId)
+      // A payment request names its asset: switch to it (or refuse one this
+      // form doesn't send) and fill its amount exactly (bug audit BM16).
+      if (r.token !== undefined) {
+        const sendable = customToken?.address ?? chain.token.address
+        if (r.token.toLowerCase() !== sendable.toLowerCase()) {
+          return `That payment code asks for a different token (contract ${r.token.slice(0, 10)}…) — this form sends ${customToken?.symbol ?? chain.token.symbol}.`
+        }
+        if (customToken === undefined) setAsset('token')
+        const d = customToken?.decimals ?? chain.token.decimals
+        if (r.amount !== undefined && r.amount > 0n) {
+          setSendMax(false)
+          setAmountStr(formatTypedAmount(r.amount, d))
+        }
+      } else if (r.amount !== undefined && r.amount > 0n) {
+        if (customToken !== undefined) {
+          return `That payment code asks for ${chain.gas.symbol}, not ${customToken.symbol} — send it from the ${chain.gas.symbol} form.`
+        }
+        setAsset('gas')
+        setSendMax(false)
+        setAmountStr(formatTypedAmount(r.amount, 18))
+      }
       setDest(r.address)
       setScanOpen(false)
       return null
@@ -335,19 +370,24 @@ export default function EvmSendModal({
       )}
 
       {step.kind === 'prepare-error' && (
-        <div className="stack">
-          <div className="warning-box" role="alert">
-            <IconWarning size={20} />
-            <div>
-              <strong>Couldn&rsquo;t prepare this transaction</strong>
-              <p>{step.message}</p>
-            </div>
-          </div>
-          <button type="button" className="btn btn-secondary" onClick={() => setStep({ kind: 'form' })}>
-            <IconBack size={16} />
-            Back
-          </button>
-        </div>
+        <PrepareError
+          title={step.waiting !== undefined ? 'An earlier send is still waiting' : 'Couldn’t prepare this transaction'}
+          message={step.message}
+          landed={step.landed}
+          onBack={() => setStep({ kind: 'form' })}
+          onSendAgain={() => handleContinue()}
+          {...(step.waiting !== undefined && {
+            action: {
+              label: 'Replace it',
+              run: () => {
+                const w = step.waiting!
+                setRetryNonce(w.nonce)
+                setReplacing(w)
+                handleContinue(w.nonce)
+              },
+            },
+          })}
+        />
       )}
 
       {step.kind === 'review' && (
@@ -361,7 +401,7 @@ export default function EvmSendModal({
             <div className="review-row">
               <dt>Amount</dt>
               <dd className="tnum">
-                {formatEvmAmount(
+                {formatCoin(
                   step.prepared.amount,
                   step.prepared.asset === 'gas'
                     ? 18
@@ -388,6 +428,20 @@ export default function EvmSendModal({
               </dd>
             </div>
           </dl>
+          {replacing !== null && step.prepared.request.nonce === replacing.nonce && (
+            <div className="warning-box" role="alert">
+              <IconWarning size={20} />
+              <div>
+                <strong>This replaces your waiting send</strong>
+                <p>
+                  It takes the place of your send from {agoText(replacing.ts)} (to{' '}
+                  <span className="mono">{replacing.to.slice(0, 10)}…</span>) at a higher fee. Only
+                  one of the two can go through: if that one confirms first, this one fails and costs
+                  nothing.
+                </p>
+              </div>
+            </div>
+          )}
           {step.prepared.asset === 'token' && step.prepared.recipientIsContract && (
             <div className="warning-box" role="alert">
               <IconWarning size={20} />
@@ -432,7 +486,7 @@ export default function EvmSendModal({
           </div>
           <h3 className="state-title">Sent</h3>
           <p className="text-secondary tnum">
-            {formatEvmAmount(
+            {formatCoin(
               step.prepared.amount,
               step.prepared.asset === 'gas'
                 ? 18
@@ -467,14 +521,16 @@ export default function EvmSendModal({
           <div className="warning-box" role="alert">
             <IconWarning size={20} />
             <div>
-              <strong>Broadcast failed</strong>
+              <strong>{step.definite ? 'The network refused it' : 'Broadcast failed'}</strong>
               <p>{step.message}</p>
-              <p>
-                If the attempt did reach the network despite the error, it may still go through.
-                Retrying from here re-sends at the same nonce with a higher fee, so it replaces that
-                attempt rather than adding to it, and the wallet keeps checking on both before it
-                lets you send anything else.
-              </p>
+              {!step.definite && (
+                <p>
+                  If the attempt did reach the network despite the error, it may still go through.
+                  Retrying from here re-sends at the same nonce with a higher fee, so it replaces
+                  that attempt rather than adding to it. Before any new send, the wallet checks
+                  whether this one went through and tells you if it did.
+                </p>
+              )}
             </div>
           </div>
           <div className="btn-row">

@@ -98,7 +98,22 @@ console.log('--- A: HID framing ---')
       return true
     }
   }
-  check('A2 wrong channel refused', bad((x) => ((x[0] = 0x99), x)))
+  {
+    // BL45: a stray frame from another exchange is skipped, not fatal
+    const r = new FrameReader(0x1234)
+    const stray = makeFrames(new Uint8Array(10).fill(7), 0x9999)[0]
+    let out = null
+    let threw = false
+    try {
+      out = r.push(f[0])
+      out = r.push(stray) ?? out
+      out = r.push(f[1])
+    } catch {
+      threw = true
+    }
+    check('A2 a frame on another channel (a late reply to an abandoned exchange) is skipped; the reply still assembles (bug audit 2026-10-27, BL45)',
+      !threw && out !== null && out.length === 100)
+  }
   check('A3 wrong tag refused', bad((x) => ((x[2] = 0x06), x)))
   check('A4 out-of-sequence frame refused', bad((x) => ((x[4] = 0x05), x)))
 }
@@ -597,6 +612,74 @@ console.log('--- J: Speed up refuses a provider-forged original (audit 2026-10-2
   let original = null
   try { original = await prepare(genuine.txid) } catch (e) { original = e }
   check('J2 our own pending tx passes the same check, with the device-derived keys', original !== null && !(original instanceof Error) && original.outputs.length === 2, original instanceof Error ? original.message : '')
+}
+
+// ===========================================================================
+console.log('--- K: a Ledger that re-enumerates, a check that can\'t be abandoned, a removed account (bug audit 2026-10-27) ---')
+{
+  // BM27: opening an app, or a replug, re-enumerates the device and kills
+  // the handle; the session must reopen instead of failing the next tap
+  const { makeHid, makeHidDevice, installNavigator } = await import('./fakehid.mjs')
+  const { browserTransport, closeLedgerSession } = await import('../src/lib/ledger/index.ts')
+  const device = emu('btc')
+  const hw = hardwareAccount(await importLedgerAccount('btc', src(device)))
+  const hid = makeHid()
+  hid.devices.push(makeHidDevice(device, hid))
+  installNavigator(hid)
+  const tap = async () => {
+    try {
+      await verifyAddressOnLedger(hw, 0, 1, browserTransport(true))
+      return 'ok'
+    } catch (e) {
+      return e?.kind ?? e?.message
+    }
+  }
+  device.app = 'BOLOS'
+  check('K1 a tap while the dashboard is open asks for the Bitcoin app', (await tap()) === 'wrong-app')
+  device.app = 'Bitcoin'
+  hid.reenumerate(device)
+  check('K2 the user opens the app (the device re-enumerates): the next tap works, not "Your Ledger disconnected" (BM27)', (await tap()) === 'ok')
+  check('K3 ...and the one after it, on the same handle', (await tap()) === 'ok')
+  hid.reenumerate(device)
+  check('K4 after a replug between two actions, the first tap reopens the device and works', (await tap()) === 'ok')
+  // a browser that never reports the old device gone: the wrong-app answer
+  // already let the handle go, so opening the app still works
+  device.app = 'BOLOS'
+  check('K4b (dashboard again: wrong app)', (await tap()) === 'wrong-app')
+  device.app = 'Bitcoin'
+  for (const d of hid.devices) d.gone = true // gone without a 'disconnect' event
+  hid.devices.push(makeHidDevice(device, hid))
+  check('K4c ...and opening the app works even when the browser never reports the old device gone', (await tap()) === 'ok')
+  await closeLedgerSession()
+  delete globalThis.navigator
+
+  const { readFileSync } = await import('node:fs')
+  const read = (f) => readFileSync(new URL(`../src/${f}`, import.meta.url), 'utf8')
+  // BM28: the Receive check holds the modal open while the device shows the address
+  check('K5 the Receive modal can\'t be closed while "Verify on Ledger" waits on the device (BM28)', /canDismiss=\{!device\.busy\}/.test(read('components/ReceiveModal.tsx')))
+  // BM29: removing a Ledger account mid-scan
+  const app = read('App.tsx')
+  const removal = app.slice(app.indexOf('const handleHardwareRemove'), app.indexOf('const handleExportCsv'))
+  check('K6 removing a Ledger account clears its slot\'s scan bookkeeping, so re-adding it doesn\'t spin until lock (BM29)',
+    ['scanInFlightRef', 'pendingManualScanRef', 'escalatedRef', 'lastTotalsRef'].every((r) => removal.includes(`delete ${r}.current[key]`)))
+  check('K6b ...and a scan still in flight for it keeps no address map (persist: isCurrent)', /persist: isCurrent,/.test(app))
+
+  // BL44: a Ledger on this wallet's own recovery phrase
+  const importer = read('components/HardwareImportModal.tsx')
+  check('K7 a Ledger account that is this wallet\'s own (same first address) is not added twice (BL44)',
+    /if \(ownFirstAddress\(rec\.chain\) === rec\.verifiedAddress\) \{\n\s+setDuplicate\('own'\)/.test(importer) && /ownFirstAddress=\{\(id\) => accountsRef\.current\?\.\[id\]\?\.address\(0, 0\)\.address\}/.test(app))
+  // BL46: the device opens while the tap's activation lasts
+  const bump = read('components/BumpModal.tsx')
+  check('K8 Speed up opens the Ledger before fetching the funding transactions (the chooser needs the tap) (BL46)',
+    bump.indexOf('const transport = await browserTransport(true)()') > 0 && bump.indexOf('const transport = await browserTransport(true)()') < bump.indexOf('const prevTxs = await fetchPrevTxs(chain, client, u, prep.fundingHex)'))
+  // BL48: the words
+  const { toLedgerError } = await import('../src/lib/ledger/index.ts')
+  const { LedgerStatusError } = await import('../src/lib/ledger/transport.ts')
+  const declined = toLedgerError(new LedgerStatusError(0x6985))
+  const outside = toLedgerError(new Error('mempool.space broadcast failed (HTTP 502)'))
+  check('K9 a decline says nothing was signed (true of an address check too), and an error from outside the device is not a "Ledger problem" (BL48)',
+    declined.kind === 'rejected' && /nothing was signed/.test(declined.message) && !/Nothing was sent/.test(declined.message) && outside.kind === 'other' &&
+      /'Couldn’t finish'/.test(read('components/LedgerPrompt.tsx')) && !/tap Connect/.test(read('lib/ledger/index.ts')))
 }
 
 console.log(`\n${failures === 0 ? 'ALL HARDWARE CHECKS PASSED' : `${failures} CHECK(S) FAILED`}`)

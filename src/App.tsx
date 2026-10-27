@@ -94,6 +94,8 @@ const HardwareImportModal = lazy(() => import('./components/HardwareImportModal'
 /** A slot never scanned yet (a just-added hardware account has no initial entry). */
 const EMPTY_SLOT = { account: null, loading: false, error: null }
 const PRICE_REFRESH_MS = 60 * 1000
+/** After the wallet's own swap, stake withdrawal or claim, that chain's credits raise no payment alert for this long. */
+const OWN_ACTION_QUIET_MS = 2 * 60_000
 const PRICE_SYMBOLS = [
   ...Object.values(CHAINS).flatMap((c) => (c.priceSymbol !== undefined ? [c.priceSymbol] : [])),
   'USDC',
@@ -199,6 +201,45 @@ export default function App({ mnemonic, sessionRef, onLock, onErase }: AppProps)
 
   const notifyEnabledRef = useRef(notifyEnabled)
   notifyEnabledRef.current = notifyEnabled
+
+  // ---- payment alerts (EVM, Solana, TRON) -----------------------------------
+  // One rule for the account-model engines (bug audit 2026-10-27, BL18): an
+  // alert for each asset that grew — the gas coin too (ETH/BNB had none) —
+  // measured from the last balance alerted or shown, so two refreshes in
+  // flight can't both announce one payment; none for what the wallet's own
+  // swap, stake withdrawal or claim credits (its refresh says ownAction, and
+  // the chain stays quiet for OWN_ACTION_QUIET_MS); and a practice network's
+  // notification says so.
+  const alertedRef = useRef<Partial<Record<string, bigint>>>({})
+  const ownActionAtRef = useRef<Partial<Record<string, number>>>({})
+  const alertGrowth = useCallback(
+    (
+      chain: { id: string; name: string; mainnet: boolean },
+      asset: string,
+      shown: bigint | null,
+      now: bigint | null,
+      fmt: (v: bigint) => string,
+    ) => {
+      if (now === null) return
+      const key = `${chain.id}:${asset}`
+      const from = alertedRef.current[key] ?? shown
+      alertedRef.current[key] = now
+      if (from === null || now <= from) return
+      if (Date.now() - (ownActionAtRef.current[chain.id] ?? 0) < OWN_ACTION_QUIET_MS) return
+      pushToast(chain.name, `Received ${fmt(now - from)} ${asset}`)
+      if (notifyEnabledRef.current) {
+        void showSystemNotification('Kailah Wallet', `You received ${asset}${chain.mainnet ? '' : ' (practice)'} — open the app to view`)
+      }
+    },
+    [pushToast],
+  )
+  // Polls left that re-read an EVM history after its balance changed: the
+  // explorer can lag the balance by a block or two, and a quick poll that
+  // saw no further change never asked again (bug audit 2026-10-27, BL17).
+  const evmHistoryDueRef = useRef<Partial<Record<string, number>>>({})
+  // A refresh the user asked for that a poll then superseded: the poll's
+  // error is theirs to see, not swallowed as a quiet poll's (BL23).
+  const manualWaitingRef = useRef<Partial<Record<string, boolean>>>({})
 
   // Derive HD accounts for ALL chains once per unlock so mode switching is
   // instant. Secrets live only in this memo (zeroed on lock/erase) + the
@@ -335,10 +376,10 @@ export default function App({ mnemonic, sessionRef, onLock, onErase }: AppProps)
   // last known total (confirmed + pending) per chain, for received-coin alerts
   const lastTotalsRef = useRef<Partial<Record<string, bigint>>>({})
   // manual refresh pressed while a scan was in flight → run a real scan after
-  const pendingManualScanRef = useRef<Partial<Record<string, boolean>>>({})
+  const pendingManualScanRef = useRef<Partial<Record<string, { quick: boolean }>>>({})
   // stable self-reference so the finally-handler can relaunch without a
   // stale-closure copy of the callback
-  const refreshSlotRef = useRef<((key: string) => void) | null>(null)
+  const refreshSlotRef = useRef<((key: string, opts?: { silent?: boolean; quick?: boolean }) => void) | null>(null)
   // scanning is heavier than a balance call — never overlap scans per chain
   const scanInFlightRef = useRef<Partial<Record<string, boolean>>>({})
   // Set when a manual refresh piggybacks on an in-flight silent scan, so that
@@ -400,7 +441,11 @@ export default function App({ mnemonic, sessionRef, onLock, onErase }: AppProps)
       if (scanInFlightRef.current[key] === true) {
         if (opts?.silent !== true) {
           escalatedRef.current[key] = true
-          pendingManualScanRef.current[key] = true
+          // queued as asked: quick stays quick (a full DOGE scan is ~70
+          // BlockCypher requests), and any full request makes it full (bug
+          // audit 2026-10-27, BL11)
+          const queued = pendingManualScanRef.current[key]
+          pendingManualScanRef.current[key] = { quick: opts?.quick === true && (queued === undefined || queued.quick) }
           setChainStates((s) => ({
             ...s,
             [key]: { ...(s[key] ?? EMPTY_SLOT), loading: true, error: null },
@@ -429,22 +474,40 @@ export default function App({ mnemonic, sessionRef, onLock, onErase }: AppProps)
       // the snapshot shortcut — BlockCypher's budget matters there, and DOGE
       // has no RBF, so nothing bumpable is ever lost.
       const baseline = chainStatesRef.current[key]?.account ?? undefined
-      const snapshotOnly = baseline?.incomplete?.utxos === true
+      // the snapshot's own flag: a real scan that missed some coins isn't one,
+      // and treating it as one made every poll a full scan (bug audit BL10)
+      const snapshotOnly = baseline?.snapshot === true
       const budgetChain = chain.providers[0]?.kind === 'blockcypher'
       const prevAccount =
         opts?.quick === true && baseline !== undefined && (!snapshotOnly || budgetChain)
           ? baseline
           : undefined
-      scanAccount(account, getClient(chain), prevAccount !== undefined ? { quickCheckAgainst: prevAccount } : undefined)
+      // a slot removed meanwhile (a Ledger account) keeps no address map (BM29)
+      scanAccount(account, getClient(chain), {
+        ...(prevAccount !== undefined && { quickCheckAgainst: prevAccount }),
+        persist: isCurrent,
+      })
         .then((state) => {
           if (!isCurrent()) return
           // A scan that couldn't reach every funded address may report a total
           // that is too low; don't record it or fire a "received" alert, or the
-          // next healthy scan's rebound reads as fake incoming money.
+          // next healthy scan's rebound reads as fake incoming money. Nor show
+          // it as the balance (bug audit 2026-10-27, BM4: a funded DOGE wallet
+          // read "0 DOGE — Nothing here yet"): keep the last complete state
+          // with a note, or, with none, show the partial one, which the card
+          // marks as possibly low.
           if (state.incomplete?.balance === true) {
+            const kept = chainStatesRef.current[key]?.account
+            const keepLast = kept != null && kept.incomplete?.balance !== true
             setChainStates((s) => ({
               ...s,
-              [key]: { account: state, loading: false, error: null },
+              [key]: keepLast
+                ? {
+                    account: kept,
+                    loading: false,
+                    error: "Couldn't read every address just now — showing the last complete balance.",
+                  }
+                : { account: state, loading: false, error: null },
             }))
             return
           }
@@ -490,11 +553,14 @@ export default function App({ mnemonic, sessionRef, onLock, onErase }: AppProps)
           // guard object (lock/erase installs a new one via orphanBalanceFetches).
           if (isCurrent()) {
             scanInFlightRef.current[key] = false
-            // A manual refresh arrived mid-scan: honor it now with a real
-            // (non-quick) scan so the user's tap always produces fresh data.
-            if (pendingManualScanRef.current[key] === true) {
-              pendingManualScanRef.current[key] = false
-              refreshSlotRef.current?.(key)
+            // A refresh arrived mid-scan: honor it now, as asked (a tap is a
+            // real full scan, so it always produces fresh data) — unless the
+            // network has been hidden meanwhile.
+            const queued = pendingManualScanRef.current[key]
+            if (queued !== undefined) {
+              delete pendingManualScanRef.current[key]
+              const shown = !(key in CHAINS) || shownIn([CHAINS[key as ChainId]], netPrefsRef.current).length > 0
+              if (shown) refreshSlotRef.current?.(key, queued.quick ? { quick: true } : undefined)
             }
           }
         })
@@ -523,6 +589,7 @@ export default function App({ mnemonic, sessionRef, onLock, onErase }: AppProps)
       evmSeqRef.current[chain.id] = seq
       const isCurrent = () => evmSeqRef.current[chain.id] === seq
       if (opts?.silent !== true) {
+        manualWaitingRef.current[chain.id] = true
         setEvmStates((s) => ({
           ...s,
           [chain.id]: { ...s[chain.id], loading: true, error: null },
@@ -533,53 +600,56 @@ export default function App({ mnemonic, sessionRef, onLock, onErase }: AppProps)
           if (!isCurrent()) return
           const prev = evmStatesRef.current[chain.id]
           const changed = prev.token !== b.token || prev.gas !== b.gas
-          if (prev.token !== null && b.token > prev.token) {
-            const msg = `Received ${formatEvmAmount(b.token - prev.token, chain.token.decimals)} ${chain.token.symbol}`
-            pushToast(chain.name, msg)
-            if (notifyEnabledRef.current) {
-              void showSystemNotification(
-                'Kailah Wallet',
-                `You received ${chain.token.symbol} — open the app to view`,
-              )
-            }
-          }
-          // Quick + unchanged → keep the current history (no extra requests).
+          alertGrowth(chain, chain.token.symbol, prev.token, b.token, (v) => formatEvmAmount(v, chain.token.decimals))
+          alertGrowth(chain, chain.gas.symbol, prev.gas, b.gas, (v) => formatEvmAmount(v, 18))
+          // Quick + unchanged → keep the current history (no extra requests),
+          // unless a recent change may not have reached the explorer yet.
+          if (changed) evmHistoryDueRef.current[chain.id] = 3
+          const due = evmHistoryDueRef.current[chain.id] ?? 0
           let txs = prev.txs
           let others = prev.others
-          if (opts?.quick !== true || changed || prev.txs.length === 0) {
+          let lookupFailed = prev.lookupFailed
+          if (opts?.quick !== true || changed || prev.txs.length === 0 || due > 0) {
+            if (!changed && due > 0) evmHistoryDueRef.current[chain.id] = due - 1
             const [txsRes, othersRes] = await Promise.allSettled([
               lib.fetchEvmHistory(chain, key.address),
               lib.fetchDetectedTokens(chain, key.address),
             ])
-            // both are best-effort; balances stand on their own
+            // both are best-effort; balances stand on their own, but a failure
+            // is remembered: "nothing here" can't be told then (BM8)
             if (txsRes.status === 'fulfilled') txs = txsRes.value
             if (othersRes.status === 'fulfilled') others = othersRes.value
+            lookupFailed = txsRes.status === 'rejected' || othersRes.status === 'rejected'
           }
           if (!isCurrent()) return
+          manualWaitingRef.current[chain.id] = false
           setEvmStates((s) => ({
             ...s,
-            [chain.id]: { token: b.token, gas: b.gas, others, txs, loading: false, error: null },
+            [chain.id]: { token: b.token, gas: b.gas, others, txs, lookupFailed, loading: false, error: null },
           }))
         })
         .catch((e: unknown) => {
           if (!isCurrent()) return
+          const manualFailed = manualWaitingRef.current[chain.id] === true
+          manualWaitingRef.current[chain.id] = false
           setEvmStates((s) => ({
             ...s,
             [chain.id]: {
               ...s[chain.id],
               loading: false,
-              error: opts?.silent === true ? s[chain.id].error : errMessage(e),
+              error: opts?.silent === true && !manualFailed ? s[chain.id].error : errMessage(e),
             },
           }))
         })
     },
-    [pushToast],
+    [pushToast, alertGrowth],
   )
 
   // ---- Solana refresh ------------------------------------------------------
   const refreshSol = useCallback(
-    (chain: SolChainConfig, opts?: { silent?: boolean; quick?: boolean }) => {
+    (chain: SolChainConfig, opts?: { silent?: boolean; quick?: boolean; ownAction?: boolean }) => {
       const lib = solRef.current
+      if (opts?.ownAction === true) ownActionAtRef.current[chain.id] = Date.now()
       // the key for THIS chain's mode, whatever mode the UI shows right now
       const key = chain.mainnet ? solKeysRef.current?.real : solKeysRef.current?.practice
       if (lib === null || key === undefined) return
@@ -587,6 +657,7 @@ export default function App({ mnemonic, sessionRef, onLock, onErase }: AppProps)
       solSeqRef.current[chain.id] = seq
       const isCurrent = () => solSeqRef.current[chain.id] === seq
       if (opts?.silent !== true) {
+        manualWaitingRef.current[chain.id] = true
         setSolStates((s) => ({
           ...s,
           [chain.id]: { ...s[chain.id], loading: true, error: null },
@@ -601,36 +672,27 @@ export default function App({ mnemonic, sessionRef, onLock, onErase }: AppProps)
           const prev = solStatesRef.current[chain.id]
           const changed =
             prev.balance !== balance || (usdcBalance !== null && prev.usdcBalance !== usdcBalance)
-          if (prev.balance !== null && balance > prev.balance) {
-            const msg = `Received ${lib.formatSol(balance - prev.balance)} SOL`
-            pushToast(chain.name, msg)
-            if (notifyEnabledRef.current) {
-              void showSystemNotification('Kailah Wallet', 'You received SOL — open the app to view')
-            }
-          }
-          if (
-            prev.usdcBalance !== null &&
-            usdcBalance !== null &&
-            usdcBalance > prev.usdcBalance
-          ) {
-            const msg = `Received ${lib.formatSolUsdc(chain, usdcBalance - prev.usdcBalance)} USDC`
-            pushToast(chain.name, msg)
-            if (notifyEnabledRef.current) {
-              void showSystemNotification('Kailah Wallet', 'You received USDC — open the app to view')
-            }
-          }
+          alertGrowth(chain, 'SOL', prev.balance, balance, lib.formatSol)
+          alertGrowth(chain, chain.usdc.symbol, prev.usdcBalance, usdcBalance, (v) => lib.formatSolUsdc(chain, v))
           let txs = prev.txs
           let stakeAccounts = prev.stakeAccounts
-          if (opts?.quick !== true || changed || prev.txs.length === 0) {
+          let lookupFailed = prev.lookupFailed
+          // a stake that is activating or winding down changes at an epoch's
+          // end with no balance moving: keep its view current (BL26)
+          const stakeMoving = prev.stakeAccounts.some((a) => a.state === 'activating' || a.state === 'deactivating')
+          if (opts?.quick !== true || changed || prev.txs.length === 0 || stakeMoving) {
             const [txsRes, stakeRes] = await Promise.allSettled([
               lib.fetchSolHistory(chain, key.address),
               lib.fetchStakeAccounts(chain, key.address),
             ])
-            // both are best-effort; balances stand on their own
+            // both are best-effort; balances stand on their own, but a failure
+            // is remembered: "nothing here" can't be told then (BM8)
             if (txsRes.status === 'fulfilled') txs = txsRes.value
             if (stakeRes.status === 'fulfilled') stakeAccounts = stakeRes.value
+            lookupFailed = txsRes.status === 'rejected' || stakeRes.status === 'rejected'
           }
           if (!isCurrent()) return
+          manualWaitingRef.current[chain.id] = false
           setSolStates((s) => ({
             ...s,
             [chain.id]: {
@@ -638,6 +700,7 @@ export default function App({ mnemonic, sessionRef, onLock, onErase }: AppProps)
               usdcBalance: usdcBalance ?? s[chain.id].usdcBalance,
               stakeAccounts,
               txs,
+              lookupFailed,
               loading: false,
               error: null,
             },
@@ -645,69 +708,67 @@ export default function App({ mnemonic, sessionRef, onLock, onErase }: AppProps)
         })
         .catch((e: unknown) => {
           if (!isCurrent()) return
+          const manualFailed = manualWaitingRef.current[chain.id] === true
+          manualWaitingRef.current[chain.id] = false
           setSolStates((s) => ({
             ...s,
             [chain.id]: {
               ...s[chain.id],
               loading: false,
-              error: opts?.silent === true ? s[chain.id].error : errMessage(e),
+              error: opts?.silent === true && !manualFailed ? s[chain.id].error : errMessage(e),
             },
           }))
         })
     },
-    [pushToast],
+    [pushToast, alertGrowth],
   )
 
   // ---- TRON refresh --------------------------------------------------------
   const refreshTron = useCallback(
-    (chain: TronChainConfig, opts?: { silent?: boolean; quick?: boolean }) => {
+    (chain: TronChainConfig, opts?: { silent?: boolean; quick?: boolean; ownAction?: boolean }) => {
       const lib = tronRef.current
+      if (opts?.ownAction === true) ownActionAtRef.current[chain.id] = Date.now()
       const key = chain.mainnet ? tronKeysRef.current?.real : tronKeysRef.current?.practice
       if (lib === null || key === undefined) return
       const seq = (tronSeqRef.current[chain.id] ?? 0) + 1
       tronSeqRef.current[chain.id] = seq
       const isCurrent = () => tronSeqRef.current[chain.id] === seq
       if (opts?.silent !== true) {
+        manualWaitingRef.current[chain.id] = true
         setTronStates((s) => ({
           ...s,
           [chain.id]: { ...s[chain.id], loading: true, error: null },
         }))
       }
       Promise.all([
-        lib.getTronBalance(chain, key.address),
+        lib.getTronAccount(chain, key.address),
         lib.getTronUsdtBalance(chain, key.address).catch(() => null),
       ])
-        .then(async ([balance, usdtBalance]) => {
+        .then(async ([account, usdtBalance]) => {
+          const { balance, staked, activated } = account
           if (!isCurrent()) return
           const prev = tronStatesRef.current[chain.id]
           const changed =
             prev.balance !== balance || (usdtBalance !== null && prev.usdtBalance !== usdtBalance)
-          if (prev.balance !== null && balance > prev.balance) {
-            pushToast(chain.name, `Received ${lib.formatTron(balance - prev.balance)} TRX`)
-            if (notifyEnabledRef.current) {
-              void showSystemNotification('Kailah Wallet', 'You received TRX — open the app to view')
-            }
-          }
-          if (prev.usdtBalance !== null && usdtBalance !== null && usdtBalance > prev.usdtBalance) {
-            pushToast(chain.name, `Received ${lib.formatTronUsdt(chain, usdtBalance - prev.usdtBalance)} USDT`)
-            if (notifyEnabledRef.current) {
-              void showSystemNotification('Kailah Wallet', 'You received USDT — open the app to view')
-            }
-          }
+          alertGrowth(chain, 'TRX', prev.balance, balance, lib.formatTron)
+          alertGrowth(chain, chain.usdt.symbol, prev.usdtBalance, usdtBalance, (v) => lib.formatTronUsdt(chain, v))
           let txs = prev.txs
           if (opts?.quick !== true || changed || prev.txs.length === 0) {
             try {
-              txs = await lib.fetchTronHistory(chain, key.address)
+              txs = await lib.fetchTronHistory(chain, key.address, prev.txs)
             } catch {
               // history is best-effort
             }
           }
           if (!isCurrent()) return
+          manualWaitingRef.current[chain.id] = false
           setTronStates((s) => ({
             ...s,
             [chain.id]: {
               balance,
               usdtBalance: usdtBalance ?? s[chain.id].usdtBalance,
+              staked,
+              activated,
               txs,
               loading: false,
               error: null,
@@ -716,17 +777,19 @@ export default function App({ mnemonic, sessionRef, onLock, onErase }: AppProps)
         })
         .catch((e: unknown) => {
           if (!isCurrent()) return
+          const manualFailed = manualWaitingRef.current[chain.id] === true
+          manualWaitingRef.current[chain.id] = false
           setTronStates((s) => ({
             ...s,
             [chain.id]: {
               ...s[chain.id],
               loading: false,
-              error: opts?.silent === true ? s[chain.id].error : errMessage(e),
+              error: opts?.silent === true && !manualFailed ? s[chain.id].error : errMessage(e),
             },
           }))
         })
     },
-    [pushToast],
+    [pushToast, alertGrowth],
   )
 
   const refreshAll = useCallback(() => {
@@ -856,19 +919,23 @@ export default function App({ mnemonic, sessionRef, onLock, onErase }: AppProps)
   }, [mode, hwAccounts, refreshHw])
 
   // background polling while unlocked, so received coins surface as alerts.
-  // BlockCypher (DOGE) polls slower to stay far inside its free-tier limits.
+  // BlockCypher (DOGE) polls slower to stay far inside its free-tier limits,
+  // and so does a chain whose regular service is failing while a backup
+  // answers: Litecoin kept its 60 s polls on BlockCypher's backup, ~540
+  // requests an hour (bug audit 2026-10-27, BL7).
   useEffect(() => {
+    const slowChain = (chain: ChainConfig) =>
+      chain.providers[0]?.kind === 'blockcypher' || getClient(chain).onBackup()
     // hidden networks are not polled at all (DOGE's budget, every provider's quota)
-    const poll = (kind: 'esplora' | 'blockcypher') => {
+    const poll = (cadence: 'fast' | 'slow') => {
       for (const chain of shownIn(chainsForMode(modeRef.current), netPrefsRef.current)) {
-        if (chain.providers[0]?.kind === kind) refreshChain(chain, { silent: true, quick: true })
+        if (slowChain(chain) === (cadence === 'slow')) refreshChain(chain, { silent: true, quick: true })
       }
-      // hardware accounts are BTC/LTC only — esplora, the fast cadence
-      if (kind === 'esplora') {
-        for (const hw of hwAccountsRef.current) {
-          if (chainsForMode(modeRef.current).some((c) => c.id === hw.chain)) {
-            refreshHw(hw, { silent: true, quick: true })
-          }
+      // hardware accounts (BTC/LTC) follow their chain's cadence
+      for (const hw of hwAccountsRef.current) {
+        const chain = chainsForMode(modeRef.current).find((c) => c.id === hw.chain)
+        if (chain !== undefined && slowChain(chain) === (cadence === 'slow')) {
+          refreshHw(hw, { silent: true, quick: true })
         }
       }
     }
@@ -886,12 +953,12 @@ export default function App({ mnemonic, sessionRef, onLock, onErase }: AppProps)
       }
     }
     const fast = window.setInterval(() => {
-      poll('esplora')
+      poll('fast')
       pollEvm()
     }, 60_000)
     // DOGE: 10-minute quick polls keep steady-state usage around two dozen
     // requests/hour — far inside BlockCypher's ~100/hour free tier.
-    const slow = window.setInterval(() => poll('blockcypher'), 600_000)
+    const slow = window.setInterval(() => poll('slow'), 600_000)
     return () => {
       window.clearInterval(fast)
       window.clearInterval(slow)
@@ -953,6 +1020,23 @@ export default function App({ mnemonic, sessionRef, onLock, onErase }: AppProps)
     lastTotalsRef.current = {}
   }, [orphanBalanceFetches])
   useImperativeHandle(sessionRef, () => ({ wipe }), [wipe])
+  // However the wallet goes — a lock, an erase, or a render error that
+  // unmounts it with no lock at all — its keys are zeroed (bug audit
+  // 2026-10-27, BL41). Twice after a lock is harmless.
+  const wipeRef = useRef(wipe)
+  wipeRef.current = wipe
+  const mountedRef = useRef(false)
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+      // StrictMode (development) unmounts and remounts once on purpose: wipe
+      // only if nothing mounted again
+      window.setTimeout(() => {
+        if (!mountedRef.current) wipeRef.current()
+      }, 0)
+    }
+  }, [])
 
   // ---- persistent storage ------------------------------------------------
   // The vault is only as durable as the browser lets it be: without a
@@ -1078,6 +1162,13 @@ export default function App({ mnemonic, sessionRef, onLock, onErase }: AppProps)
     forgetStateSnapshot(key)
     if (acct !== undefined) forgetAddrCache(acct.xpubs.xpub)
     balanceSeqRef.current[key] = (balanceSeqRef.current[key] ?? 0) + 1
+    // A scan in flight for it can't release its guard any more (the bump
+    // above orphans it): clear the slot's bookkeeping, or re-adding the same
+    // account spun until lock (bug audit 2026-10-27, BM29)
+    delete scanInFlightRef.current[key]
+    delete pendingManualScanRef.current[key]
+    delete escalatedRef.current[key]
+    delete lastTotalsRef.current[key]
     setChainStates((s) => {
       const copy = { ...s }
       delete copy[key]
@@ -1110,9 +1201,11 @@ export default function App({ mnemonic, sessionRef, onLock, onErase }: AppProps)
 
   // ---- render --------------------------------------------------------------
   const modeHwAccounts = hwAccounts.filter((a) => chainsForMode(mode).some((c) => c.id === a.chain))
-  const csvAvailable =
-    shownIn(chainsForMode(mode), netPrefs).some((c) => (chainStates[c.id]?.account?.txs.length ?? 0) > 0) ||
-    modeHwAccounts.some((a) => (chainStates[hardwareSlotKey(a.record)]?.account?.txs.length ?? 0) > 0)
+  // the networks handleExportCsv will write, named on the Settings row
+  const csvNetworks = [
+    ...shownIn(chainsForMode(mode), netPrefs).filter((c) => (chainStates[c.id]?.account?.txs.length ?? 0) > 0),
+    ...modeHwAccounts.filter((a) => (chainStates[hardwareSlotKey(a.record)]?.account?.txs.length ?? 0) > 0).map((a) => CHAINS[a.chain]),
+  ].map((c) => c.name)
 
   // counted from netprefs' own id lists: an engine that never loaded has no chain configs here
   const hiddenCount = networksForMode(mode).filter((id) => !isNetworkShown(netPrefs, id)).length
@@ -1188,7 +1281,7 @@ export default function App({ mnemonic, sessionRef, onLock, onErase }: AppProps)
           notifyPermission={notifyPermission}
           onToggleNotify={handleToggleNotify}
           onExportCsv={handleExportCsv}
-          csvAvailable={csvAvailable}
+          csvNetworks={csvNetworks}
           hwRecords={hwRecords}
           onAddHardware={() => setHwImportOpen(true)}
           onRemoveHardware={handleHardwareRemove}
@@ -1200,6 +1293,7 @@ export default function App({ mnemonic, sessionRef, onLock, onErase }: AppProps)
             <HardwareImportModal
               mode={mode}
               existing={hwRecords}
+              ownFirstAddress={(id) => accountsRef.current?.[id]?.address(0, 0).address}
               onAdded={handleHardwareAdded}
               onClose={() => setHwImportOpen(false)}
             />

@@ -22,52 +22,84 @@
 //           ~60 s; the wallet refuses anything over 10 min), and TRON has no
 //           nonce, so a rebuilt send would land beside a first attempt whose
 //           answer was lost — refuse to send again while an attempt is
-//           unseen and unexpired (audit 2026-10-26, H2).
+//           unseen and unexpired (audit 2026-10-26, H2). The hold is measured
+//           on THIS device's clock (bug audit 2026-10-27, BM3: a clock running
+//           fast used to drop the entry the moment it was written).
 //   UTXO:   a signed transaction stays valid until its inputs are spent, so
 //           one the network does not report yet could still land for a long
 //           time; refuse to send again while an attempt from the last 30
 //           minutes is unseen (audit 2026-10-26, M1). A retry of the SAME
 //           bytes is always safe (same txid).
+//
+// After a failed broadcast (bug audit 2026-10-27, BH1). An attempt whose
+// broadcast got no definite answer is marked `failed`. If the network later
+// reports it, the next send is refused with EarlierSendLanded — it went
+// through after all, and a new send would pay a second time — until the user
+// says to send again anyway. Failed entries are kept up to FAILED_KEEP_MS so
+// a retry hours later is still caught; outside its window a failed attempt
+// the network never saw is forgotten (it isn't coming). An attempt that went
+// out cleanly is dropped silently once seen. A definite rejection (the node
+// validated it and refused) drops the entry at once.
+//
+// Every check re-reads the ledger from storage first: another unlocked
+// window of the wallet may have written to it (bug audit 2026-10-27, BM11).
 
-import { secureGet, secureSet } from './securestore'
+import { refreshSecure, secureGet, secureSet } from './securestore'
 
-export interface PendingEvm {
+interface PendingCommon {
+  ts: number
+  /** the broadcast got no definite answer: if the network shows it later, say so before any new send */
+  failed?: true
+}
+
+export interface PendingEvm extends PendingCommon {
   kind: 'evm'
   chainId: number
   nonce: number
   hash: string
   to: string
-  ts: number
   /** the attempt's fee fields (decimal strings), so a same-nonce retry can outbid it */
   maxFeePerGas?: string
   maxPriorityFeePerGas?: string
 }
 
-export interface PendingSol {
+export interface PendingSol extends PendingCommon {
   kind: 'sol'
   chainId: string
   signature: string
-  ts: number
+  /** the recipient, for the "it went through" notice (absent on swaps and stake actions) */
+  to?: string
   /** the blockhash's last valid block height, from the RPC at prepare time */
   lastValidBlockHeight?: number
 }
 
-export interface PendingUtxo {
+export interface PendingUtxo extends PendingCommon {
   kind: 'utxo'
   chainId: string
   txid: string
   to: string
-  ts: number
+  /**
+   * The account that sent it ('seed', or a Ledger account's record id): its
+   * coins are its own, so it holds back only that account's sends (bug
+   * audit 2026-10-27, BL47). Older entries have none and hold back all.
+   */
+  account?: string
 }
 
-export interface PendingTron {
+/** A recorded attempt that concerns `account` (an entry with no account concerns every one). */
+function forAccount(account: string | undefined) {
+  return (p: PendingUtxo) => account === undefined || p.account === undefined || p.account === account
+}
+
+export interface PendingTron extends PendingCommon {
   kind: 'tron'
   chainId: string
   txid: string
   to: string
-  /** the transaction's own expiration (unix ms), from the verified bytes */
+  /** the transaction's own expiration (unix ms, the node's clock), from the verified bytes */
   expiration: number
-  ts: number
+  /** when the hold ends on THIS device's clock (absent on entries from older builds) */
+  holdUntil?: number
 }
 
 export type Pending = PendingEvm | PendingSol | PendingUtxo | PendingTron
@@ -92,10 +124,23 @@ export const SOL_TTL_MS = 90_000
 export const SOL_TTL_HARD_MS = 5 * 60_000
 /** A UTXO tx the network hasn't reported within this long was almost surely never accepted. */
 export const UTXO_TTL_MS = 30 * 60_000
+/** How long a failed attempt is remembered, so one that lands is reported even to a late retry. */
+export const FAILED_KEEP_MS = 24 * 3600 * 1000
 
 function ttlOf(p: Pending): number {
-  if (p.kind === 'tron') return p.expiration - p.ts
-  return p.kind === 'evm' ? EVM_TTL_MS : p.kind === 'sol' ? SOL_TTL_HARD_MS : UTXO_TTL_MS
+  const base =
+    p.kind === 'tron'
+      ? (p.holdUntil ?? p.expiration) - p.ts
+      : p.kind === 'evm'
+        ? EVM_TTL_MS
+        : p.kind === 'sol'
+          ? SOL_TTL_HARD_MS
+          : UTXO_TTL_MS
+  return p.failed === true ? Math.max(base, FAILED_KEEP_MS) : base
+}
+
+function retained(p: Pending, now: number): boolean {
+  return now - p.ts < ttlOf(p)
 }
 
 function readAll(): Pending[] {
@@ -107,7 +152,7 @@ function writeAll(list: Pending[]): void {
   const now = Date.now()
   secureSet(
     NAME,
-    list.filter((p) => now - p.ts < ttlOf(p)),
+    list.filter((p) => retained(p, now)),
   )
 }
 
@@ -119,6 +164,20 @@ export function dropPending(p: Pending): void {
   writeAll(readAll().filter((q) => !samePending(q, p)))
 }
 
+/**
+ * The broadcast of `p` got no definite answer: keep it, flagged, so that if
+ * the network shows it later the next send says so instead of paying again.
+ */
+export function markPendingFailed(p: Pending): void {
+  const all = readAll()
+  const found = all.some((q) => samePending(q, p))
+  writeAll(
+    found
+      ? all.map((q) => (samePending(q, p) ? ({ ...q, failed: true } as Pending) : q))
+      : [...all, { ...p, failed: true } as Pending],
+  )
+}
+
 function samePending(a: Pending, b: Pending): boolean {
   if (a.kind !== b.kind) return false
   if (a.kind === 'evm') return a.chainId === (b as PendingEvm).chainId && a.hash === (b as PendingEvm).hash
@@ -128,34 +187,26 @@ function samePending(a: Pending, b: Pending): boolean {
 
 export function pendingEvm(chainId: number): PendingEvm[] {
   const now = Date.now()
-  return readAll().filter(
-    (p): p is PendingEvm => p.kind === 'evm' && p.chainId === chainId && now - p.ts < EVM_TTL_MS,
-  )
+  return readAll().filter((p): p is PendingEvm => p.kind === 'evm' && p.chainId === chainId && retained(p, now))
 }
 
 export function pendingSol(chainId: string): PendingSol[] {
   const now = Date.now()
-  return readAll().filter(
-    (p): p is PendingSol => p.kind === 'sol' && p.chainId === chainId && now - p.ts < SOL_TTL_HARD_MS,
-  )
+  return readAll().filter((p): p is PendingSol => p.kind === 'sol' && p.chainId === chainId && retained(p, now))
 }
 
 export function pendingTron(chainId: string): PendingTron[] {
   const now = Date.now()
-  return readAll().filter(
-    (p): p is PendingTron => p.kind === 'tron' && p.chainId === chainId && now < p.expiration,
-  )
+  return readAll().filter((p): p is PendingTron => p.kind === 'tron' && p.chainId === chainId && retained(p, now))
 }
 
 export function pendingUtxo(chainId: string): PendingUtxo[] {
   const now = Date.now()
-  return readAll().filter(
-    (p): p is PendingUtxo => p.kind === 'utxo' && p.chainId === chainId && now - p.ts < UTXO_TTL_MS,
-  )
+  return readAll().filter((p): p is PendingUtxo => p.kind === 'utxo' && p.chainId === chainId && retained(p, now))
 }
 
 /** Where a recorded EVM attempt stands, as the network reports it. */
-export type EvmAttemptStatus = 'pending' | 'mined' | 'unknown-to-network' | 'unreachable'
+export type EvmAttemptStatus = 'pending' | 'mined' | 'reverted' | 'unknown-to-network' | 'unreachable'
 
 /** A recorded attempt that blocks a new send, and why. */
 export interface InFlightBlock<P extends Pending> {
@@ -163,29 +214,60 @@ export interface InFlightBlock<P extends Pending> {
   /**
    * 'pending': it may still land. 'unreachable': the network couldn't be
    * asked. 'mined': the attempt a same-nonce retry meant to replace has
-   * already gone through, so there is nothing to re-send.
+   * already gone through, so there is nothing to re-send. 'reverted': that
+   * attempt reached the chain but failed there (the nonce is used, nothing
+   * was paid). 'landed': an attempt whose broadcast had failed went through
+   * after all — a new send would pay a second time.
    */
-  reason: 'pending' | 'unreachable' | 'mined'
+  reason: 'pending' | 'unreachable' | 'mined' | 'reverted' | 'landed'
+}
+
+/**
+ * An earlier attempt whose broadcast had failed went through after all.
+ * Thrown by every prepare; the send forms offer "Send again anyway", which
+ * dismisses it (dismissLanded) and prepares again.
+ */
+export class EarlierSendLanded extends Error {
+  readonly entry: Pending
+  constructor(entry: Pending, what: string) {
+    super(
+      `${what} went through after all, although its broadcast reported an error. Sending again would pay a second time — only do that if you mean to make another payment.`,
+    )
+    this.name = 'EarlierSendLanded'
+    this.entry = entry
+  }
+}
+
+/** The user has seen that a failed attempt landed and wants to send again: forget it (and, for EVM, its nonce's other attempts). */
+export function dismissLanded(p: Pending): void {
+  if (p.kind === 'evm') {
+    writeAll(readAll().filter((q) => !(q.kind === 'evm' && q.chainId === p.chainId && q.nonce === p.nonce)))
+    return
+  }
+  dropPending(p)
 }
 
 /**
  * Resolve this chain's recorded EVM attempts against the network, nonce by
- * nonce. One attempt mined → that nonce is settled: every attempt at it is
- * dropped (a retry at the same nonce can't land beside it). An attempt the
- * network says it has never seen is dropped only once it is older than
- * EVM_UNKNOWN_GRACE_MS; younger, it blocks like a pending one (a node that
- * took it would show it, so "unknown" may be a lying or lagging node). Not
- * being able to ask blocks too: "couldn't check" is never "safe to send".
+ * nonce. One attempt mined (or reverted) → that nonce is settled: every
+ * attempt at it is dropped (a retry at the same nonce can't land beside it)
+ * — unless the mined one's broadcast had failed, which is reported as
+ * 'landed' first. An attempt the network says it has never seen is dropped
+ * only once it is older than EVM_UNKNOWN_GRACE_MS; younger, it blocks like a
+ * pending one (a node that took it would show it, so "unknown" may be a
+ * lying or lagging node). Not being able to ask blocks too: "couldn't check"
+ * is never "safe to send".
  *
  * A same-nonce retry (`reuseNonce`) is not blocked by the attempts it
- * replaces — unless one of them has mined, which is reported as 'mined' so
- * the caller can say "it went through" instead of sending anything.
+ * replaces — unless one of them has mined or reverted, which is reported so
+ * the caller can say what happened instead of sending anything.
  */
 export async function evmInFlightBlock(
   chainId: number,
   reuseNonce: number | undefined,
   status: (hash: string) => Promise<EvmAttemptStatus>,
 ): Promise<InFlightBlock<PendingEvm> | null> {
+  await refreshSecure(NAME)
   const now = Date.now()
   const byNonce = new Map<number, PendingEvm[]>()
   for (const p of pendingEvm(chainId)) byNonce.set(p.nonce, [...(byNonce.get(p.nonce) ?? []), p])
@@ -195,9 +277,14 @@ export async function evmInFlightBlock(
       resolved.push({ p, s: await status(p.hash).catch((): EvmAttemptStatus => 'unreachable') })
     }
     const mined = resolved.find((r) => r.s === 'mined')
-    if (mined !== undefined) {
+    const settled = mined ?? resolved.find((r) => r.s === 'reverted')
+    if (settled !== undefined) {
+      if (reuseNonce === nonce) {
+        for (const r of resolved) dropPending(r.p)
+        return { entry: settled.p, reason: settled.s === 'mined' ? 'mined' : 'reverted' }
+      }
+      if (mined !== undefined && mined.p.failed === true) return { entry: mined.p, reason: 'landed' }
       for (const r of resolved) dropPending(r.p)
-      if (reuseNonce === nonce) return { entry: mined.p, reason: 'mined' }
       continue
     }
     if (reuseNonce === nonce) continue // the retry replaces these; they stay recorded until settled
@@ -239,83 +326,140 @@ export function evmReplacementFloor(
   return { maxFeePerGas: bump(maxFee), maxPriorityFeePerGas: bump(maxPrio) }
 }
 
-/** Seen-or-not entries: one the network reports is dropped; an unseen one blocks; a failed lookup blocks. */
+/**
+ * Seen-or-not entries. Inside its window (`blocking`): seen → dropped, or
+ * 'landed' if its broadcast had failed; unseen → blocks; a failed lookup
+ * blocks. Outside its window: a clean attempt is forgotten without asking; a
+ * failed one is asked about once more — seen → 'landed', unseen → forgotten
+ * (it isn't coming), lookup failure → kept for the next check.
+ */
 async function seenBlock<P extends Pending>(
   entries: P[],
   idOf: (p: P) => string,
   seen: (id: string) => Promise<boolean>,
+  blocking: (p: P) => boolean,
 ): Promise<InFlightBlock<P> | null> {
   for (const p of entries) {
+    const inWindow = blocking(p)
+    if (!inWindow && p.failed !== true) {
+      dropPending(p)
+      continue
+    }
     let wasSeen: boolean
     try {
       wasSeen = await seen(idOf(p))
     } catch {
-      return { entry: p, reason: 'unreachable' }
+      if (inWindow) return { entry: p, reason: 'unreachable' }
+      continue
     }
     if (wasSeen) {
+      if (p.failed === true) return { entry: p, reason: 'landed' }
       dropPending(p)
       continue
     }
-    return { entry: p, reason: 'pending' }
+    if (inWindow) return { entry: p, reason: 'pending' }
+    dropPending(p)
   }
   return null
 }
 
 /**
- * Same for Solana. An attempt the network reports is dropped; an unseen one
- * blocks; a failed lookup blocks as well. An attempt older than SOL_TTL_MS
- * whose blockhash the chain has moved past (block height from `blockHeight`,
- * asked once; a failed ask keeps the entry) is dead and dropped; without a
- * recorded height, the clock alone decides.
+ * Same for Solana. An attempt whose blockhash the chain has moved past
+ * (block height from `blockHeight`, asked once) can no longer land, at any
+ * age; one the chain hasn't moved past, or whose height lookup failed, holds
+ * up to SOL_TTL_HARD_MS. Without a recorded height, the clock alone decides
+ * (SOL_TTL_MS). A "height" far beyond what the chain could have
+ * produced since the attempt is not a block height (a slot, say — publicnode
+ * answers getBlockHeight with the slot, bug audit 2026-10-27, BM2) and is
+ * treated as unknown.
  */
 export async function solInFlightBlock(
   chainId: string,
   seen: (signature: string) => Promise<boolean>,
   blockHeight?: () => Promise<number>,
 ): Promise<InFlightBlock<PendingSol> | null> {
+  await refreshSecure(NAME)
   const now = Date.now()
-  const live: PendingSol[] = []
   let height: number | null | undefined // undefined: not asked yet; null: couldn't ask
-  for (const p of pendingSol(chainId)) {
-    if (now - p.ts >= SOL_TTL_MS) {
-      if (p.lastValidBlockHeight === undefined) {
-        dropPending(p)
-        continue
-      }
+  const entries = pendingSol(chainId)
+  const inWindow = new Map<string, boolean>()
+  for (const p of entries) {
+    const age = now - p.ts
+    let holds: boolean
+    if (age >= SOL_TTL_HARD_MS) holds = false
+    else if (p.lastValidBlockHeight === undefined) holds = age < SOL_TTL_MS
+    else {
+      // the chain's height decides for every entry, young ones too: an
+      // attempt whose blockhash had lapsed before it went out can't land,
+      // and held the next send back 90 s (bug audit 2026-10-27, BM17)
       if (height === undefined) height = await (blockHeight?.().catch(() => null) ?? Promise.resolve(null))
-      if (height !== null && height > p.lastValidBlockHeight) {
-        dropPending(p)
-        continue
-      }
+      const plausible = height !== null && height - p.lastValidBlockHeight <= (age / 1000) * 5 + 50_000
+      holds = !(plausible && height !== null && height > p.lastValidBlockHeight)
     }
-    live.push(p)
+    inWindow.set(p.signature, holds)
   }
-  return seenBlock(live, (p) => p.signature, seen)
+  return seenBlock(entries, (p) => p.signature, seen, (p) => inWindow.get(p.signature) === true)
 }
 
-/** Same for TRON; an entry stops blocking at its own expiration. */
-export function tronInFlightBlock(
+/** Same for TRON; an entry stops blocking when its hold (this device's clock) or, on older entries, its expiration passes. */
+export async function tronInFlightBlock(
   chainId: string,
   seen: (txid: string) => Promise<boolean>,
 ): Promise<InFlightBlock<PendingTron> | null> {
-  return seenBlock(pendingTron(chainId), (p) => p.txid, seen)
+  await refreshSecure(NAME)
+  const now = Date.now()
+  return seenBlock(pendingTron(chainId), (p) => p.txid, seen, (p) => now < (p.holdUntil ?? p.expiration))
 }
 
 /**
  * Same for the UTXO chains, with the provider's "is this txid known" as the
  * lookup. Holds a send back for at most UTXO_TTL_MS.
  */
-export function utxoInFlightBlock(
+export async function utxoInFlightBlock(
   chainId: string,
   seen: (txid: string) => Promise<boolean>,
+  account?: string,
 ): Promise<InFlightBlock<PendingUtxo> | null> {
-  return seenBlock(pendingUtxo(chainId), (p) => p.txid, seen)
+  await refreshSecure(NAME)
+  const now = Date.now()
+  return seenBlock(pendingUtxo(chainId).filter(forAccount(account)), (p) => p.txid, seen, (p) => now - p.ts < UTXO_TTL_MS)
 }
 
-/** "a moment ago" / "3 minutes ago" for user-facing refusals. */
+/**
+ * Before a Speed up (bug audit 2026-10-27, BH5): a recorded UTXO attempt on
+ * this chain, other than the transaction being replaced, that the network
+ * doesn't show yet. A scan can't see what such an attempt spends, so a
+ * replacement built now could take the same coin and cancel it. Attempts
+ * the network shows are in the scan and don't block; nothing is dropped
+ * here (the next send's check does that, and reports a landed one).
+ */
+export async function utxoUnseenBlock(
+  chainId: string,
+  seen: (txid: string) => Promise<boolean>,
+  replacing: string,
+  account?: string,
+): Promise<InFlightBlock<PendingUtxo> | null> {
+  await refreshSecure(NAME)
+  const now = Date.now()
+  for (const p of pendingUtxo(chainId).filter(forAccount(account))) {
+    if (p.txid === replacing || now - p.ts >= UTXO_TTL_MS) continue
+    let wasSeen: boolean
+    try {
+      wasSeen = await seen(p.txid)
+    } catch {
+      return { entry: p, reason: 'unreachable' }
+    }
+    if (!wasSeen) return { entry: p, reason: 'pending' }
+  }
+  return null
+}
+
+/** "a moment ago" / "3 minutes ago" / "2 hours ago" for user-facing refusals. */
 export function agoText(ts: number): string {
   const s = Math.max(0, Math.round((Date.now() - ts) / 1000))
   if (s < 60) return 'a moment ago'
   const m = Math.round(s / 60)
-  return m === 1 ? 'a minute ago' : `${m} minutes ago`
+  if (m < 90) return m === 1 ? 'a minute ago' : `${m} minutes ago`
+  const h = Math.round(m / 60)
+  return h === 1 ? 'an hour ago' : `${h} hours ago`
 }

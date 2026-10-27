@@ -13,6 +13,7 @@ import { sha256 } from '@noble/hashes/sha2'
 import { bytesToHex, hexToBytes } from '@noble/hashes/utils'
 import { formatCoin as fmtCoin } from './format'
 import type {
+  AccountState,
   AccountUtxo,
   BuildTxArgs,
   BuildTxArgsV2,
@@ -584,6 +585,22 @@ interface BumpPlan<K extends { publicKey: Uint8Array }> {
 }
 
 /**
+ * Coins a Speed up may add, from a FRESH scan: confirmed ones only (BIP125
+ * rule 2: a replacement may not add unconfirmed inputs), never an output of
+ * the transaction being replaced, and never a coin a pending transaction
+ * already spends — a provider may still list it, and taking it would cancel
+ * that payment (bug audit 2026-10-27, BH5).
+ */
+export function bumpExtraUtxos(state: Pick<AccountState, 'utxos' | 'rawTxs'>, replacing: string): AccountUtxo[] {
+  const spentByPending = new Set(
+    state.rawTxs.filter((r) => r.height === null).flatMap((r) => r.inputs.map((i) => `${i.prevTxid}:${i.prevVout}`)),
+  )
+  return state.utxos.filter(
+    (u) => u.txid !== replacing && u.confirmed !== false && !spentByPending.has(`${u.txid}:${u.vout}`),
+  )
+}
+
+/**
  * Selection half of buildBump (also used by prepareBump): resolves every
  * original input's key, keeps the recipients, pulls extra confirmed utxos
  * largest-first if needed, and settles fee/change against every BIP125 floor.
@@ -635,13 +652,33 @@ function planBump<K extends { publicKey: Uint8Array }>(args: BumpPlanArgs<K>): B
   const feeFor = (nInputs: number, outputSizes: number[]): bigint =>
     BigInt(estimateVbytes(segwit, nInputs, outputSizes)) * newFeeRate
 
+  // BIP125 rule 3 floor: the replacement must outbid the WHOLE conflicting
+  // set — the original's fee, plus any unconfirmed transactions that spend
+  // its outputs (theirs die too), plus the incremental relay fee for the
+  // replacement's own size. A node-reported floor (absoluteFeeFloor) from a
+  // prior rejection overrides everything when higher.
+  const origFee = original.fee
+  const conflictExtra = args.conflictExtraFees ?? 0n
+  const floorFor = (nInputs: number): bigint => {
+    const ruleFloor = origFee + conflictExtra + BigInt(estimateVbytes(segwit, nInputs, [...recipientSizes, changeSize]))
+    return (args.absoluteFeeFloor ?? 0n) > ruleFloor ? args.absoluteFeeFloor! : ruleFloor
+  }
+
   // Selection: original inputs are mandatory; add extra utxos largest-first
-  // only if the higher fee outruns the value we recovered from the original.
+  // only if the fee outruns the value we recovered from the original. The
+  // fee to cover is the rate's or the floor's, whichever is higher, at the
+  // size with the inputs so far (bug audit 2026-10-27, BM25: covering the
+  // rate alone stopped short of the floor and reported "not enough funds"
+  // with a spare coin left).
   const extraSorted = [...extraUtxos].sort((a, b) => (b.value > a.value ? 1 : b.value < a.value ? -1 : 0))
   const spends: BumpSpend<K>[] = [...baseSpends]
   let total = baseSpends.reduce((s, sp) => s + sp.value, 0n)
 
-  const withChangeFee = (): bigint => feeFor(spends.length, [...recipientSizes, changeSize])
+  const withChangeFee = (): bigint => {
+    const atRate = feeFor(spends.length, [...recipientSizes, changeSize])
+    const floor = floorFor(spends.length)
+    return atRate > floor ? atRate : floor
+  }
 
   let covered = total >= recipientTotal + withChangeFee()
   if (!covered) {
@@ -666,22 +703,13 @@ function planBump<K extends { publicKey: Uint8Array }>(args: BumpPlanArgs<K>): B
     }
   }
 
-  // BIP125 rule 3 floor: the replacement must outbid the WHOLE conflicting
-  // set — the original's fee, plus any unconfirmed transactions that spend
-  // its outputs (theirs die too), plus the incremental relay fee for the
-  // replacement's own size. A node-reported floor (absoluteFeeFloor) from a
-  // prior rejection overrides everything when higher.
-  const conflictExtra = args.conflictExtraFees ?? 0n
-  const sizeWithChange = BigInt(estimateVbytes(segwit, spends.length, [...recipientSizes, changeSize]))
-  const ruleFloor = original.fee + conflictExtra + sizeWithChange
-  const feeFloor = (args.absoluteFeeFloor ?? 0n) > ruleFloor ? args.absoluteFeeFloor! : ruleFloor
+  const feeFloor = floorFor(spends.length)
 
   let fee: bigint
   let change = 0n
   const NEED_MORE = "There aren't enough funds to speed up this transaction at that fee rate."
   if (covered) {
-    let feeWithChange = withChangeFee()
-    if (feeWithChange < feeFloor) feeWithChange = feeFloor
+    const feeWithChange = withChangeFee()
     change = total - recipientTotal - feeWithChange
     if (change < chain.dustLimit) {
       fee = total - recipientTotal
@@ -728,13 +756,17 @@ export function assertBumpRules(
       'That fee is only slightly higher — pick a larger increase so the network accepts the replacement.',
     )
   }
-  // BIP125 rule 4 — strictly higher fee rate. Compare fee/vsize without float
-  // division: newFee/newVsize > oldFee/oldVsize ⇔ newFee*oldVsize > oldFee*newVsize.
+  // BIP125 rule 4 — a strictly higher fee rate than the transaction it
+  // directly replaces: the original's OWN rate. Outside spenders' fees count
+  // toward the absolute fee above, not here; dividing them by the original's
+  // size asked ~15x the needed rate once an input was added (bug audit
+  // 2026-10-27, BM26). Compare without float division:
+  // newFee/newVsize > origFee/origVsize ⇔ newFee*origVsize > origFee*newVsize.
   const oldOutSizes = original.outputs.map(
     (o) => OUTPUT_VSIZE[Address(chain.network).decode(o.address as string).type] ?? 43,
   )
   const oldVsize = estimateVbytes(segwit, original.inputs.length, oldOutSizes)
-  if (fee * BigInt(oldVsize) <= oldFee * BigInt(vsize)) {
+  if (fee * BigInt(oldVsize) <= original.fee * BigInt(vsize)) {
     throw new Error("The new fee rate isn't higher than the original — choose a higher fee rate.")
   }
   // Hard ceiling mirroring the fee-API clamp: no combination of floors (the

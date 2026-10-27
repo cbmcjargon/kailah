@@ -216,6 +216,25 @@ checkThrows(
 checkParse('surrounding whitespace trimmed', `  ${BTC_ADDR}\n`, CHAINS.btc, BTC_ADDR, undefined)
 
 
+// --- BIP21 after the 2026-10-27 audit (BL3): a req- parameter the wallet
+// doesn't know refuses the code; an unreadable amount is flagged, so the form
+// clears the old amount; a code's amount replaces MAX.
+{
+  const refuse = (t) => { try { parseScannedPayment(t, CHAINS.btc); return '' } catch (e) { return e.message } }
+  check('bip21: a req- parameter refuses the code (BIP21: unknown required parameters make it invalid)', /doesn't support \(req-/.test(refuse(`bitcoin:${BTC_ADDR}?amount=0.1&req-somethingnew=1`)))
+  check('bip21: ...in any case', /doesn't support/.test(refuse(`bitcoin:${BTC_ADDR}?REQ-X=1`)))
+  const bad = parseScannedPayment(`bitcoin:${BTC_ADDR}?amount=1,5`, CHAINS.btc)
+  check('bip21: an unreadable amount keeps the address and says the amount was unreadable', bad.address === BTC_ADDR && bad.amount === undefined && bad.amountUnreadable === true)
+  const good = parseScannedPayment(`bitcoin:${BTC_ADDR}?amount=0.5&label=x`, CHAINS.btc)
+  check('bip21: a readable amount is not flagged', good.amount === 50_000_000n && good.amountUnreadable === undefined)
+  const { readFileSync } = await import('node:fs')
+  const send = readFileSync(new URL('../src/components/SendModal.tsx', import.meta.url), 'utf8')
+  const solSend = readFileSync(new URL('../src/components/SolSendModal.tsx', import.meta.url), 'utf8')
+  check('bip21: the send forms let a code\'s amount replace MAX and clear an unreadable one',
+    /if \(scanned\.amount !== undefined\) \{\n\s+setSendMax\(false\)/.test(send) && /scanned\.amountUnreadable === true\) \{\n\s+setSendMax\(false\)\n\s+setAmountStr\(''\)/.test(send) &&
+    /if \(r\.amount !== undefined\) \{\n\s+setSendMax\(false\)/.test(solSend))
+}
+
 // --- Solana Pay (src/lib/sol.ts parseSolScanned): reference and memo are
 // carried (a merchant may not credit a payment without them), bad ones are
 // refused rather than dropped (audit 2026-10-26, L14).
@@ -237,6 +256,43 @@ checkParse('surrounding whitespace trimmed', `  ${BTC_ADDR}\n`, CHAINS.btc, BTC_
   threw = false; try { parseSolScanned(`solana:${A}?memo=${encodeURIComponent('line\nbreak')}`) } catch { threw = true }
   ok('a memo with control characters is refused', threw)
   ok('five references are too many', (() => { try { parseSolScanned(`solana:${A}?` + [R1, R2, R1, R2, R1].map((x) => 'reference=' + x).join('&')); return false } catch { return true } })())
+
+  // amounts are exact (bug audit 2026-10-27, BH6): the form used to fill
+  // 0.123456 for a 0.123456789 SOL request, and the merchant never credited it
+  const { solPayUnits } = await import('../src/lib/sol.ts')
+  const refusal = (url) => { try { parseSolScanned(url); return '' } catch (e) { return e.message } }
+  ok('a 9-decimal SOL amount is read to the lamport', parseSolScanned(`solana:${A}?amount=0.123456789`).amount === 123_456_789n)
+  ok('more than 9 decimals is an invalid request, not a rounded one', /more decimal places than SOL has \(9\)/.test(refusal(`solana:${A}?amount=0.1234567891`)))
+  ok('a malformed amount is refused, not dropped ("1,5", "abc", ".", "1e3", "-1")', ['1,5', 'abc', '.', '1e3', '-1'].every((a) => /isn't a valid number/.test(refusal(`solana:${A}?amount=${encodeURIComponent(a)}`))))
+  ok('".5" and "5." are still read', parseSolScanned(`solana:${A}?amount=.5`).amount === 500_000_000n && parseSolScanned(`solana:${A}?amount=5.`).amount === 5_000_000_000n)
+  const usdc = parseSolScanned(`solana:${A}?amount=12.345678&spl-token=EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v`)
+  ok('a token amount is kept as written for the form to read at the token\'s decimals', usdc.tokenAmount === '12.345678' && usdc.amount === undefined)
+  ok('...exactly (USDC, 6 places), and one place more is refused', solPayUnits('12.345678', 6, 'USDC') === 12_345_678n && /more decimal places than USDC has \(6\)/.test((() => { try { solPayUnits('12.3456789', 6, 'USDC'); return '' } catch (e) { return e.message } })()))
+}
+
+// --- EIP-681 (src/lib/evm.ts parseEvmScanned): a payment request names its
+// asset and amount; both used to be dropped, leaving the form on whatever
+// asset it was on (bug audit 2026-10-27, BM16).
+{
+  const { parseEvmScanned, EVM_CHAINS } = await import('../src/lib/evm.ts')
+  const USDC = EVM_CHAINS.base.token.address
+  const R = '0x9858EfFD232B4033E47d90003D41EC34EcaEda94'
+  const ok = (name, cond, detail = '') => check(`eip-681: ${name}`, cond, detail)
+  const fails = (url) => { try { parseEvmScanned(url, 8453); return '' } catch (e) { return e.message } }
+  const t = parseEvmScanned(`ethereum:${USDC}@8453/transfer?address=${R}&uint256=25000000`, 8453)
+  ok('a token request gives the recipient, the token contract and the amount in its smallest units', t.address === R && t.token?.toLowerCase() === USDC.toLowerCase() && t.amount === 25_000_000n, JSON.stringify({ ...t, amount: String(t.amount) }))
+  ok('the amount may be written with an exponent (2.5e7)', parseEvmScanned(`ethereum:${USDC}@8453/transfer?address=${R}&uint256=2.5e7`, 8453).amount === 25_000_000n)
+  const n = parseEvmScanned(`ethereum:${R}@8453?value=1.5e18`, 8453)
+  ok('a plain request\'s value is wei, with no token', n.address === R && n.token === undefined && n.amount === 1_500_000_000_000_000_000n)
+  ok('a plain address carries no amount', parseEvmScanned(R).amount === undefined)
+  ok('an amount that isn\'t a whole number of units is refused, not rounded', /whole number/.test(fails(`ethereum:${R}@8453?value=1.23456789e3`)))
+  ok('a malformed amount is refused', /isn't a valid number/.test(fails(`ethereum:${R}@8453?value=12abc`)) && /isn't a valid number/.test(fails(`ethereum:${USDC}@8453/transfer?address=${R}&uint256=-5`)))
+  ok('a token request whose contract isn\'t an address is refused', /no valid token contract/.test(fails(`ethereum:usdc@8453/transfer?address=${R}&uint256=1`)))
+  ok('another chain\'s request is still refused', /different network/.test(fails(`ethereum:${R}@1?value=1`)))
+  const { readFileSync } = await import('node:fs')
+  const modal = readFileSync(new URL('../src/components/EvmSendModal.tsx', import.meta.url), 'utf8')
+  ok('the send form switches to the requested asset, refuses a token it doesn\'t send, and fills the amount exactly',
+    /if \(r\.token\.toLowerCase\(\) !== sendable\.toLowerCase\(\)\)/.test(modal) && /setAsset\('token'\)/.test(modal) && /setAsset\('gas'\)/.test(modal) && /setAmountStr\(formatTypedAmount\(r\.amount, d\)\)/.test(modal))
 }
 
 console.log(failures === 0 ? '\nAll checks passed.' : `\n${failures} check(s) FAILED.`)

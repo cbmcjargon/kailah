@@ -53,7 +53,7 @@ function findAmountParam(query: string): string | undefined {
 export function parseScannedPayment(
   text: string,
   chain: ChainConfig,
-): { address: string; amount?: bigint } {
+): { address: string; amount?: bigint; amountUnreadable?: true } {
   const trimmed = text.trim()
   if (trimmed.length === 0) throw new Error('The scanned code was empty.')
 
@@ -83,19 +83,30 @@ export function parseScannedPayment(
   let address = queryStart >= 0 ? rest.slice(0, queryStart) : rest
   const query = queryStart >= 0 ? rest.slice(queryStart + 1) : ''
 
+  // BIP21: a "req-" parameter is one the payment depends on; a wallet that
+  // doesn't know it must refuse the code (bug audit 2026-10-27, BL3).
+  for (const [key] of new URLSearchParams(query)) {
+    if (/^req-/i.test(key)) {
+      throw new Error(`That payment code needs something this wallet doesn't support (${key.slice(0, 24)}).`)
+    }
+  }
+
   // A malformed amount param must NOT fail the scan: the address is the
   // payment-critical part, and a sender can always type the amount by hand.
   // Failing here would reject an otherwise perfectly payable code over a
   // detail we can safely ignore. parseCoinAmount throws on non-numeric,
-  // negative, and too-many-decimal inputs — all of those are dropped.
+  // negative, and too-many-decimal inputs — all of those are dropped, and
+  // flagged, so the form clears an amount typed before instead of keeping it
+  // beside the new address (BL3).
   let amount: bigint | undefined
+  let amountUnreadable = false
   const amountRaw = findAmountParam(query)
   if (amountRaw !== undefined) {
     try {
       const parsed = parseCoinAmount(amountRaw, chain.decimals)
       if (parsed > 0n) amount = parsed // amount=0 carries no information; omit
     } catch {
-      // ignore — see comment above
+      amountUnreadable = true
     }
   }
 
@@ -133,5 +144,5 @@ export function parseScannedPayment(
     throw new Error(`That code doesn't contain a valid ${chain.name} address.`)
   }
 
-  return amount !== undefined ? { address, amount } : { address }
+  return { address, ...(amount !== undefined && { amount }), ...(amountUnreadable && { amountUnreadable: true as const }) }
 }

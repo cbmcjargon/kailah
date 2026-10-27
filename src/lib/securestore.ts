@@ -12,6 +12,12 @@
 // and the hydration path, and every set writes through as a fresh ciphertext.
 // Before unlock (or under Node without a key) reads are empty and writes are
 // dropped — nothing is ever persisted in the clear.
+//
+// Several unlocked windows of the wallet share the same storage. Each keeps
+// its mirror current from the others' writes (the `storage` event), and the
+// double-pay ledger re-reads its blob before every decision (refreshSecure),
+// so one window can't overwrite or miss another's record (bug audit
+// 2026-10-27, BM11).
 
 import { mnemonicToSeedSync } from '@scure/bip39'
 import { base64 } from '@scure/base'
@@ -74,8 +80,22 @@ async function encryptBlob(key: CryptoKey, value: unknown): Promise<string> {
   return `${base64.encode(iv)}.${base64.encode(new Uint8Array(ct))}`
 }
 
+/**
+ * Which unlock this is: every unlock, lock and erase starts a new one.
+ * Background work (a scan, a provider failover) takes it when it starts and
+ * writes nothing once it has changed, so an erased wallet's scan can't put
+ * its caches back, or its address map into the next wallet's store (bug
+ * audit 2026-10-27, BL9).
+ */
+let session = 0
+
+export function storeSession(): number {
+  return session
+}
+
 /** Derive the cache key from the mnemonic and load every known blob. */
 export async function unlockSecureStore(mnemonic: string): Promise<void> {
+  session += 1
   const key = await deriveKey(mnemonic)
   mem.clear()
   const store = storage()
@@ -89,12 +109,68 @@ export async function unlockSecureStore(mnemonic: string): Promise<void> {
     }
   }
   aesKey = key
+  listen(true)
 }
 
 /** Forget the key and the decrypted mirror; ciphertext stays on disk. */
 export function lockSecureStore(): void {
+  session += 1
+  listen(false)
   aesKey = null
   mem.clear()
+}
+
+function isKnownName(name: string): name is SecureName {
+  return (KNOWN_NAMES as readonly string[]).includes(name)
+}
+
+/**
+ * Re-read one blob from storage into the mirror: another window of the
+ * wallet may have written it. This window's own write still in flight lands
+ * first (otherwise the older blob on disk would overwrite it). A blob this
+ * key can't open (another wallet's, or tampered) leaves the mirror as is.
+ */
+export async function refreshSecure(name: SecureName): Promise<void> {
+  const key = aesKey
+  const store = storage()
+  if (key === null || store === null) return
+  await (writes.get(name) ?? Promise.resolve()).catch(() => undefined)
+  if (aesKey !== key) return
+  let blob: string | null
+  try {
+    blob = store.getItem(PREFIX + name)
+  } catch {
+    return
+  }
+  if (blob === null) {
+    mem.delete(name)
+    return
+  }
+  try {
+    const value = await decryptBlob(key, blob)
+    if (aesKey === key) mem.set(name, value)
+  } catch {
+    // not ours to read: keep the mirror
+  }
+}
+
+function onStorage(e: StorageEvent): void {
+  if (e.key === null) {
+    // storage was cleared in another window
+    for (const name of KNOWN_NAMES) void refreshSecure(name)
+    return
+  }
+  if (!e.key.startsWith(PREFIX)) return
+  const name = e.key.slice(PREFIX.length)
+  if (isKnownName(name)) void refreshSecure(name)
+}
+
+let listening = false
+function listen(on: boolean): void {
+  if (typeof window === 'undefined' || typeof window.addEventListener !== 'function') return
+  if (on && !listening) window.addEventListener('storage', onStorage)
+  if (!on && listening) window.removeEventListener('storage', onStorage)
+  listening = on
 }
 
 export function secureGet(name: SecureName): unknown {

@@ -35,7 +35,10 @@ export default function EvmReceiveModal({ chain, address, onClose }: EvmReceiveM
   }, [address])
 
   return (
-    <Modal title={`Receive ${chain.token.symbol}`} onClose={onClose}>
+    <Modal
+      title={`Receive ${chain.gasPrimary === true ? `${chain.gas.symbol} or ${chain.token.symbol}` : chain.token.symbol}`}
+      onClose={onClose}
+    >
       <div className="stack receive-body">
         <div className="qr-frame">
           {qr ? (

@@ -13,11 +13,19 @@ import type {
   UnsignedTx,
 } from '../lib/types'
 import { getClient } from '../lib/api'
-import { buildBump, decodeVerifiedTx, prepareBump, verifiedPrevout, verifiedRawTxInfo } from '../lib/txbuild'
+import {
+  buildBump,
+  bumpExtraUtxos,
+  decodeVerifiedTx,
+  prepareBump,
+  verifiedPrevout,
+  verifiedRawTxInfo,
+} from '../lib/txbuild'
 import { assembleSigned, assertSignedByUs, buildSignRequest, fetchPrevTxs } from '../lib/hwsign'
-import { recordPending } from '../lib/pending'
-import { recordSentTo } from '../lib/sentlog'
-import { isHardwareAccount } from '../lib/hwaccount'
+import { broadcastUtxo, replacementFloorFrom } from '../lib/utxosend'
+import { scanAccount } from '../lib/scanner'
+import { agoText, utxoUnseenBlock } from '../lib/pending'
+import { isHardwareAccount, ledgerAccountKey } from '../lib/hwaccount'
 import { browserTransport, ledgerSigner } from '../lib/ledger'
 import { formatCoin } from '../lib/format'
 import Modal from './Modal'
@@ -31,7 +39,6 @@ interface BumpModalProps {
   chain: ChainConfig
   /** a seed account signs here; a hardware account signs on its device */
   account: AccountKeys | HardwareAccountKeys
-  accountState: AccountState
   tx: TxSummary
   onClose: () => void
   /** called once the replacement broadcasts, so the dashboard can re-scan */
@@ -68,22 +75,6 @@ type Step =
   | { kind: 'success'; built: BuiltTx; txid: string }
   | { kind: 'failed'; built: BuiltTx; message: string }
 
-/**
- * Parse the node's BIP125 rejection ("…less fees than conflicting txs;
- * 0.00000564 < 0.00001046") into the required total fee in smallest units.
- * Exact decimal-string math — floats never touch money.
- */
-function parseConflictFloor(message: string, decimals: number): bigint | null {
-  const m = /less fees than conflicting txs;\s*[\d.]+\s*<\s*([\d.]+)/i.exec(message)
-  if (!m) return null
-  const [whole = '0', frac = ''] = m[1]!.split('.')
-  try {
-    return BigInt(whole) * 10n ** BigInt(decimals) + BigInt(frac.padEnd(decimals, '0').slice(0, decimals))
-  } catch {
-    return null
-  }
-}
-
 /** rough vsize for the original tx, to back out its fee rate for presets */
 function estimateVbytes(segwit: boolean, nIn: number, nOut: number): number {
   return segwit ? Math.ceil(10.5 + nIn * 68 + nOut * 31) : 10 + nIn * 148 + nOut * 34
@@ -92,7 +83,6 @@ function estimateVbytes(segwit: boolean, nIn: number, nOut: number): number {
 export default function BumpModal({
   chain,
   account,
-  accountState,
   tx,
   onClose,
   onBumped,
@@ -120,23 +110,42 @@ export default function BumpModal({
 
   const client = useMemo(() => getClient(chain), [chain])
 
-  // Snapshot the scan state THIS bump is based on, taken once at mount. The
-  // dashboard keeps re-scanning (60s poll, and the post-bump rescan itself),
-  // handing us fresh AccountState objects — but a bump must be prepared from
-  // the state that still contains the original tx, and preparation must never
-  // re-run to clobber a broadcasting/success screen. Refs, not props, drive it.
-  const snapRef = useRef(accountState)
-
-  // ---- one-time preparation (mount only) -----------------------------------
+  // ---- one-time preparation (mount only; it must never re-run and clobber a
+  // broadcasting or success screen) ------------------------------------------
   useEffect(() => {
     let cancelled = false
-    const snap = snapRef.current
     const prepare = async () => {
-      const scanned = snap.rawTxs.find((r) => r.txid === tx.txid)
-      if (scanned === undefined) {
-        if (!cancelled) {
-          setStep({ kind: 'error', message: 'This transaction is no longer in view — reload and try again.' })
+      // Build from a FRESH scan, like every send (bug audit 2026-10-27, BH5).
+      // The dashboard's last scan can miss a payment sent since, and a
+      // replacement that pulled in that payment's coin would cancel it. An
+      // attempt the network doesn't show yet spends coins no scan can see,
+      // so that waits first.
+      let snap: AccountState
+      try {
+        const block = await utxoUnseenBlock(chain.id, (txid) => client.txSeen(txid), tx.txid, ledgerAccountKey(account))
+        if (block !== null) {
+          const p = block.entry
+          throw new Error(
+            block.reason === 'pending'
+              ? `Your send from ${agoText(p.ts)} (to ${p.to.slice(0, 10)}…) isn't showing on the network yet. Wait for it to appear before speeding this up — a replacement built now could cancel it.`
+              : `Couldn't check whether your send from ${agoText(p.ts)} (to ${p.to.slice(0, 10)}…) went through. Try again in a moment.`,
+          )
         }
+        snap = await scanAccount(account, client)
+      } catch (e) {
+        if (!cancelled) setStep({ kind: 'error', message: errMessage(e) })
+        return
+      }
+      if (cancelled) return
+      const scanned = snap.rawTxs.find((r) => r.txid === tx.txid)
+      if (scanned === undefined || scanned.height !== null) {
+        setStep({
+          kind: 'error',
+          message:
+            scanned === undefined
+              ? "This transaction isn't in the wallet's history any more — it may have been replaced. Close this and check your history."
+              : 'This payment has confirmed — there’s nothing left to speed up.',
+        })
         return
       }
 
@@ -261,12 +270,7 @@ export default function BumpModal({
         return
       }
 
-      // Extra funds: current CONFIRMED utxos, excluding any output of the tx we
-      // replace. Unconfirmed extras would violate BIP125 rule 2 (a replacement
-      // may not add new unconfirmed inputs) and be rejected at broadcast.
-      const extraUtxos = snap.utxos.filter(
-        (u) => u.txid !== original.txid && u.confirmed !== false,
-      )
+      const extraUtxos = bumpExtraUtxos(snap, original.txid)
 
       const ourChange = original.outputs.find(
         (o) => o.address !== null && ourAddresses.has(o.address),
@@ -401,8 +405,12 @@ export default function BumpModal({
   const handleHardwareReplace = async (u: UnsignedTx) => {
     if (hw === null || prep === null) return
     const result = await device.run(async (onStatus) => {
+      // The device first, while the tap's user activation lasts: the
+      // browser's device chooser needs it, and fetching the funding
+      // transactions first could outlast it (bug audit 2026-10-27, BL46).
+      const transport = await browserTransport(true)()
       const prevTxs = await fetchPrevTxs(chain, client, u, prep.fundingHex)
-      const sigs = await ledgerSigner(hw, browserTransport(true), onStatus).sign(buildSignRequest(u, hw, prevTxs))
+      const sigs = await ledgerSigner(hw, async () => transport, onStatus).sign(buildSignRequest(u, hw, prevTxs))
       return assembleSigned(u, sigs)
     })
     if (result !== null && aliveRef.current) handleBroadcast(result)
@@ -410,11 +418,10 @@ export default function BumpModal({
 
   const handleBroadcast = (b: BuiltTx) => {
     setStep({ kind: 'broadcasting', built: b })
-    // the replacement may land after a lost answer, like any send
-    recordPending({ kind: 'utxo', chainId: chain.id, txid: b.txid, to: b.toAddress, ts: Date.now() })
-    recordSentTo(chain.id, b.toAddress)
-    client
-      .broadcast(b.hex)
+    // the replacement may land after a lost answer, like any send; once it
+    // goes out it supersedes the original's record (an evicted original is
+    // never seen again and would hold sends back for half an hour)
+    broadcastUtxo(client, chain, b, { replaces: tx.txid, account: ledgerAccountKey(account) })
       .then((txid) => {
         onBumped()
         if (aliveRef.current) setStep({ kind: 'success', built: b, txid })
@@ -654,7 +661,7 @@ export default function BumpModal({
       )}
 
       {step.kind === 'failed' && (() => {
-        const floor = parseConflictFloor(step.message, chain.decimals)
+        const floor = replacementFloorFrom(step.message, chain.decimals)
         return (
           <div className="stack">
             <div className="warning-box" role="alert">

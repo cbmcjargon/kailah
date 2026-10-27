@@ -77,7 +77,7 @@ function classifyOne(tx: RawTxInfo, ours: Set<string>, tipHeight: number): TxSum
   // sits in the mempool signalling BIP125 replaceability.
   const allInputsOurs =
     tx.inputs.length > 0 && tx.inputs.every((i) => i.address !== null && ours.has(i.address))
-  const bumpable = pending && tx.rbfSignaled && allInputsOurs
+  const bumpable = pending && tx.rbfSignaled && allInputsOurs && tx.partial !== true
 
   return {
     txid: tx.txid,
@@ -90,6 +90,9 @@ function classifyOne(tx: RawTxInfo, ours: Set<string>, tipHeight: number): TxSum
     pending,
     counterparty,
     bumpable,
+    // served in part (bug audit 2026-10-27, BM7): the figures above are
+    // what the served part shows, so the rows say "amount unknown" instead
+    ...(tx.partial === true && { partial: true as const }),
   }
 }
 

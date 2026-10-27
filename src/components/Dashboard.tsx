@@ -1,4 +1,4 @@
-import { lazy, Suspense, useState } from 'react'
+import { lazy, Suspense, useEffect, useState } from 'react'
 import type {
   AccountKeys,
   ChainConfig,
@@ -62,8 +62,9 @@ interface DashboardProps {
   onRefreshHw: (account: HardwareAccountKeys) => void
   onAddHardware: () => void
   onRefreshEvm: (chain: EvmChainConfig) => void
-  onRefreshSol: (chain: SolChainConfig) => void
-  onRefreshTron: (chain: TronChainConfig) => void
+  /** ownAction: the wallet's own swap, stake withdrawal or claim, whose credit is not a payment alert */
+  onRefreshSol: (chain: SolChainConfig, opts?: { ownAction?: boolean }) => void
+  onRefreshTron: (chain: TronChainConfig, opts?: { ownAction?: boolean }) => void
   onRefreshAll: () => void
   /** this mode's networks hidden by Settings › Networks shown */
   hiddenCount: number
@@ -87,7 +88,10 @@ interface Slot {
 }
 
 type ActiveModal =
-  | { kind: 'receive' | 'send' | 'buy'; slot: string }
+  | { kind: 'receive' | 'send'; slot: string }
+  // the delivery address is fixed when the modal opens: a scan finishing
+  // meanwhile moved it under the user (bug audit 2026-10-27, BL43)
+  | { kind: 'buy'; slot: string; address: string }
   | { kind: 'txdetail'; slot: string; txid: string }
   // Carries the tx snapshot: a successful bump makes the original txid vanish
   // from the next scan, and the modal must stay open on its success screen.
@@ -172,17 +176,21 @@ export default function Dashboard({
     const s = evmStates[c.id]
     const tokenPrice = prices[c.token.priceSymbol]
     const gasPrice = prices[c.gas.priceSymbol]
-    if (s?.token == null || tokenPrice === undefined) continue
-    let usd = evmToUsd(s.token, c.token.decimals, tokenPrice)
-    if (s.gas != null && gasPrice !== undefined) usd += evmToUsd(s.gas, 18, gasPrice)
-    segments.push({ id: c.id, label: c.name, color: c.color, usd })
+    // either half counts on its own: a missing USDC price used to drop the
+    // network's ETH/BNB too (bug audit 2026-10-27, BM9)
+    const tokenUsd = s?.token != null && tokenPrice !== undefined ? evmToUsd(s.token, c.token.decimals, tokenPrice) : null
+    const gasUsd = s?.gas != null && gasPrice !== undefined ? evmToUsd(s.gas, 18, gasPrice) : null
+    if (tokenUsd === null && gasUsd === null) continue
+    segments.push({ id: c.id, label: c.name, color: c.color, usd: (tokenUsd ?? 0) + (gasUsd ?? 0) })
   }
   for (const c of solChains) {
     if (!c.mainnet) continue
     const st = solStates[c.id]
     const price = prices[c.priceSymbol]
     if (st?.balance == null || price === undefined) continue
-    let usd = evmToUsd(st.balance, c.decimals, price)
+    // staked SOL is the holder's too (BM9)
+    const staked = st.stakeAccounts.reduce((sum, a) => sum + a.lamports, 0n)
+    let usd = evmToUsd(st.balance + staked, c.decimals, price)
     const usdcPrice = prices[c.usdc.priceSymbol]
     if (st.usdcBalance != null && usdcPrice !== undefined) {
       usd += evmToUsd(st.usdcBalance, c.usdc.decimals, usdcPrice)
@@ -194,7 +202,8 @@ export default function Dashboard({
     const st = tronStates[c.id]
     const price = prices[c.priceSymbol]
     if (st?.balance == null || price === undefined) continue
-    let usd = evmToUsd(st.balance, c.decimals, price)
+    // and so is staked or unstaking TRX (BM9)
+    let usd = evmToUsd(st.balance + (st.staked ?? 0n), c.decimals, price)
     const usdtPrice = prices[c.usdt.priceSymbol]
     if (st.usdtBalance != null && usdtPrice !== undefined) {
       usd += evmToUsd(st.usdtBalance, c.usdt.decimals, usdtPrice)
@@ -214,6 +223,18 @@ export default function Dashboard({
   const activeSlot = active !== null && 'slot' in active ? slots.find((s) => s.key === active.slot) : undefined
   const activeChain = activeSlot?.chain
   const activeAccountState = activeSlot !== undefined ? (chainStates[activeSlot.key]?.account ?? null) : null
+  // A modal whose network was hidden (the automatic first pick, say) is
+  // closed for good: kept open in state, it came back by itself when the
+  // network was shown again (bug audit 2026-10-27, BL42).
+  const activeGone =
+    active !== null &&
+    (('slot' in active && activeSlot === undefined) ||
+      ('evmId' in active && activeEvmChain === undefined) ||
+      ('solId' in active && activeSolChain === undefined) ||
+      ('tronId' in active && activeTronChain === undefined))
+  useEffect(() => {
+    if (activeGone) setActive(null)
+  }, [activeGone])
   // txdetail re-derives from the live list (fine — it just closes if the tx
   // confirms away); bump carries its own snapshot so it never unmounts mid-flow.
   const activeTx =
@@ -307,7 +328,7 @@ export default function Dashboard({
             onRefresh={() => refreshSlot(s)}
             onReceive={() => setActive({ kind: 'receive', slot: s.key })}
             onSend={() => setActive({ kind: 'send', slot: s.key })}
-            onBuy={() => setActive({ kind: 'buy', slot: s.key })}
+            onBuy={() => setActive({ kind: 'buy', slot: s.key, address: receiveAddressFor(s) })}
             onSelectTx={(tx) => setActive({ kind: 'txdetail', slot: s.key, txid: tx.txid })}
           />
         ))}
@@ -332,7 +353,7 @@ export default function Dashboard({
               }
               tokenPrice={prices[chain.token.priceSymbol]}
               gasPrice={prices[chain.gas.priceSymbol]}
-              history={priceHistory[chain.token.priceSymbol]}
+              history={priceHistory[chain.gasPrimary === true ? chain.gas.priceSymbol : chain.token.priceSymbol]}
               onRefresh={() => onRefreshEvm(chain)}
               onReceive={() => setActive({ kind: 'evm-receive', evmId: chain.id })}
               onSend={() => setActive({ kind: 'evm-send', evmId: chain.id })}
@@ -432,8 +453,10 @@ export default function Dashboard({
           {active?.kind === 'buy' && activeSlot !== undefined && (
             <BuyModal
               chain={activeSlot.chain}
-              address={receiveAddressFor(activeSlot)}
+              address={active.address}
               onClose={() => setActive(null)}
+              // a Ledger address is checked on the device before anyone pays to it
+              {...(activeSlot.hw !== null && { onVerifyOnDevice: () => setActive({ kind: 'receive', slot: activeSlot.key }) })}
             />
           )}
 
@@ -468,7 +491,6 @@ export default function Dashboard({
               <BumpModal
                 chain={activeSlot.chain}
                 account={activeSlot.account}
-                accountState={activeAccountState}
                 tx={active.tx}
                 onClose={() => setActive(null)}
                 onBumped={() => refreshSlot(activeSlot)}
@@ -545,7 +567,7 @@ export default function Dashboard({
               price={prices[activeSolChain.priceSymbol]}
               usdcPrice={prices[activeSolChain.usdc.priceSymbol]}
               onClose={() => setActive(null)}
-              onSwapped={() => onRefreshSol(activeSolChain)}
+              onSwapped={() => onRefreshSol(activeSolChain, { ownAction: true })}
             />
           )}
 
@@ -565,7 +587,7 @@ export default function Dashboard({
               }
               price={prices[activeSolChain.priceSymbol]}
               onClose={() => setActive(null)}
-              onChanged={() => onRefreshSol(activeSolChain)}
+              onChanged={() => onRefreshSol(activeSolChain, { ownAction: true })}
             />
           )}
 
@@ -611,7 +633,7 @@ export default function Dashboard({
               tronKey={tronKey}
               price={prices[activeTronChain.priceSymbol]}
               onClose={() => setActive(null)}
-              onChanged={() => onRefreshTron(activeTronChain)}
+              onChanged={() => onRefreshTron(activeTronChain, { ownAction: true })}
             />
           )}
 

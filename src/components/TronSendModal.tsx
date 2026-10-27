@@ -2,14 +2,17 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import type { PreparedTronSend, TronAsset, TronChainConfig, TronKey, TronUiState } from '../lib/tron'
 import {
   broadcastTronSend,
+  rebroadcastTron,
+  TronBroadcastError,
   formatTron,
   formatTronUsdt,
   isValidTronAddress,
   parseTronScanned,
   prepareTronSend,
+  TRON_REVIEW_FRESH_MS,
 } from '../lib/tron'
 import { evmToUsd } from '../lib/units'
-import { formatUsd } from '../lib/format'
+import { formatUsd, readTypedAmount } from '../lib/format'
 import Modal from './Modal'
 import CopyButton from './CopyButton'
 import QrScanner from './LazyQrScanner'
@@ -18,6 +21,8 @@ import { errMessage } from './ui'
 import LookalikeWarning, { useLookalike } from './LookalikeWarning'
 import { knownAddresses, TRON_FORMAT } from '../lib/lookalike'
 import { sentToAddresses } from '../lib/sentlog'
+import { EarlierSendLanded, type Pending } from '../lib/pending'
+import PrepareError from './PrepareError'
 
 interface TronSendModalProps {
   chain: TronChainConfig
@@ -32,11 +37,11 @@ interface TronSendModalProps {
 type Step =
   | { kind: 'form' }
   | { kind: 'preparing' }
-  | { kind: 'prepare-error'; message: string }
-  | { kind: 'review'; prepared: PreparedTronSend }
+  | { kind: 'prepare-error'; message: string; landed?: Pending }
+  | { kind: 'review'; prepared: PreparedTronSend; at: number; refreshed?: boolean }
   | { kind: 'broadcasting' }
   | { kind: 'success'; txId: string; prepared: PreparedTronSend }
-  | { kind: 'failed'; message: string }
+  | { kind: 'failed'; message: string; err?: TronBroadcastError }
 
 export default function TronSendModal({
   chain,
@@ -48,10 +53,13 @@ export default function TronSendModal({
   onSent,
 }: TronSendModalProps) {
   const [step, setStep] = useState<Step>({ kind: 'form' })
+  const sentRef = useRef<PreparedTronSend | null>(null)
   const [scanOpen, setScanOpen] = useState(false)
   const [asset, setAsset] = useState<TronAsset>('trx')
   const [dest, setDest] = useState('')
   const [amountStr, setAmountStr] = useState('')
+  // everything: TRX after this send's own network cost, or all the USDT (BL33)
+  const [sendMax, setSendMax] = useState(false)
 
   const aliveRef = useRef(true)
   useEffect(() => {
@@ -73,25 +81,9 @@ export default function TronSendModal({
   )
   const lookalike = useLookalike(destValid ? destTrimmed : '', known, TRON_FORMAT)
 
-  let parsedAmount: bigint | null = null
-  let amountError: string | null = null
-  const trimmed = amountStr.trim()
-  if (trimmed !== '') {
-    if (!/^\d*\.?\d*$/.test(trimmed) || trimmed === '.') {
-      amountError = 'Enter a plain number, like 25'
-    } else {
-      const [whole = '0', frac = ''] = trimmed.split('.')
-      if (frac.length > decimals) {
-        amountError = `${symbol} has at most ${decimals} decimal places`
-      } else {
-        parsedAmount = BigInt(whole + frac.padEnd(decimals, '0'))
-        if (parsedAmount <= 0n) {
-          parsedAmount = null
-          amountError = 'Amount must be more than zero'
-        }
-      }
-    }
-  }
+  const typed = sendMax ? { amount: null, error: null } : readTypedAmount(amountStr, decimals, symbol, '25')
+  const parsedAmount = typed.amount
+  const amountError = typed.error
 
   const assetPrice = asset === 'trx' ? price : usdtPrice
   const usdHint =
@@ -99,30 +91,44 @@ export default function TronSendModal({
       ? evmToUsd(parsedAmount, decimals, assetPrice)
       : null
 
-  const canContinue = destValid && lookalike.ok && parsedAmount !== null && amountError === null
+  const canContinue = destValid && lookalike.ok && (sendMax || (parsedAmount !== null && amountError === null))
 
-  const handleContinue = () => {
-    if (!canContinue || parsedAmount === null) return
+  const handleContinue = (refreshed = false) => {
+    if (!canContinue) return
     setStep({ kind: 'preparing' })
-    prepareTronSend(chain, tronKey, asset, destTrimmed, parsedAmount)
+    prepareTronSend(chain, tronKey, asset, destTrimmed, parsedAmount ?? 0n, { sendMax })
       .then((prepared) => {
-        if (aliveRef.current) setStep({ kind: 'review', prepared })
+        if (aliveRef.current) setStep({ kind: 'review', prepared, at: Date.now(), refreshed })
       })
       .catch((e: unknown) => {
-        if (aliveRef.current) setStep({ kind: 'prepare-error', message: errMessage(e) })
+        if (aliveRef.current) {
+          setStep({
+            kind: 'prepare-error',
+            message: errMessage(e),
+            landed: e instanceof EarlierSendLanded ? e.entry : undefined,
+          })
+        }
       })
   }
 
-  const handleBroadcast = (prepared: PreparedTronSend) => {
+  const settle = (p: Promise<string>, prepared: PreparedTronSend) => {
     setStep({ kind: 'broadcasting' })
-    broadcastTronSend(tronKey, prepared)
-      .then((txId) => {
-        onSent()
-        if (aliveRef.current) setStep({ kind: 'success', txId, prepared })
-      })
-      .catch((e: unknown) => {
-        if (aliveRef.current) setStep({ kind: 'failed', message: errMessage(e) })
-      })
+    p.then((txId) => {
+      onSent()
+      if (aliveRef.current) setStep({ kind: 'success', txId, prepared })
+    }).catch((e: unknown) => {
+      if (aliveRef.current) {
+        setStep({ kind: 'failed', message: errMessage(e), err: e instanceof TronBroadcastError ? e : undefined })
+      }
+    })
+  }
+  const handleBroadcast = (prepared: PreparedTronSend) => {
+    sentRef.current = prepared
+    settle(broadcastTronSend(tronKey, prepared), prepared)
+  }
+  // the SAME signed transaction again — never a rebuilt one, which could pay twice
+  const handleResend = (err: TronBroadcastError) => {
+    if (sentRef.current !== null) settle(rebroadcastTron(chain, err), sentRef.current)
   }
 
   const handleScanDecoded = (text: string): string | null => {
@@ -165,6 +171,7 @@ export default function TronSendModal({
                 onClick={() => {
                   setAsset('trx')
                   setAmountStr('')
+                  setSendMax(false)
                 }}
               >
                 <span className="fee-pill-label">TRX</span>
@@ -179,6 +186,7 @@ export default function TronSendModal({
                 onClick={() => {
                   setAsset('usdt')
                   setAmountStr('')
+                  setSendMax(false)
                 }}
               >
                 <span className="fee-pill-label">{chain.usdt.symbol}</span>
@@ -239,15 +247,25 @@ export default function TronSendModal({
                 type="text"
                 inputMode="decimal"
                 className={`input amount-input ${amountError !== null ? 'input-invalid' : ''}`}
-                value={amountStr}
+                value={sendMax ? '' : amountStr}
                 onChange={(e) => setAmountStr(e.target.value)}
                 autoComplete="off"
-                placeholder={`0.0 ${symbol}`}
+                placeholder={sendMax ? `Entire ${symbol} balance` : `0.0 ${symbol}`}
+                disabled={sendMax}
               />
+              <button
+                type="button"
+                className={`max-toggle ${sendMax ? 'is-on' : ''}`}
+                aria-pressed={sendMax}
+                onClick={() => setSendMax((v) => !v)}
+              >
+                MAX
+              </button>
             </div>
-            {amountError !== null && (
+            {amountError !== null && !sendMax && (
               <span className="field-hint field-hint-error">{amountError}</span>
             )}
+            {sendMax && asset === 'trx' && <span className="field-hint">Sends everything after the network cost.</span>}
             {usdHint !== null && amountError === null && (
               <span className="field-hint">≈ {formatUsd(usdHint)}</span>
             )}
@@ -272,19 +290,13 @@ export default function TronSendModal({
       )}
 
       {step.kind === 'prepare-error' && (
-        <div className="stack">
-          <div className="warning-box" role="alert">
-            <IconWarning size={20} />
-            <div>
-              <strong>Couldn&rsquo;t prepare this transaction</strong>
-              <p>{step.message}</p>
-            </div>
-          </div>
-          <button type="button" className="btn btn-secondary" onClick={() => setStep({ kind: 'form' })}>
-            <IconBack size={16} />
-            Back
-          </button>
-        </div>
+        <PrepareError
+          title="Couldn’t prepare this transaction"
+          message={step.message}
+          landed={step.landed}
+          onBack={() => setStep({ kind: 'form' })}
+          onSendAgain={handleContinue}
+        />
       )}
 
       {step.kind === 'review' && (
@@ -318,6 +330,25 @@ export default function TronSendModal({
               creation cost (included in the estimate above).
             </p>
           )}
+          {step.prepared.recipientIsContract === true && (
+            <div className="warning-box" role="alert">
+              <IconWarning size={20} />
+              <div>
+                <strong>The recipient is a contract, not a wallet</strong>
+                <p>
+                  What you send to a contract is gone unless it was built to hold it. An exchange
+                  deposit address is a wallet; a token or swap contract usually isn&rsquo;t. Only
+                  continue if the recipient gave you a contract address on purpose.
+                </p>
+              </div>
+            </div>
+          )}
+          {step.refreshed === true && (
+            <p className="text-tertiary">
+              The earlier version was about to expire on the network, so the wallet built it again.
+              Check it and confirm.
+            </p>
+          )}
           <div className="btn-row">
             <button type="button" className="btn btn-ghost" onClick={() => setStep({ kind: 'form' })}>
               <IconBack size={16} />
@@ -326,7 +357,10 @@ export default function TronSendModal({
             <button
               type="button"
               className="btn btn-primary"
-              onClick={() => handleBroadcast(step.prepared)}
+              onClick={() =>
+                // a review left open near its expiry is built again first (BL32)
+                Date.now() - step.at > TRON_REVIEW_FRESH_MS ? handleContinue(true) : handleBroadcast(step.prepared)
+              }
             >
               Confirm &amp; send
             </button>
@@ -377,21 +411,33 @@ export default function TronSendModal({
             <div>
               <strong>Broadcast failed</strong>
               <p>{step.message}</p>
-              <p>
-                If the network took it before the error, it can still go through. The wallet
-                checks for that before it lets you send again, so going back to retry can&rsquo;t
-                pay twice.
-              </p>
+              {step.err !== undefined && (
+                <p>
+                  If the network took it before the error, it can still go through for about a
+                  minute. &ldquo;Send again&rdquo; re-sends this same transaction, which can&rsquo;t pay
+                  twice. Before any new send, the wallet checks whether this one went through and
+                  tells you if it did.
+                </p>
+              )}
             </div>
           </div>
           <div className="btn-row">
             <button type="button" className="btn btn-ghost" onClick={onClose}>
               Close
             </button>
-            <button type="button" className="btn btn-primary" onClick={() => setStep({ kind: 'form' })}>
+            <button
+              type="button"
+              className={step.err !== undefined ? 'btn btn-secondary' : 'btn btn-primary'}
+              onClick={() => setStep({ kind: 'form' })}
+            >
               <IconBack size={16} />
               Back
             </button>
+            {step.err !== undefined && (
+              <button type="button" className="btn btn-primary" onClick={() => handleResend(step.err!)}>
+                Send again
+              </button>
+            )}
           </div>
         </div>
       )}

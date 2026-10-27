@@ -153,10 +153,13 @@ export function isNetworkShown(prefs: NetworkPrefs | null, id: string): boolean 
 // What a scan said about one network, for the undecided wallet's first pick
 // and for the "this one holds funds" check before hiding.
 //
-//   funded  — a balance of any asset the card shows (or a stake account)
-//   used    — no balance, but history
+//   funded  — a balance of any asset the card shows (or a stake account, or
+//             staked or unstaking TRX)
+//   used    — no balance, but history (a used address, an activated TRON
+//             account)
 //   unused  — the scan completed: zero everywhere, no history
-//   unknown — the scan failed or was partial; can't tell, so it stays shown
+//   unknown — the scan failed or was partial, or a history, token or stake
+//             lookup failed; can't tell, so it stays shown
 //   pending — no answer yet
 
 export type NetworkActivity = 'funded' | 'used' | 'unused' | 'unknown' | 'pending'
@@ -174,7 +177,8 @@ export function utxoActivity(s: UtxoSlice | undefined): NetworkActivity {
   if (a === null) return s.error !== null ? 'unknown' : 'pending'
   if (a.balance.confirmed + a.balance.unconfirmed > 0n) return 'funded'
   if (a.incomplete?.balance === true) return 'unknown'
-  if (a.txs.length > 0) return 'used'
+  // a used address is history even when its transactions didn't load (BM8)
+  if (a.txs.length > 0 || a.addresses.some((x) => x.used)) return 'used'
   return s.error !== null ? 'unknown' : 'unused'
 }
 
@@ -183,6 +187,8 @@ export function evmActivity(s: EvmUiState | undefined): NetworkActivity {
   if (s.token === null || s.gas === null) return s.error !== null ? 'unknown' : 'pending'
   if (s.token > 0n || s.gas > 0n || s.others.some((t) => t.balance > 0n)) return 'funded'
   if (s.txs.length > 0) return 'used'
+  // a history or token lookup that failed can't say "nothing here" (BM8)
+  if (s.lookupFailed === true) return 'unknown'
   return s.error !== null ? 'unknown' : 'unused'
 }
 
@@ -193,15 +199,20 @@ export function solActivity(s: SolUiState | undefined): NetworkActivity {
   // the USDC lookup is separate and may fail on its own (usdcBalance stays null)
   if (s.usdcBalance === null) return 'unknown'
   if (s.txs.length > 0) return 'used'
+  // nor can a history or stake lookup that failed (BM8)
+  if (s.lookupFailed === true) return 'unknown'
   return s.error !== null ? 'unknown' : 'unused'
 }
 
 export function tronActivity(s: TronUiState | undefined): NetworkActivity {
   if (s === undefined || s.loading) return 'pending'
   if (s.balance === null) return s.error !== null ? 'unknown' : 'pending'
-  if (s.balance > 0n || (s.usdtBalance ?? 0n) > 0n) return 'funded'
+  // staked or unstaking TRX is the holder's (BM8)
+  if (s.balance > 0n || (s.usdtBalance ?? 0n) > 0n || (s.staked ?? 0n) > 0n) return 'funded'
   if (s.usdtBalance === null) return 'unknown'
-  if (s.txs.length > 0) return 'used'
+  // an account that exists on chain has history, listed or not: only a
+  // transaction activates one (staking and votes aren't listed)
+  if (s.txs.length > 0 || s.activated === true) return 'used'
   return s.error !== null ? 'unknown' : 'unused'
 }
 

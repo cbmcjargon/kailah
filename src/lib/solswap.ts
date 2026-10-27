@@ -42,15 +42,15 @@ import {
   assertNoSolInFlight,
   blockHeightOf,
   getSolBalance,
-  SolBroadcastError,
   solRpc,
+  submitSolTx,
   solUsdcAta,
   tokenAmountFromBase64,
   type SolChainConfig,
   type SolKey,
 } from './sol'
 import { MAX_STAKE_ACCOUNTS, stakeAccountAddress } from './solstake'
-import { recordPending } from './pending'
+import { recordPending, type PendingSol } from './pending'
 
 export type SwapDirection = 'sol-to-usdc' | 'usdc-to-sol'
 
@@ -238,6 +238,8 @@ export interface PreparedSwap {
   priceImpactPct: number
   /** base + priority fee the transaction will pay (lamports) */
   feeLamports: bigint
+  /** the one-time deposit that opens a first-time holder's USDC account (lamports; not refunded) */
+  accountDepositLamports: bigint
   /** simulated net changes to OUR account — the proof behind the review screen */
   simulatedSolDelta: bigint
   simulatedUsdcDelta: bigint
@@ -910,6 +912,8 @@ async function exchangeLabel(program: string): Promise<string | undefined> {
 interface RouteFailure {
   /** whether a different route could help */
   reroute: boolean
+  /** a shortfall the user can act on, in plain words (bug audit 2026-10-27, BM21) */
+  plain?: string
   /** who failed, in words: "the exchange Kipseli", "Jupiter's router" */
   where: string
   /** the program's own reason, e.g. "custom program error: 0xffff" */
@@ -920,13 +924,36 @@ interface RouteFailure {
   detail: string
 }
 
+/**
+ * The simulation ran out of something the wallet holds: SOL for the swap,
+ * its fees and the account deposits, or the input token. Said in plain
+ * words, not as "the System program failed: custom program error: 0x1".
+ */
+export function swapShortfall(err: unknown, logs: readonly string[]): string | null {
+  const errText = JSON.stringify(err ?? null)
+  const failed = innermostFailure(logs)
+  const code1 = failed !== null && /custom program error: 0x1$/i.test(failed.reason)
+  if (/InsufficientFundsForRent/.test(errText)) {
+    return "the swap would leave an account below Solana's rent minimum. Keep a little more SOL in the wallet"
+  }
+  if (/InsufficientFundsForFee/.test(errText)) return "there isn't enough SOL for the network fee"
+  if ((failed?.program === solLib.SYS_PROGRAM && code1) || logs.some((l) => /insufficient lamports/i.test(l))) {
+    return "there isn't enough SOL for the swap plus its network fee and the temporary account deposits. Swap a little less"
+  }
+  if ((failed?.program === solLib.TOKEN_PROGRAM || failed?.program === solLib.TOKEN_PROGRAM2022) && code1) {
+    return "there isn't enough of the token you're paying with in the account"
+  }
+  return null
+}
+
 async function describeFailure(e: SwapSimulationError, b: JupBuildResponse): Promise<RouteFailure> {
   const failed = innermostFailure(e.logs)
   if (failed === null || PLUMBING_NAMES.has(failed.program)) {
     const detail = failed
       ? `${PLUMBING_NAMES.get(failed.program)} failed: ${failed.reason}`
       : e.logs.slice(-2).join(' · ') || JSON.stringify(e.err ?? null).slice(0, 120)
-    return { reroute: false, where: '', reason: '', exclude: [], detail }
+    const plain = swapShortfall(e.err, e.logs)
+    return { reroute: false, where: '', reason: '', exclude: [], detail, ...(plain !== null && { plain }) }
   }
   if (failed.program === JUPITER_V6_PROGRAM && isJupiterOwnError(failed.reason)) {
     const reason = /: 0x1771$/i.test(failed.reason)
@@ -950,6 +977,8 @@ async function describeFailure(e: SwapSimulationError, b: JupBuildResponse): Pro
 }
 
 function failureMessage(first: RouteFailure, second?: RouteFailure): string {
+  const plain = first.plain ?? second?.plain
+  if (plain !== undefined) return `The swap was not signed: ${plain}.`
   if (!first.reroute) return `${SIM_FAILED} (${first.detail})`
   const cap = (s: string) => s.charAt(0).toUpperCase() + s.slice(1)
   const what =
@@ -1144,68 +1173,77 @@ async function prepareRoute(
   // getAccountInfo, not getTokenAccountBalance (public RPCs gate "indexed"
   // methods). value:null means the account truly doesn't exist; a fetch
   // failure throws and fails the whole prepare — it must NOT read as
-  // "missing", or an existing balance would inflate a delta below.
+  // "missing", or an existing balance would inflate a delta below. Read at
+  // the simulation's own commitment: a finalized balance trails it by a dozen
+  // seconds, and any transfer in that gap read as the swap's (BL24).
   const tokenBalance = (address: string) =>
     solRpc<{ value: { data?: unknown } | null }>(chain, 'getAccountInfo', [
       address,
-      { encoding: 'base64' },
+      { encoding: 'base64', commitment: 'confirmed' },
     ]).then((r) => (r.value === null ? null : tokenAmountFromBase64(r.value.data)))
   const charged = feeBps > 0
   // Lamports the unwrap hands back beyond this swap's own wrap: a wSOL
   // account the owner already had (its rent plus whatever was in it).
-  const wsolLamports = solRpc<{ value: { lamports?: unknown } | null }>(chain, 'getAccountInfo', [
-    solLib.tokenAddress({ mint: SOL_WRAPPED_MINT, owner, tokenProgram: solLib.TOKEN_PROGRAM }),
-    { encoding: 'base64', dataSlice: { offset: 0, length: 0 } },
-  ]).then((r) => (r.value === null || typeof r.value.lamports !== 'number' ? 0n : BigInt(r.value.lamports)))
-  const [solBefore, usdcBefore, feeBefore, ataRentRes, wsolBefore] = await Promise.all([
-    getSolBalance(chain, owner),
-    tokenBalance(ata),
-    charged ? tokenBalance(SWAP_FEE_ACCOUNT) : Promise.resolve(0n),
-    solRpc<number>(chain, 'getMinimumBalanceForRentExemption', [165]).catch(() => null),
-    wsolLamports,
-  ])
-  const ataMissing = usdcBefore === null
-  const ataRent = ataRentRes != null ? BigInt(ataRentRes) : ATA_RENT_FALLBACK
-  // The fee account must exist; a swap that pays a missing one would fail.
-  if (feeBefore === null) {
-    throw new Error('Swaps are unavailable right now. Your coins are safe; nothing was signed.')
-  }
+  const wsolLamports = () =>
+    solRpc<{ value: { lamports?: unknown } | null }>(chain, 'getAccountInfo', [
+      solLib.tokenAddress({ mint: SOL_WRAPPED_MINT, owner, tokenProgram: solLib.TOKEN_PROGRAM }),
+      { encoding: 'base64', dataSlice: { offset: 0, length: 0 }, commitment: 'confirmed' },
+    ]).then((r) => (r.value === null || typeof r.value.lamports !== 'number' ? 0n : BigInt(r.value.lamports)))
 
-  const sim = await simulateSwap(chain, txBase64, charged ? [owner, ata, SWAP_FEE_ACCOUNT] : [owner, ata])
-  const solAfter = BigInt(sim.value.accounts?.[0]?.lamports ?? 0)
-  const usdcAfter = tokenAmountFrom(sim.value.accounts?.[1])
-  const solDelta = solAfter - solBefore
-  const usdcDelta = usdcAfter - (usdcBefore ?? 0n)
-  const swapFee = charged ? tokenAmountFrom(sim.value.accounts?.[2]) - feeBefore : 0n
+  // An unrelated transfer can still land between the reads and the
+  // simulation, and the fee account takes every user's fees: an outcome that
+  // doesn't add up is measured once more, on fresh reads, before the swap is
+  // refused (bug audit 2026-10-27, BL24). Each pass checks everything.
+  let outcome: { solDelta: bigint; usdcDelta: bigint; swapFee: bigint; deposit: bigint } | null = null
+  for (let pass = 0; pass < 2 && outcome === null; pass++) {
+    const [solBefore, usdcBefore, feeBefore, ataRentRes, wsolBefore] = await Promise.all([
+      getSolBalance(chain, owner),
+      tokenBalance(ata),
+      charged ? tokenBalance(SWAP_FEE_ACCOUNT) : Promise.resolve(0n),
+      solRpc<number>(chain, 'getMinimumBalanceForRentExemption', [165]).catch(() => null),
+      wsolLamports(),
+    ])
+    const ataMissing = usdcBefore === null
+    const ataRent = ataRentRes != null ? BigInt(ataRentRes) : ATA_RENT_FALLBACK
+    // The fee account must exist; a swap that pays a missing one would fail.
+    if (feeBefore === null) {
+      throw new Error('Swaps are unavailable right now. Your coins are safe; nothing was signed.')
+    }
 
-  // 7. Kailah's fee must be exactly the rate (±1 unit for rounding), into its
-  //    account: of the gross USDC output when selling SOL, of the USDC input
-  //    when buying. The fee wallet itself pays none (feeBps 0).
-  if (charged) {
-    const expectedFee =
-      q.direction === 'sol-to-usdc'
-        ? ((usdcDelta + swapFee) * BigInt(feeBps)) / 10_000n
-        : (q.inAmount * BigInt(feeBps)) / 10_000n
-    if (swapFee <= 0n || swapFee < expectedFee - 1n || swapFee > expectedFee + 1n) {
-      throw new Error(MISMATCH)
-    }
-  }
+    const sim = await simulateSwap(chain, txBase64, charged ? [owner, ata, SWAP_FEE_ACCOUNT] : [owner, ata])
+    const solAfter = BigInt(sim.value.accounts?.[0]?.lamports ?? 0)
+    const usdcAfter = tokenAmountFrom(sim.value.accounts?.[1])
+    const solDelta = solAfter - solBefore
+    const usdcDelta = usdcAfter - (usdcBefore ?? 0n)
+    const swapFee = charged ? tokenAmountFrom(sim.value.accounts?.[2]) - feeBefore : 0n
 
-  // 8. The simulated outcome must honor the decoded floor, and the input
-  //    side must move by exactly the input: spending LESS of the shown asset
-  //    means the route took something else instead (audit 2026-10-26).
-  if (q.direction === 'sol-to-usdc') {
-    const maxSolCost = q.inAmount + feeLamports + (ataMissing ? ataRent : 0n) + FEE_ROUNDING_SLACK
-    const minSolCost = q.inAmount + feeLamports - wsolBefore - FEE_ROUNDING_SLACK
-    if (usdcDelta < minOutAmount || solDelta < -maxSolCost || solDelta > -minSolCost) {
-      throw new Error(MISMATCH)
+    // 7. Kailah's fee must be exactly the rate (±1 unit for rounding), into its
+    //    account: of the gross USDC output when selling SOL, of the USDC input
+    //    when buying. The fee wallet itself pays none (feeBps 0).
+    let honest = true
+    if (charged) {
+      const expectedFee =
+        q.direction === 'sol-to-usdc'
+          ? ((usdcDelta + swapFee) * BigInt(feeBps)) / 10_000n
+          : (q.inAmount * BigInt(feeBps)) / 10_000n
+      if (swapFee <= 0n || swapFee < expectedFee - 1n || swapFee > expectedFee + 1n) honest = false
     }
-  } else {
-    const minSolGain = minOutAmount - feeLamports - FEE_ROUNDING_SLACK
-    if (usdcDelta !== -q.inAmount || solDelta < minSolGain) {
-      throw new Error(MISMATCH)
+
+    // 8. The simulated outcome must honor the decoded floor, and the input
+    //    side must move by exactly the input: spending LESS of the shown asset
+    //    means the route took something else instead (audit 2026-10-26).
+    if (q.direction === 'sol-to-usdc') {
+      const maxSolCost = q.inAmount + feeLamports + (ataMissing ? ataRent : 0n) + FEE_ROUNDING_SLACK
+      const minSolCost = q.inAmount + feeLamports - wsolBefore - FEE_ROUNDING_SLACK
+      if (usdcDelta < minOutAmount || solDelta < -maxSolCost || solDelta > -minSolCost) honest = false
+    } else {
+      const minSolGain = minOutAmount - feeLamports - FEE_ROUNDING_SLACK
+      if (usdcDelta !== -q.inAmount || solDelta < minSolGain) honest = false
     }
+    if (honest) outcome = { solDelta, usdcDelta, swapFee, deposit: ataMissing ? ataRent : 0n }
   }
+  if (outcome === null) throw new Error(MISMATCH)
+  const { solDelta, usdcDelta, swapFee, deposit } = outcome
 
   return {
     chain,
@@ -1215,6 +1253,9 @@ async function prepareRoute(
     minOutAmount,
     priceImpactPct: q.priceImpactPct,
     feeLamports,
+    // a first-time holder's USDC account opens with this deposit; the review
+    // shows it (it was left out, bug audit 2026-10-27, BL27)
+    accountDepositLamports: deposit,
     simulatedSolDelta: solDelta,
     simulatedUsdcDelta: usdcDelta,
     swapFee,
@@ -1227,21 +1268,15 @@ async function prepareRoute(
 
 export async function broadcastSwap(key: SolKey, prepared: PreparedSwap): Promise<string> {
   const [txid, signed] = solLib.signTx(key.privateKey, prepared.txBase64)
-  recordPending({
+  const entry: PendingSol = {
     kind: 'sol',
     chainId: prepared.chain.id,
     signature: txid,
     ts: Date.now(),
     lastValidBlockHeight: prepared.lastValidBlockHeight,
-  })
-  try {
-    return await solRpc<string>(prepared.chain, 'sendTransaction', [
-      signed,
-      { encoding: 'base64', preflightCommitment: 'confirmed' },
-    ])
-  } catch (e) {
-    // carries the known signature so the UI can check whether this attempt
-    // landed before allowing a retry (see SolBroadcastError)
-    throw new SolBroadcastError(e instanceof Error ? e.message : String(e), txid, signed)
   }
+  recordPending(entry)
+  // a lost answer leaves the record marked failed and hands back the signed
+  // bytes, so the UI can resend the SAME swap (see SolBroadcastError)
+  return submitSolTx(prepared.chain, txid, signed, entry)
 }

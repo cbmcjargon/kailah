@@ -48,6 +48,11 @@ export function isHardwareAccount(a: WatchAccountKeys): a is HardwareAccountKeys
   return (a as Partial<HardwareAccountKeys>).kind === 'hardware'
 }
 
+/** Which account a UTXO send comes from, for the in-flight ledger: 'seed', or the Ledger account's id. */
+export function ledgerAccountKey(a: WatchAccountKeys): string {
+  return isHardwareAccount(a) ? a.record.id : 'seed'
+}
+
 /** "m/84'/0'/0'" → [0x80000054, 0x80000000, 0x80000000] */
 export function parsePath(path: string): number[] {
   const parts = path.split('/')

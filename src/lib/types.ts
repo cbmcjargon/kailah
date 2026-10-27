@@ -181,6 +181,7 @@ export interface ChainClient {
 //
 // csvexport.ts
 //   txsToCsv(chain: ChainConfig, txs: TxSummary[]): string
+//   csvExportHint(networks: string[]): string — the Settings row's hint
 //
 // txbuild.ts (additions)
 //   buildTxV2(args: BuildTxArgsV2): BuiltTx
@@ -263,6 +264,8 @@ export interface RawTxInfo {
   outputs: { address: string | null; value: bigint }[]
   /** true when any input signals BIP125 replaceability (sequence < 0xfffffffe) */
   rbfSignaled: boolean
+  /** the provider served only some of its inputs or outputs: amounts can't be worked out */
+  partial?: true
 }
 
 export interface TxSummary {
@@ -279,6 +282,8 @@ export interface TxSummary {
   counterparty: string | null
   /** pending + rbfSignaled + every input ours → the Speed up button shows */
   bumpable: boolean
+  /** too large for the data service to serve in full: the amount and direction are unknown */
+  partial?: true
 }
 
 export interface AccountState {
@@ -299,6 +304,8 @@ export interface AccountState {
    * before a MAX sweep). Absent/both-false on a fully successful scan.
    */
   incomplete?: { balance: boolean; utxos: boolean }
+  /** restored from the last-known snapshot (statecache.ts), not scanned this session */
+  snapshot?: true
 }
 
 /** Per-address provider surface (every provider implements this). */
@@ -361,6 +368,11 @@ export interface ProviderApi extends AddressApi {
    * ~100 requests an hour across every chain it serves).
    */
   backupOnly?: boolean
+  /**
+   * Requests are counted against a small hourly budget (BlockCypher): the
+   * failover never spends one to dodge the active provider's brief pause.
+   */
+  budgetLimited?: boolean
 }
 
 /** getClient(chain) v2: failover over an ordered ProviderApi list. */
@@ -371,6 +383,8 @@ export interface FailoverClient extends AddressApi {
   getXpubUtxos: XpubApi['getXpubUtxos']
   /** name of the provider that served the last successful call */
   activeProvider(): string
+  /** the last answer came from a backup (the regular providers are failing); polls slow down */
+  onBackup(): boolean
 }
 
 export interface BuildTxArgsV2 {

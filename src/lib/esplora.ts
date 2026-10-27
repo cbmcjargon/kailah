@@ -171,7 +171,11 @@ export class EsploraProvider implements ProviderApi {
 
   async txSeen(txid: string): Promise<boolean> {
     try {
-      await this.getText(`/tx/${encodeURIComponent(txid)}/status`)
+      // /tx/:txid, not /tx/:txid/status: mempool.space and blockstream answer
+      // the status path with 200 {"confirmed":false} for a txid that never
+      // existed, which made every attempt "seen" and switched the double-pay
+      // guard off (bug audit 2026-10-27, BH1). /tx/:txid 404s instead.
+      await this.getText(`/tx/${encodeURIComponent(txid)}`)
       return true
     } catch (e) {
       if ((e as { notFound?: unknown } | null)?.notFound === true) return false
@@ -361,9 +365,14 @@ export class EsploraProvider implements ProviderApi {
     const text = await res.text()
     if (!res.ok) {
       // Bounded and attributed like getText: this string is rendered in the
-      // failure card and pattern-parsed for the BIP125 floor, so a hostile
-      // node must not get an unbounded canvas for social-engineering copy.
-      const reason = text.trim().slice(0, 200)
+      // failure card, so a hostile node must not get an unbounded canvas for
+      // social-engineering copy. The BIP125 floor ("less fees than
+      // conflicting txs; a < b") sits past 200 characters once the node
+      // names the replacement's txid, so it is read from the whole body and
+      // kept on its own (bug audit 2026-10-27, BL1).
+      const floor = /less fees than conflicting txs;\s*\d{1,12}(?:\.\d{1,12})?\s*<\s*\d{1,12}(?:\.\d{1,12})?(?![\d.])/i.exec(text)
+      const reason =
+        floor !== null ? `insufficient fee, rejecting replacement; ${floor[0]}` : text.trim().slice(0, 200)
       throw new Error(
         reason
           ? `${this.providerName}: ${reason}`

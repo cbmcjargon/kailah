@@ -85,6 +85,25 @@ async function deriveAesKey(secret: Uint8Array, hkdfSalt: Uint8Array): Promise<C
 }
 
 /**
+ * Asks the authenticator to drop a passkey this enrollment created and then
+ * couldn't use (WebAuthn's signal API, where the browser has it): a failed
+ * setup used to leave an orphan "Kailah Wallet" passkey behind (bug audit
+ * 2026-10-27, BL39). Best-effort; false when the browser can't be asked.
+ */
+async function forgetPasskey(credId: Uint8Array): Promise<boolean> {
+  const pkc = (globalThis as { PublicKeyCredential?: unknown }).PublicKeyCredential as
+    | { signalUnknownCredential?: (o: { rpId: string; credentialId: string }) => Promise<void> }
+    | undefined
+  if (typeof pkc?.signalUnknownCredential !== 'function') return false
+  try {
+    await pkc.signalUnknownCredential({ rpId: location.hostname, credentialId: base64urlnopad.encode(credId) })
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
  * Creates the platform passkey and stores a biometric-protected copy of the
  * mnemonic. Triggers two biometric prompts (passkey creation + first key
  * evaluation). Must be called while the wallet is unlocked.
@@ -113,12 +132,27 @@ export async function enrollBiometric(mnemonic: string): Promise<void> {
     },
   })) as PublicKeyCredential | null
   if (cred === null) throw new Error('Biometric setup was cancelled.')
+  const credId = new Uint8Array(cred.rawId)
+  try {
+    await finishEnrollment(cred, credId, mnemonic)
+  } catch (e) {
+    // the passkey exists but holds nothing: take it back, or say where it is
+    const dropped = await forgetPasskey(credId)
+    const msg = e instanceof Error ? e.message : String(e)
+    throw new Error(
+      dropped
+        ? msg
+        : `${msg} A passkey named "Kailah Wallet" may be left in this device's passkey list; you can delete it there.`,
+    )
+  }
+}
+
+async function finishEnrollment(cred: PublicKeyCredential, credId: Uint8Array, mnemonic: string): Promise<void> {
   const ext = cred.getClientExtensionResults() as PrfExtensionResults
   if (ext.prf?.enabled !== true) {
     throw new Error('This device does not support biometric key protection (PRF).')
   }
 
-  const credId = new Uint8Array(cred.rawId)
   const prfSalt = randomBytes(32)
   const hkdfSalt = randomBytes(32)
   const secret = await evalPrf(credId, prfSalt)

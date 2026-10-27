@@ -68,6 +68,7 @@ interface StoredTx {
   time: number | null
   height: number | null
   counterparty: string | null
+  partial?: true
 }
 
 interface StoredState {
@@ -117,6 +118,7 @@ export function saveStateSnapshot(chainId: string, state: AccountState): void {
         time: t.time,
         height: t.height,
         counterparty: t.counterparty,
+        ...(t.partial === true && { partial: true as const }),
       })),
       tipHeight: state.tipHeight,
     }
@@ -153,9 +155,13 @@ export function loadStateSnapshot(chainId: string): AccountState | null {
         // a snapshot carries no raw txs/utxos, so Speed up must wait for a
         // real scan — never offer a bump we cannot build
         bumpable: false,
+        ...(t.partial === true && { partial: true as const }),
       })),
       tipHeight: s.tipHeight,
       incomplete: { balance: false, utxos: true },
+      // its own flag: a real scan that missed some coins is not a snapshot,
+      // and App's polls treat the two differently (bug audit 2026-10-27, BL10)
+      snapshot: true,
     }
   } catch {
     return null

@@ -30,12 +30,27 @@ self.addEventListener('activate', (event) => {
   )
 })
 
+// The offline screen's own two files, by exact same-origin path: served from
+// the cache only when the network fails. They were cached but never served,
+// so the offline screen showed without its styles and icon (bug audit
+// 2026-10-27, BL36). No application code is ever among them.
+const OFFLINE_SUBRESOURCES = new Set(['/offline.css', '/icon.svg'])
+
 self.addEventListener('fetch', (event) => {
   const { request } = event
-  // Only page navigations get the offline fallback. Everything else —
-  // scripts, styles, API calls — passes straight through to the network
-  // untouched (no caching, no rewriting).
-  if (request.mode !== 'navigate') return
+  // Only page navigations get the offline fallback, and the offline screen's
+  // two files their cached copy. Everything else — scripts, styles, API
+  // calls — passes straight through to the network untouched (no caching,
+  // no rewriting).
+  if (request.mode !== 'navigate') {
+    const url = new URL(request.url)
+    if (url.origin === self.location.origin && OFFLINE_SUBRESOURCES.has(url.pathname)) {
+      event.respondWith(
+        fetch(request).catch(async () => (await caches.match(url.pathname)) ?? Response.error()),
+      )
+    }
+    return
+  }
   event.respondWith(
     fetch(request).catch(async () => {
       const cached = await caches.match('/offline.html')

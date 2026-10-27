@@ -13,13 +13,23 @@ interface TxRowProps {
 export default function TxRow({ chain, tx, price, onClick }: TxRowProps) {
   const abs = tx.amount < 0n ? -tx.amount : tx.amount
   const sign = tx.amount > 0n ? '+' : tx.amount < 0n ? '−' : ''
-  const title = tx.direction === 'in' ? 'Received' : tx.direction === 'out' ? 'Sent' : 'Sent to self'
-  const showUsd = price !== undefined && abs > 0n
+  // served in part by the data service: no direction or amount to show
+  const unknown = tx.partial === true
+  const title = unknown
+    ? 'Transaction'
+    : tx.direction === 'in'
+      ? 'Received'
+      : tx.direction === 'out'
+        ? 'Sent'
+        : 'Sent to self'
+  const showUsd = price !== undefined && abs > 0n && !unknown
 
   return (
     <button type="button" className="tx-row" onClick={onClick}>
-      <span className={`tx-icon tx-icon-${tx.direction}`} aria-hidden="true">
-        {tx.direction === 'in' ? (
+      <span className={`tx-icon tx-icon-${unknown ? 'self' : tx.direction}`} aria-hidden="true">
+        {unknown ? (
+          <IconSwap size={16} />
+        ) : tx.direction === 'in' ? (
           <IconArrowDown size={16} />
         ) : tx.direction === 'out' ? (
           <IconArrowUp size={16} />
@@ -45,10 +55,14 @@ export default function TxRow({ chain, tx, price, onClick }: TxRowProps) {
       </div>
 
       <div className="tx-amounts">
-        <span className={`tx-amount tnum tx-amount-${tx.direction}`}>
-          {sign}
-          {formatCoin(abs, chain.decimals)} {chain.ticker}
-        </span>
+        {unknown ? (
+          <span className="tx-amount text-tertiary">Amount unknown</span>
+        ) : (
+          <span className={`tx-amount tnum tx-amount-${tx.direction}`}>
+            {sign}
+            {formatCoin(abs, chain.decimals)} {chain.ticker}
+          </span>
+        )}
         {showUsd && (
           <span className="tx-usd tnum">{formatUsd(coinsToUsd(abs, chain.decimals, price))}</span>
         )}

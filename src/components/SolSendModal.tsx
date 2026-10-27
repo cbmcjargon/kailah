@@ -10,10 +10,13 @@ import {
   rebroadcastSol,
   SolBroadcastError,
   SolExpiredError,
-  solTxSeen,
+  SOL_REVIEW_FRESH_MS,
+  solPayUnits,
+  SOL_LANDED_FAILED,
+  solTxStatus,
 } from '../lib/sol'
 import { evmToUsd } from '../lib/units'
-import { formatUsd } from '../lib/format'
+import { formatCoin, formatTypedAmount, formatUsd, readTypedAmount } from '../lib/format'
 import Modal from './Modal'
 import CopyButton from './CopyButton'
 import QrScanner from './LazyQrScanner'
@@ -22,6 +25,8 @@ import { errMessage } from './ui'
 import LookalikeWarning, { useLookalike } from './LookalikeWarning'
 import { knownAddresses, SOL_FORMAT } from '../lib/lookalike'
 import { sentToAddresses } from '../lib/sentlog'
+import { EarlierSendLanded, type Pending } from '../lib/pending'
+import PrepareError from './PrepareError'
 
 interface SolSendModalProps {
   chain: SolChainConfig
@@ -36,8 +41,8 @@ interface SolSendModalProps {
 type Step =
   | { kind: 'form' }
   | { kind: 'preparing' }
-  | { kind: 'prepare-error'; message: string }
-  | { kind: 'review'; prepared: PreparedSolSend }
+  | { kind: 'prepare-error'; message: string; landed?: Pending }
+  | { kind: 'review'; prepared: PreparedSolSend; at: number; refreshed?: boolean }
   | { kind: 'broadcasting' }
   | { kind: 'success'; signature: string; prepared: PreparedSolSend }
   | { kind: 'failed'; message: string; signature?: string; signed?: string; prepared: PreparedSolSend }
@@ -72,7 +77,9 @@ export default function SolSendModal({
 
   const decimals = asset === 'sol' ? 9 : chain.usdc.decimals
   const symbol = asset === 'sol' ? 'SOL' : chain.usdc.symbol
-  const fmtAmount = (v: bigint) => (asset === 'sol' ? formatSol(v) : formatSolUsdc(chain, v))
+  // the amount sent, to the last unit: a rounded figure here once hid a
+  // short Solana Pay payment (bug audit 2026-10-27, BH6)
+  const fmtAmount = (v: bigint) => formatCoin(v, decimals)
 
   const destTrimmed = dest.trim()
   const destValid = destTrimmed !== '' && isValidSolAddress(destTrimmed)
@@ -82,25 +89,9 @@ export default function SolSendModal({
   )
   const lookalike = useLookalike(destValid ? destTrimmed : '', known, SOL_FORMAT)
 
-  let parsedAmount: bigint | null = null
-  let amountError: string | null = null
-  if (!sendMax && amountStr.trim() !== '') {
-    const t = amountStr.trim()
-    if (!/^\d*\.?\d*$/.test(t) || t === '' || t === '.') {
-      amountError = 'Enter a plain number, like 0.25'
-    } else {
-      const [whole = '0', frac = ''] = t.split('.')
-      if (frac.length > decimals) {
-        amountError = `${symbol} has at most ${decimals} decimal places`
-      } else {
-        parsedAmount = BigInt(whole + frac.padEnd(decimals, '0'))
-        if (parsedAmount <= 0n) {
-          parsedAmount = null
-          amountError = 'Amount must be more than zero'
-        }
-      }
-    }
-  }
+  const typed = sendMax ? { amount: null, error: null } : readTypedAmount(amountStr, decimals, symbol, '0.25')
+  const parsedAmount = typed.amount
+  const amountError = typed.error
 
   const assetPrice = asset === 'sol' ? price : usdcPrice
   const usdHint =
@@ -110,7 +101,7 @@ export default function SolSendModal({
 
   const canContinue = destValid && lookalike.ok && (sendMax || parsedAmount !== null)
 
-  const handleContinue = () => {
+  const handleContinue = (refreshed = false) => {
     if (!canContinue) return
     setStep({ kind: 'preparing' })
     prepareSolSend({
@@ -124,10 +115,16 @@ export default function SolSendModal({
       ...(payExtras?.memo !== undefined && { memo: payExtras.memo }),
     })
       .then((prepared) => {
-        if (aliveRef.current) setStep({ kind: 'review', prepared })
+        if (aliveRef.current) setStep({ kind: 'review', prepared, at: Date.now(), refreshed })
       })
       .catch((e) => {
-        if (aliveRef.current) setStep({ kind: 'prepare-error', message: errMessage(e) })
+        if (aliveRef.current) {
+          setStep({
+            kind: 'prepare-error',
+            message: errMessage(e),
+            landed: e instanceof EarlierSendLanded ? e.entry : undefined,
+          })
+        }
       })
   }
 
@@ -182,12 +179,16 @@ export default function SolSendModal({
     }
     const signature = failed.signature
     setRetryChecking(true)
-    solTxSeen(chain, signature)
-      .then((seen) => {
+    solTxStatus(chain, signature)
+      .then((status) => {
         if (!aliveRef.current) return
-        if (seen) {
+        if (status === 'ok') {
           onSent()
           setStep({ kind: 'success', signature, prepared: failed.prepared })
+        } else if (status === 'failed') {
+          // it landed but failed there: not a success (BL25)
+          onSent()
+          setStep({ ...failed, kind: 'failed', message: SOL_LANDED_FAILED, signature: undefined, signed: undefined })
         } else {
           setStep({ kind: 'form' })
         }
@@ -209,15 +210,27 @@ export default function SolSendModal({
       if (r.splToken !== undefined && r.splToken !== chain.usdc.mint) {
         return 'That payment request asks for a token this wallet doesn’t support — only SOL and USDC can be sent here.'
       }
+      // exact, or the request is refused (more places than USDC has)
+      const tokenUnits =
+        r.splToken !== undefined && r.tokenAmount !== undefined
+          ? solPayUnits(r.tokenAmount, chain.usdc.decimals, chain.usdc.symbol)
+          : undefined
       setDest(r.address)
       setPay({ address: r.address, ...(r.reference !== undefined && { reference: r.reference }), ...(r.memo !== undefined && { memo: r.memo }) })
       if (r.splToken !== undefined) {
         setAsset('usdc')
-        if (r.tokenAmount !== undefined && !sendMax) setAmountStr(r.tokenAmount)
+        // a request's amount is the payment: it replaces MAX (BL3)
+        if (tokenUnits !== undefined && tokenUnits > 0n) {
+          setSendMax(false)
+          setAmountStr(formatTypedAmount(tokenUnits, chain.usdc.decimals))
+        }
       } else {
         // a plain request is a SOL request, whatever asset was selected
         setAsset('sol')
-        if (r.amount !== undefined && !sendMax) setAmountStr(formatSol(r.amount))
+        if (r.amount !== undefined) {
+          setSendMax(false)
+          setAmountStr(formatTypedAmount(r.amount, 9))
+        }
       }
       setScanOpen(false)
       return null
@@ -377,19 +390,13 @@ export default function SolSendModal({
       )}
 
       {step.kind === 'prepare-error' && (
-        <div className="stack">
-          <div className="warning-box" role="alert">
-            <IconWarning size={20} />
-            <div>
-              <strong>Couldn&rsquo;t prepare this transaction</strong>
-              <p>{step.message}</p>
-            </div>
-          </div>
-          <button type="button" className="btn btn-secondary" onClick={() => setStep({ kind: 'form' })}>
-            <IconBack size={16} />
-            Back
-          </button>
-        </div>
+        <PrepareError
+          title="Couldn’t prepare this transaction"
+          message={step.message}
+          landed={step.landed}
+          onBack={() => setStep({ kind: 'form' })}
+          onSendAgain={() => handleContinue()}
+        />
       )}
 
       {step.kind === 'review' && (
@@ -435,6 +442,12 @@ export default function SolSendModal({
               token account — a one-time deposit the network requires, paid by you in SOL.
             </p>
           )}
+          {step.refreshed === true && (
+            <p className="text-tertiary">
+              The earlier version&rsquo;s network window closed before you confirmed it, so the wallet
+              prepared it again. Check it and confirm.
+            </p>
+          )}
           <div className="btn-row">
             <button type="button" className="btn btn-ghost" onClick={() => setStep({ kind: 'form' })}>
               <IconBack size={16} />
@@ -443,7 +456,10 @@ export default function SolSendModal({
             <button
               type="button"
               className="btn btn-primary"
-              onClick={() => handleBroadcast(step.prepared)}
+              onClick={() =>
+                // a review left open past its blockhash is prepared again first (BM17)
+                Date.now() - step.at > SOL_REVIEW_FRESH_MS ? handleContinue(true) : handleBroadcast(step.prepared)
+              }
             >
               Confirm &amp; send
             </button>
@@ -494,11 +510,14 @@ export default function SolSendModal({
             <div>
               <strong>Broadcast failed</strong>
               <p>{step.message}</p>
-              <p>
-                If the network took it before the error, it can still go through for about a
-                minute. &ldquo;Send again&rdquo; re-sends this same transaction, which can&rsquo;t pay
-                twice; the wallet won&rsquo;t build a new one while this attempt could still land.
-              </p>
+              {step.signed !== undefined && (
+                <p>
+                  If the network took it before the error, it can still go through for about a
+                  minute. &ldquo;Send again&rdquo; re-sends this same transaction, which can&rsquo;t
+                  pay twice. Before any new send, the wallet checks whether this one went through
+                  and tells you if it did.
+                </p>
+              )}
             </div>
           </div>
           <div className="btn-row">

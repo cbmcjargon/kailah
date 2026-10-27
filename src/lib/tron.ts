@@ -30,7 +30,16 @@ import { secp256k1 } from '@noble/curves/secp256k1'
 import { formatEvmAmount } from './units'
 import type { NetMode } from './types'
 import { recordSentTo } from './sentlog'
-import { agoText, dropPending, recordPending, tronInFlightBlock } from './pending'
+import {
+  agoText,
+  dropPending,
+  EarlierSendLanded,
+  markPendingFailed,
+  pendingTron,
+  recordPending,
+  tronInFlightBlock,
+  type PendingTron,
+} from './pending'
 
 const b58check = createBase58check(sha256)
 
@@ -159,7 +168,31 @@ export function tronAddressToHex(addr: string): string {
 // ---------------------------------------------------------------------------
 // HTTP helper.
 
+/**
+ * Keyless TronGrid allows ~3 requests a second per IP (its /v1/accounts
+ * history endpoints one a second) and suspends a caller that goes over for
+ * several seconds; the wallet's own refresh fired four at once and lost a
+ * history half to a 429 (bug audit 2026-10-27, BM22). Every request to a
+ * host now waits its turn, `gapMs` apart, and a /v1 request also waits
+ * `v1GapMs` after the last /v1 one (tests set both to 0).
+ */
+export const tronTuning = { gapMs: 350, v1GapMs: 1_000 }
+const tronLast = new Map<string, number>()
+const tronQueues = new Map<string, Promise<void>>()
+
+function tronTurn(lane: string, gapMs: number): Promise<void> {
+  const turn = (tronQueues.get(lane) ?? Promise.resolve()).then(async () => {
+    const wait = (tronLast.get(lane) ?? 0) + gapMs - Date.now()
+    if (wait > 0) await new Promise((r) => setTimeout(r, wait))
+    tronLast.set(lane, Date.now())
+  })
+  tronQueues.set(lane, turn)
+  return turn
+}
+
 async function tronCall<T>(chain: TronChainConfig, path: string, body?: unknown): Promise<T> {
+  if (path.startsWith('/v1/')) await tronTurn(`${chain.api} /v1`, tronTuning.v1GapMs)
+  await tronTurn(chain.api, tronTuning.gapMs)
   let res: Response
   try {
     res = await fetch(chain.api + path, {
@@ -176,7 +209,20 @@ async function tronCall<T>(chain: TronChainConfig, path: string, body?: unknown)
       `Couldn't reach the ${chain.networkName} network right now. Your coins are safe; try again in a few minutes.`,
     )
   }
-  const json = (await res.json()) as T & { Error?: string; error?: string }
+  // TronGrid's keyless limit answers 429 and suspends the caller for a few
+  // seconds; say so in plain words (bug audit 2026-10-27, BM22)
+  if (res.status === 429) {
+    throw Object.assign(
+      new Error(`The ${chain.networkName} data service is busy (too many requests just now). Your coins are safe; try again in a few seconds.`),
+      { rateLimited: true },
+    )
+  }
+  let json: T & { Error?: string; error?: string }
+  try {
+    json = (await res.json()) as T & { Error?: string; error?: string }
+  } catch {
+    throw new Error(`${chain.name} API error (HTTP ${res.status})`)
+  }
   const err = json.Error ?? json.error
   if (!res.ok || err) {
     throw new Error(err ?? `${chain.name} API error (HTTP ${res.status})`)
@@ -190,6 +236,37 @@ async function tronCall<T>(chain: TronChainConfig, path: string, body?: unknown)
 interface GetAccountResult {
   balance?: number
   address?: string
+  /** "Contract" for a smart contract's account */
+  type?: string
+  frozenV2?: { amount?: number }[]
+  unfrozenV2?: { unfreeze_amount?: number }[]
+  /** Stake 1.0, still on accounts that staked before 2023 */
+  frozen?: { frozen_balance?: number }[]
+  account_resource?: { frozen_balance_for_energy?: { frozen_balance?: number } }
+}
+
+/** One getaccount read for the card: liquid TRX, TRX staked or unstaking, and whether the account exists. */
+export interface TronAccountView {
+  balance: bigint
+  /**
+   * Staked (Stake 2.0, and legacy Stake 1.0) plus unstaking TRX: still the
+   * holder's, not spendable. The balance alone left it out of the card, the
+   * portfolio and the networks-shown check (bug audit 2026-10-27, BM8/BM9).
+   */
+  staked: bigint
+  /** the account exists on chain: only an incoming transaction activates one, so it has history */
+  activated: boolean
+}
+
+export async function getTronAccount(chain: TronChainConfig, address: string): Promise<TronAccountView> {
+  const r = await tronCall<GetAccountResult>(chain, '/wallet/getaccount', { address, visible: true })
+  const sun = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? BigInt(Math.trunc(v)) : 0n)
+  let staked = sun(r.account_resource?.frozen_balance_for_energy?.frozen_balance)
+  for (const f of r.frozenV2 ?? []) staked += sun(f.amount)
+  for (const u of r.unfrozenV2 ?? []) staked += sun(u.unfreeze_amount)
+  for (const f of r.frozen ?? []) staked += sun(f.frozen_balance)
+  // A never-used account comes back as {} — that is a genuine zero.
+  return { balance: BigInt(r.balance ?? 0), staked, activated: typeof r.address === 'string' && r.address !== '' }
 }
 
 export async function getTronBalance(chain: TronChainConfig, address: string): Promise<bigint> {
@@ -201,22 +278,92 @@ export async function getTronBalance(chain: TronChainConfig, address: string): P
   return BigInt(r.balance ?? 0)
 }
 
-interface V1Account {
-  data?: { trc20?: Record<string, string>[] }[]
+interface ConstantResult {
+  constant_result?: unknown
+  energy_used?: number
+  result?: { result?: boolean; message?: string }
+  transaction?: { ret?: { ret?: string }[] }
 }
 
+/**
+ * USDT held by an address, read from the token contract itself. TronGrid's
+ * /v1/accounts answers `data: []` for an address that holds USDT but was
+ * never activated (TRC-20 transfers don't activate an account) — the usual
+ * first deposit from an exchange — and the wallet showed 0 (bug audit
+ * 2026-10-27, BH4). A constant call works for inactive owners.
+ */
 export async function getTronUsdtBalance(
   chain: TronChainConfig,
   address: string,
 ): Promise<bigint> {
-  const r = await tronCall<V1Account>(chain, `/v1/accounts/${encodeURIComponent(address)}`)
-  const acc = r.data?.[0]
-  if (!acc) return 0n
-  for (const entry of acc.trc20 ?? []) {
-    const v = entry[chain.usdt.contract]
-    if (v !== undefined) return BigInt(v)
+  const r = await tronCall<ConstantResult>(chain, '/wallet/triggerconstantcontract', {
+    owner_address: address,
+    contract_address: chain.usdt.contract,
+    function_selector: 'balanceOf(address)',
+    parameter: tronAddressToHex(address).slice(2).padStart(64, '0'),
+    visible: true,
+  })
+  const hex = Array.isArray(r.constant_result) ? r.constant_result[0] : undefined
+  if (r.result?.result === false || typeof hex !== 'string' || !/^[0-9a-f]{64}$/i.test(hex)) {
+    throw new Error(`Couldn't read the ${chain.usdt.symbol} balance on ${chain.networkName} right now.`)
   }
-  return 0n
+  return BigInt('0x' + hex)
+}
+
+/** What the chain charges (sun): per unit of energy, per byte of bandwidth; plus the account-creation fees. */
+interface TronPrices {
+  energySun: bigint
+  bandwidthSun: bigint
+  createAccountSun: bigint
+}
+const PRICE_TTL_MS = 10 * 60_000
+const priceCache = new Map<string, { at: number; p: TronPrices }>()
+
+/** Forget the cached chain prices (tests; a parameter change shows up within 10 minutes anyway). */
+export function clearTronPriceCache(): void {
+  priceCache.clear()
+}
+
+/** Live chain parameters (cached 10 min); the old code assumed 420 sun per energy unit, the chain charges 100. */
+async function tronPrices(chain: TronChainConfig): Promise<TronPrices> {
+  const hit = priceCache.get(chain.id)
+  if (hit !== undefined && Date.now() - hit.at < PRICE_TTL_MS) return hit.p
+  const r = await tronCall<{ chainParameter?: { key?: string; value?: number }[] }>(chain, '/wallet/getchainparameters')
+  const param = (k: string): bigint | null => {
+    const v = r.chainParameter?.find((x) => x.key === k)?.value
+    return typeof v === 'number' && Number.isSafeInteger(v) && v >= 0 ? BigInt(v) : null
+  }
+  const energySun = param('getEnergyFee')
+  const bandwidthSun = param('getTransactionFee')
+  if (energySun === null || bandwidthSun === null || energySun === 0n) {
+    throw new Error(`Couldn't read the ${chain.networkName} network's fees right now.`)
+  }
+  const createAccountSun =
+    (param('getCreateNewAccountFeeInSystemContract') ?? 1_000_000n) + (param('getCreateAccountFee') ?? 100_000n)
+  const p = { energySun, bandwidthSun, createAccountSun }
+  priceCache.set(chain.id, { at: Date.now(), p })
+  return p
+}
+
+/** The account's spare bandwidth (free + staked) and energy right now. */
+async function tronFreeResources(chain: TronChainConfig, address: string): Promise<{ bandwidth: bigint; energy: bigint }> {
+  const r = await tronCall<{
+    freeNetLimit?: number
+    freeNetUsed?: number
+    NetLimit?: number
+    NetUsed?: number
+    EnergyLimit?: number
+    EnergyUsed?: number
+  }>(chain, '/wallet/getaccountresource', { address, visible: true })
+  const n = (v: number | undefined) => BigInt(typeof v === 'number' && Number.isSafeInteger(v) && v > 0 ? v : 0)
+  const spare = (limit: number | undefined, used: number | undefined) => {
+    const d = n(limit) - n(used)
+    return d > 0n ? d : 0n
+  }
+  return {
+    bandwidth: spare(r.freeNetLimit, r.freeNetUsed) + spare(r.NetLimit, r.NetUsed),
+    energy: spare(r.EnergyLimit, r.EnergyUsed),
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -300,6 +447,8 @@ export type TronContractType =
 
 export interface DecodedTronTx {
   expiration: bigint
+  /** when the node built it (unix ms, the node's clock): expiration − timestamp is the transaction's window */
+  timestamp: bigint
   feeLimit: bigint
   contracts: {
     type: TronContractType
@@ -456,7 +605,7 @@ function decodeResource(v: bigint): 'BANDWIDTH' | 'ENERGY' {
 /** Decode protocol.Transaction.raw (the exact bytes that get signed). */
 export function decodeTronRawTx(rawHex: string): DecodedTronTx {
   const fields = readFields(hexToBytes(rawHex))
-  const out: DecodedTronTx = { expiration: 0n, feeLimit: 0n, contracts: [] }
+  const out: DecodedTronTx = { expiration: 0n, timestamp: 0n, feeLimit: 0n, contracts: [] }
   // protocol.Transaction.raw: 1 ref_block_bytes, 3 ref_block_num,
   // 4 ref_block_hash, 8 expiration, 11 contract (repeated), 14 timestamp,
   // 18 fee_limit. Anything else — data/memo(10), scripts(12), auths(9) — is
@@ -473,6 +622,7 @@ export function decodeTronRawTx(rawHex: string): DecodedTronTx {
     if (TOP_SPEC[f.num] !== f.wire || seen.has(f.num)) throw new Error(UNEXPECTED)
     seen.add(f.num)
     if (f.num === 8) out.expiration = f.varint ?? 0n
+    if (f.num === 14) out.timestamp = f.varint ?? 0n
     if (f.num === 18) out.feeLimit = f.varint ?? 0n
   }
   return out
@@ -501,9 +651,13 @@ export function assertTronEnvelope(decoded: DecodedTronTx, feeLimit: bigint): vo
     decoded.expiration <= BigInt(now - TRON_MAX_EXPIRATION_MS) ||
     decoded.expiration > BigInt(now + TRON_MAX_EXPIRATION_MS)
   ) {
-    throw new Error(UNEXPECTED)
+    // most often this device's clock, so say so (bug audit 2026-10-27, BM3)
+    throw new Error(CLOCK_OR_NODE)
   }
 }
+
+const CLOCK_OR_NODE =
+  "The transaction's expiry is more than 10 minutes away from this device's clock. If the clock is wrong, set it to update automatically and try again; otherwise the network node is misbehaving. Nothing was signed."
 
 // ---------------------------------------------------------------------------
 // Sending.
@@ -522,6 +676,8 @@ export interface PreparedTronSend {
   feeLimitSun: bigint
   /** true when the recipient account does not exist yet (TRX burns ~1.1 extra) */
   createsAccount: boolean
+  /** the recipient is a smart contract: what it receives is lost unless it was built to hold it */
+  recipientIsContract?: boolean
   /** the exact bytes to sign (verified by our own decoder) */
   rawDataHex: string
   /** verbatim node response pieces needed to broadcast */
@@ -529,7 +685,17 @@ export interface PreparedTronSend {
   txID: string
   /** the transaction's own expiration (unix ms), from the verified bytes */
   expiration: number
+  /** when the node built it (unix ms), from the verified bytes; 0 when absent */
+  timestamp: number
 }
+
+/**
+ * How long a reviewed TRON transaction stays confirmable: the node builds it
+ * to expire a minute after it was made, so a review left open longer is
+ * built again before it is signed instead of failing as expired (bug audit
+ * 2026-10-27, BL32).
+ */
+export const TRON_REVIEW_FRESH_MS = 45_000
 
 /** True once the node knows this transaction (pool or chain). A failed call throws. */
 export async function tronTxSeen(chain: TronChainConfig, txid: string): Promise<boolean> {
@@ -546,6 +712,12 @@ export async function tronTxSeen(chain: TronChainConfig, txid: string): Promise<
 export async function assertNoTronInFlight(chain: TronChainConfig): Promise<void> {
   const block = await tronInFlightBlock(chain.id, (txid) => tronTxSeen(chain, txid))
   if (block === null) return
+  if (block.reason === 'landed') {
+    throw new EarlierSendLanded(
+      block.entry,
+      `Your transaction from ${agoText(block.entry.ts)} (to ${block.entry.to.slice(0, 8)}…) on ${chain.networkName}`,
+    )
+  }
   throw new Error(
     block.reason === 'pending'
       ? `A transaction from ${agoText(block.entry.ts)} may still go through — its window hasn't closed. Wait a few minutes, then try again; sending now could pay twice.`
@@ -556,12 +728,15 @@ export async function assertNoTronInFlight(chain: TronChainConfig): Promise<void
 const MISMATCH =
   'The transaction the network node returned does not match your request — refusing to sign it. Nothing was sent and your coins are untouched.'
 
-/** ~0.27 TRX: 268 bandwidth bytes when free bandwidth is spent. */
-const TRX_BANDWIDTH_FEE_SUN = 270_000n
-/** ~1.1 TRX burned when a transfer must create the recipient account. */
-const NEW_ACCOUNT_FEE_SUN = 1_100_000n
-/** fee_limit cap for USDT sends: 30 TRX, sane ceiling for energy spikes. */
-const USDT_FEE_LIMIT_SUN = 30_000_000n
+/** Bandwidth a plain TRX transfer uses (bytes). */
+const TRX_TRANSFER_BYTES = 270n
+/** Bandwidth a USDT transfer uses (bytes). */
+const USDT_TRANSFER_BYTES = 350n
+/** Energy assumed when the free estimate call fails: a transfer to a fresh holder, the costly case. */
+const USDT_ENERGY_FALLBACK = 131_000n
+/** fee_limit floor and ceiling for USDT sends (the limit itself is sized from the estimate). */
+const USDT_FEE_LIMIT_MIN_SUN = 30_000_000n
+const USDT_FEE_LIMIT_MAX_SUN = 150_000_000n
 
 interface CreateTxResult {
   raw_data?: unknown
@@ -581,26 +756,53 @@ export async function prepareTronSend(
   key: TronKey,
   asset: TronAsset,
   to: string,
-  amount: bigint,
+  requested: bigint,
+  /** sendMax: everything (TRX: after this send's own network costs); `requested` is ignored (BL33) */
+  opts?: { sendMax?: boolean },
 ): Promise<PreparedTronSend> {
+  const sendMax = opts?.sendMax === true
+  let amount = requested
   if (!isValidTronAddress(to)) {
     throw new Error(`"${to}" is not a valid TRON address (they start with T).`)
   }
   if (to === key.address) {
     throw new Error('That is your own address — sending to yourself only burns fees.')
   }
-  if (amount <= 0n) throw new Error('Enter an amount to send.')
+  // Where nothing comes back: the zero address, and the USDT contract itself
+  // (tokens sent to their own contract are stuck there for good; bug audit
+  // 2026-10-27, BM23)
+  if (tronAddressToHex(to).toLowerCase() === '41' + '0'.repeat(40)) {
+    throw new Error('That is the zero address. Anything sent there is lost for good.')
+  }
+  if (to === chain.usdt.contract) {
+    throw new Error(`That is the ${chain.usdt.symbol} token contract itself, not a wallet. Anything sent there is lost for good.`)
+  }
+  if (!sendMax && amount <= 0n) throw new Error('Enter an amount to send.')
   await assertNoTronInFlight(chain)
 
-  const [balance, usdtBalance, toAccount] = await Promise.all([
+  const [balance, usdtBalance, toAccount, prices, free] = await Promise.all([
     getTronBalance(chain, key.address),
     asset === 'usdt' ? getTronUsdtBalance(chain, key.address) : Promise.resolve(0n),
     tronCall<GetAccountResult>(chain, '/wallet/getaccount', { address: to, visible: true }),
+    tronPrices(chain),
+    tronFreeResources(chain, key.address),
   ])
   const createsAccount = toAccount.address === undefined
+  const recipientIsContract = toAccount.type === 'Contract'
 
   if (asset === 'trx') {
-    const feeEstimate = TRX_BANDWIDTH_FEE_SUN + (createsAccount ? NEW_ACCOUNT_FEE_SUN : 0n)
+    // Creating the recipient's account burns the creation fees instead of
+    // bandwidth; otherwise bandwidth is free while the account has some
+    // spare (free daily or staked), and burned at the chain's price if not.
+    const feeEstimate = createsAccount
+      ? prices.createAccountSun
+      : free.bandwidth >= TRX_TRANSFER_BYTES
+        ? 0n
+        : TRX_TRANSFER_BYTES * prices.bandwidthSun
+    if (sendMax) {
+      amount = balance - feeEstimate
+      if (amount <= 0n) throw new Error(`Nothing to send after the ~${formatTron(feeEstimate)} TRX network cost.`)
+    }
     if (amount + feeEstimate > balance) {
       throw new Error(
         `Insufficient TRX: amount plus ~${formatTron(feeEstimate)} TRX in network costs exceeds your ${formatTron(balance)} TRX.`,
@@ -634,14 +836,20 @@ export async function prepareTronSend(
       estimatedFeeSun: feeEstimate,
       feeLimitSun: 0n,
       createsAccount,
+      recipientIsContract,
       rawDataHex: r.raw_data_hex,
       rawData: r.raw_data,
       txID: verifyTxId(r.raw_data_hex, r.txID),
       expiration: Number(decoded.expiration),
+      timestamp: Number(decoded.timestamp),
     }
   }
 
   // USDT: build the calldata ourselves — transfer(address,uint256).
+  if (sendMax) {
+    amount = usdtBalance
+    if (amount <= 0n) throw new Error(`There is no ${chain.usdt.symbol} to send.`)
+  }
   if (amount > usdtBalance) {
     throw new Error(
       `Insufficient ${chain.usdt.symbol}: you have ${formatTronUsdt(chain, amount > usdtBalance ? usdtBalance : amount)} ${chain.usdt.symbol}.`,
@@ -651,27 +859,55 @@ export async function prepareTronSend(
   const param = toHex20.padStart(64, '0') + amount.toString(16).padStart(64, '0')
   const calldata = 'a9059cbb' + param
 
-  // Estimate energy with a constant (free, read-only) call first.
-  let estimatedFeeSun = 15_000_000n // honest default: ~15 TRX
+  // Energy from a free test run of the transfer. A run the contract refuses
+  // would fail on chain and still burn TRX: refuse it now. If the test run
+  // can't be made at all, assume the costly case (a fresh recipient).
+  let energy = USDT_ENERGY_FALLBACK
+  let est: ConstantResult | null = null
   try {
-    const est = await tronCall<{ energy_used?: number }>(chain, '/wallet/triggerconstantcontract', {
+    est = await tronCall<ConstantResult>(chain, '/wallet/triggerconstantcontract', {
       owner_address: key.address,
       contract_address: chain.usdt.contract,
       function_selector: 'transfer(address,uint256)',
       parameter: param,
       visible: true,
     })
-    if (typeof est.energy_used === 'number' && est.energy_used > 0) {
-      // energy price 420 sun/unit (chain parameter; stable for years)
-      estimatedFeeSun = BigInt(est.energy_used) * 420n
-    }
   } catch {
-    // estimation is best-effort; the fee_limit still caps the worst case
+    est = null
   }
+  if (est !== null) {
+    const ret = est.transaction?.ret?.[0]?.ret
+    if (est.result?.result === false || (ret !== undefined && ret !== 'SUCCESS')) {
+      throw new Error(
+        `The ${chain.usdt.symbol} contract refused this transfer in a test run, so it would fail on the network and still cost TRX. Nothing was sent.`,
+      )
+    }
+    if (typeof est.energy_used === 'number' && Number.isSafeInteger(est.energy_used) && est.energy_used > 0) {
+      energy = BigInt(est.energy_used)
+    }
+  }
+  // TRX burns only for the energy and bandwidth the account doesn't have
+  // spare (staking for energy makes USDT sends cheap, often free), at the
+  // chain's own prices (bug audit 2026-10-27, BH3: the old code charged 420
+  // sun per energy unit when the chain charges 100, and ignored staking).
+  const energyShort = energy > free.energy ? energy - free.energy : 0n
+  const energyBurn = energyShort * prices.energySun
+  const bandwidthBurn = free.bandwidth >= USDT_TRANSFER_BYTES ? 0n : USDT_TRANSFER_BYTES * prices.bandwidthSun
+  const estimatedFeeSun = energyBurn + bandwidthBurn
+  // fee_limit caps the TRX burned for energy: half again the estimate, never
+  // below 30 TRX; past the ceiling the network is abnormally expensive
+  const sized = (energyBurn * 3n + 1n) / 2n
+  if (sized > USDT_FEE_LIMIT_MAX_SUN) {
+    throw new Error(
+      `Sending ${chain.usdt.symbol} would cost about ${formatTron(estimatedFeeSun)} TRX in network fees right now, which is unusually high. Try again later.`,
+    )
+  }
+  const feeLimitSun = sized > USDT_FEE_LIMIT_MIN_SUN ? sized : USDT_FEE_LIMIT_MIN_SUN
   if (balance < estimatedFeeSun) {
     throw new Error(
-      `Sending ${chain.usdt.symbol} burns TRX for energy (~${formatTron(estimatedFeeSun)} TRX now). ` +
-        `You have ${formatTron(balance)} TRX — top up a little TRX first.`,
+      `Sending ${chain.usdt.symbol} burns about ${formatTron(estimatedFeeSun)} TRX in network fees now. ` +
+        `You have ${formatTron(balance)} TRX — top up a little TRX first` +
+        (free.energy > 0n ? '.' : ', or stake TRX for energy to make USDT sends cheaper.'),
     )
   }
 
@@ -683,7 +919,7 @@ export async function prepareTronSend(
       contract_address: chain.usdt.contract,
       function_selector: 'transfer(address,uint256)',
       parameter: param,
-      fee_limit: Number(USDT_FEE_LIMIT_SUN),
+      fee_limit: Number(feeLimitSun),
       call_value: 0,
       visible: true,
     },
@@ -691,7 +927,7 @@ export async function prepareTronSend(
   const tx = r.transaction
   if (!tx?.raw_data_hex) throw new Error(MISMATCH)
   const decoded = decodeTronRawTx(tx.raw_data_hex)
-  assertTronEnvelope(decoded, USDT_FEE_LIMIT_SUN)
+  assertTronEnvelope(decoded, feeLimitSun)
   const c = decoded.contracts[0]
   if (
     decoded.contracts.length !== 1 ||
@@ -714,13 +950,104 @@ export async function prepareTronSend(
     to,
     amount,
     estimatedFeeSun,
-    feeLimitSun: USDT_FEE_LIMIT_SUN,
+    feeLimitSun,
     createsAccount,
+    recipientIsContract,
     rawDataHex: tx.raw_data_hex,
     rawData: tx.raw_data,
     txID: verifyTxId(tx.raw_data_hex, tx.txID),
     expiration: Number(decoded.expiration),
+    timestamp: Number(decoded.timestamp),
   }
+}
+
+/** The exact body a TRON broadcast posts: kept so "Send again" re-sends the SAME signed transaction. */
+export interface TronBroadcastBody {
+  raw_data: unknown
+  raw_data_hex: string
+  txID: string
+  signature: string[]
+  visible: true
+}
+
+/**
+ * A broadcast with no definite answer: it may have gone out. Carries the
+ * signed body, so the UI can re-send the same transaction (which can't pay
+ * twice) instead of building a new one (which could).
+ */
+export class TronBroadcastError extends Error {
+  readonly body: TronBroadcastBody
+  constructor(message: string, body: TronBroadcastBody) {
+    super(message)
+    this.name = 'TronBroadcastError'
+    this.body = body
+  }
+}
+
+/** The attempt's window closed and the chain never saw it: it can't land, so a new send is safe. */
+export class TronExpiredError extends Error {
+  constructor() {
+    super('That attempt expired on the network without going through. You can send again.')
+    this.name = 'TronExpiredError'
+  }
+}
+
+/** Extra hold beyond the transaction's own window, on this device's clock. */
+const TRON_HOLD_MARGIN_MS = 30_000
+
+function nodeMessage(r: { message?: string; code?: string }): string {
+  let detail = r.message ?? r.code ?? 'the node rejected the transaction'
+  try {
+    // node messages arrive hex-encoded
+    detail = new TextDecoder().decode(hexToBytes(detail))
+  } catch {
+    // keep as-is
+  }
+  return detail
+}
+
+/**
+ * Post a signed TRON transaction: the one path for a first broadcast and a
+ * resend (bug audit 2026-10-27, BH1). Accepted, or DUP_TRANSACTION (the node
+ * already holds it — a lost answer to an earlier try), is success. An expiry
+ * error asks the chain whether it landed before calling it dead. Any other
+ * answer is a refusal: nothing was taken, the record goes. No answer at all:
+ * the record stays, marked failed, and the error carries the body to resend.
+ */
+async function postTronBroadcast(
+  chain: TronChainConfig,
+  body: TronBroadcastBody,
+  entry: PendingTron | undefined,
+): Promise<string> {
+  let r: { result?: boolean; code?: string; message?: string }
+  try {
+    r = await tronCall<{ result?: boolean; code?: string; message?: string }>(chain, '/wallet/broadcasttransaction', body)
+  } catch {
+    if (entry !== undefined) markPendingFailed(entry)
+    throw new TronBroadcastError(
+      "The network didn't confirm it received this transaction. It may still go through.",
+      body,
+    )
+  }
+  if (r.result === true || r.code === 'DUP_TRANSACTION') return body.txID
+  const detail = nodeMessage(r)
+  if (r.code === 'TRANSACTION_EXPIRATION_ERROR' || /expired/i.test(detail)) {
+    const seen = await tronTxSeen(chain, body.txID).catch(() => null)
+    if (seen === true) return body.txID
+    if (seen === false) {
+      if (entry !== undefined) dropPending(entry)
+      throw new TronExpiredError()
+    }
+    if (entry !== undefined) markPendingFailed(entry)
+    throw new TronBroadcastError(
+      "The transaction's network window closed, and the wallet couldn't ask whether it landed first.",
+      body,
+    )
+  }
+  // The node answered with a rejection, so nothing was taken: the record
+  // would only block the user for nothing.
+  if (entry !== undefined) dropPending(entry)
+  throw new Error(`The network refused this transaction: ${detail}. Nothing was sent.`)
 }
 
 export async function broadcastTronSend(
@@ -729,47 +1056,54 @@ export async function broadcastTronSend(
 ): Promise<string> {
   // txID = sha256(raw bytes) — recomputed at prepare; sign exactly that.
   const digest = hexToBytes(prepared.txID)
-  const entry = {
-    kind: 'tron' as const,
+  // The hold runs on THIS device's clock: the transaction's own window
+  // (expiration − timestamp, both the node's clock) from now, plus a margin
+  // (bug audit 2026-10-27, BM3: comparing the node's expiration with a clock
+  // running fast dropped the record the moment it was written).
+  const windowMs =
+    prepared.timestamp !== undefined && prepared.timestamp > 0
+      ? Math.min(Math.max(prepared.expiration - prepared.timestamp, 0), TRON_MAX_EXPIRATION_MS)
+      : TRON_MAX_EXPIRATION_MS
+  const now = Date.now()
+  const entry: PendingTron = {
+    kind: 'tron',
     chainId: prepared.chain.id,
     txid: prepared.txID,
     to: prepared.to,
     expiration: prepared.expiration,
-    ts: Date.now(),
+    holdUntil: now + windowMs + TRON_HOLD_MARGIN_MS,
+    ts: now,
   }
   // recorded BEFORE the send so even a timed-out attempt leaves a trace
   recordPending(entry)
-  recordSentTo(prepared.chain.id, prepared.to)
   const sig = secp256k1.sign(digest, key.privateKey)
   const signature = bytesToHex(sig.toCompactRawBytes()) + (sig.recovery === 1 ? '01' : '00')
-  const r = await tronCall<{ result?: boolean; code?: string; message?: string }>(
-    prepared.chain,
-    '/wallet/broadcasttransaction',
-    {
-      raw_data: prepared.rawData,
-      raw_data_hex: prepared.rawDataHex,
-      txID: prepared.txID,
-      signature: [signature],
-      visible: true,
-    },
-  )
-  // The node already holds it (a lost answer to an earlier try): that IS success.
-  if (r.result !== true && r.code === 'DUP_TRANSACTION') return prepared.txID
-  if (r.result !== true) {
-    // The node answered with a rejection, so nothing was taken: the record
-    // would only block the user for nothing. (A network failure above threw
-    // before this point and keeps it.)
-    dropPending(entry)
-    let detail = r.message ?? r.code ?? 'the node rejected the transaction'
-    try {
-      // node messages arrive hex-encoded
-      detail = new TextDecoder().decode(hexToBytes(detail))
-    } catch {
-      // keep as-is
-    }
-    throw new Error(`Broadcast failed: ${detail}`)
+  // the send log trusts an address paid, or maybe paid: not one the node
+  // refused, nor an attempt that expired unseen (bug audit 2026-10-27, BL19)
+  try {
+    const txid = await postTronBroadcast(
+      prepared.chain,
+      {
+        raw_data: prepared.rawData,
+        raw_data_hex: prepared.rawDataHex,
+        txID: prepared.txID,
+        signature: [signature],
+        visible: true,
+      },
+      entry,
+    )
+    recordSentTo(prepared.chain.id, prepared.to)
+    return txid
+  } catch (e) {
+    if (e instanceof TronBroadcastError) recordSentTo(prepared.chain.id, prepared.to)
+    throw e
   }
-  return prepared.txID
+}
+
+/** "Send again" after a failed broadcast: the SAME signed transaction, never a new one. */
+export function rebroadcastTron(chain: TronChainConfig, err: TronBroadcastError): Promise<string> {
+  const entry = pendingTron(chain.id).find((p) => p.txid === err.body.txID)
+  return postTronBroadcast(chain, err.body, entry)
 }
 
 // ---------------------------------------------------------------------------
@@ -790,7 +1124,13 @@ interface V1TxContractValue {
   amount?: number
   owner_address?: string
   to_address?: string
+  /** TriggerSmartContract: the contract called and its call data */
+  contract_address?: string
+  data?: string
 }
+
+/** a transaction id as the explorer links expect it; anything else from the API is dropped (BL35) */
+const TRON_TXID = /^[0-9a-f]{64}$/i
 
 interface V1Tx {
   txID?: string
@@ -817,9 +1157,38 @@ export function hexAddrToBase58(hex: string | undefined): string | null {
   }
 }
 
+/**
+ * Recent TRX and USDT transfers. A half that fails (a rate limit, say)
+ * keeps that half's rows from `prev`, so a refresh doesn't empty them (bug
+ * audit 2026-10-27, BM22); both failing is an error. Zero-value transfers
+ * are poisoning bait, not history (BM24).
+ */
+/** A row for this address's own USDT transfer that the chain ran and refused, or null. */
+function failedUsdtSend(chain: TronChainConfig, address: string, t: V1Tx): TronTx | null {
+  const contract = t.raw_data?.contract?.[0]
+  const ret = t.ret?.[0]?.contractRet
+  if (contract?.type !== 'TriggerSmartContract' || ret === undefined || ret === 'SUCCESS') return null
+  const v = contract.parameter?.value
+  const owner = hexAddrToBase58(v?.owner_address) ?? v?.owner_address
+  const target = hexAddrToBase58(v?.contract_address) ?? v?.contract_address
+  if (owner !== address || target !== chain.usdt.contract) return null
+  const m = /^a9059cbb0{24}([0-9a-f]{40})([0-9a-f]{64})$/i.exec(v?.data ?? '')
+  if (m === null) return null
+  return {
+    id: t.txID!,
+    direction: 'out',
+    amount: -BigInt('0x' + m[2]!),
+    asset: 'usdt',
+    time: t.block_timestamp != null ? Math.floor(t.block_timestamp / 1000) : null,
+    counterparty: hexAddrToBase58('41' + m[1]!),
+    failed: true,
+  }
+}
+
 export async function fetchTronHistory(
   chain: TronChainConfig,
   address: string,
+  prev: readonly TronTx[] = [],
 ): Promise<TronTx[]> {
   const [nativeRes, trc20Res] = await Promise.allSettled([
     tronCall<{ data?: V1Tx[] }>(
@@ -831,15 +1200,25 @@ export async function fetchTronHistory(
       `/v1/accounts/${encodeURIComponent(address)}/transactions/trc20?limit=10&contract_address=${chain.usdt.contract}`,
     ),
   ])
+  if (nativeRes.status === 'rejected' && trc20Res.status === 'rejected') throw nativeRes.reason
   const out: TronTx[] = []
   if (nativeRes.status === 'fulfilled') {
     for (const t of nativeRes.value.data ?? []) {
       const contract = t.raw_data?.contract?.[0]
+      if (!t.txID || !TRON_TXID.test(t.txID)) continue
+      // A USDT send that failed on chain (out of energy, say) burned its fee
+      // but moved nothing; TRC-20 history lists only transfers that
+      // happened, so it never showed (bug audit 2026-10-27, BL29)
+      const failedUsdt = failedUsdtSend(chain, address, t)
+      if (failedUsdt !== null) {
+        out.push(failedUsdt)
+        continue
+      }
       if (contract?.type !== 'TransferContract') continue
       const v = contract.parameter?.value
       const from = hexAddrToBase58(v?.owner_address) ?? v?.owner_address ?? null
       const to = hexAddrToBase58(v?.to_address) ?? v?.to_address ?? null
-      if (!t.txID || typeof v?.amount !== 'number') continue
+      if (!t.txID || typeof v?.amount !== 'number' || v.amount <= 0) continue
       const isOut = from === address
       const isIn = to === address
       out.push({
@@ -853,11 +1232,15 @@ export async function fetchTronHistory(
       })
     }
   }
-  if (trc20Res.status === 'fulfilled') {
-    const seen = new Set(out.map((t) => t.id))
+  if (nativeRes.status === 'rejected') out.push(...prev.filter((t) => t.asset === 'trx'))
+  const seen = new Set(out.map((t) => t.id))
+  if (trc20Res.status === 'rejected') {
+    for (const t of prev) if (t.asset === 'usdt' && !seen.has(t.id)) out.push(t)
+  } else {
     for (const t of trc20Res.value.data ?? []) {
-      if (!t.transaction_id || seen.has(t.transaction_id)) continue
+      if (!t.transaction_id || !TRON_TXID.test(t.transaction_id) || seen.has(t.transaction_id)) continue
       if (t.token_info?.address !== chain.usdt.contract) continue
+      if (!/^\d+$/.test(t.value ?? '') || BigInt(t.value ?? '0') === 0n) continue
       const isOut = t.from === address
       out.push({
         id: t.transaction_id,
@@ -889,7 +1272,9 @@ export function formatTronUsdt(chain: TronChainConfig, v: bigint): string {
 export function parseTronScanned(text: string): { address: string } {
   const trimmed = text.trim()
   if (trimmed.length === 0) throw new Error('The scanned code was empty.')
-  const candidate = trimmed.replace(/^tron:/i, '')
+  // "tron:T…?amount=…": the address is what this form takes from it (a
+  // query used to make the whole code read as no address; BL34)
+  const candidate = trimmed.replace(/^tron:(\/\/)?/i, '').split('?')[0]!
   if (isValidTronAddress(candidate)) return { address: candidate }
   if (/^0x/i.test(candidate)) {
     throw new Error("That's an Ethereum-style address — TRON addresses start with T.")
@@ -904,6 +1289,10 @@ export function parseTronScanned(text: string): { address: string } {
 export interface TronUiState {
   balance: bigint | null
   usdtBalance: bigint | null
+  /** TRX staked or unstaking (TronAccountView.staked); undefined until read */
+  staked?: bigint
+  /** the account exists on chain, so it has history even if none is listed */
+  activated?: boolean
   txs: TronTx[]
   loading: boolean
   error: string | null

@@ -1,6 +1,15 @@
 import { useEffect, useRef, useState } from 'react'
 import type { SolChainConfig, SolKey, SolUiState } from '../lib/sol'
-import { formatSol, formatSolUsdc, rebroadcastSol, SolBroadcastError, SolExpiredError, solTxSeen } from '../lib/sol'
+import {
+  formatSol,
+  formatSolUsdc,
+  rebroadcastSol,
+  SOL_REVIEW_FRESH_MS,
+  SolBroadcastError,
+  SolExpiredError,
+  SOL_LANDED_FAILED,
+  solTxStatus,
+} from '../lib/sol'
 import type { MarketGap, PreparedSwap, SwapDirection, SwapQuote } from '../lib/solswap'
 import {
   broadcastSwap,
@@ -11,11 +20,13 @@ import {
   SWAP_SLIPPAGE_BPS,
 } from '../lib/solswap'
 import { evmToUsd } from '../lib/units'
-import { formatUsd } from '../lib/format'
+import { formatTypedAmount, formatUsd, readTypedAmount } from '../lib/format'
 import Modal from './Modal'
 import CopyButton from './CopyButton'
 import { IconBack, IconCheck, IconExternal, IconWarning, Spinner } from './Icons'
 import { errMessage } from './ui'
+import { EarlierSendLanded, type Pending } from '../lib/pending'
+import PrepareError from './PrepareError'
 
 interface SolSwapModalProps {
   chain: SolChainConfig
@@ -30,14 +41,19 @@ interface SolSwapModalProps {
 type Step =
   | { kind: 'form' }
   | { kind: 'preparing' }
-  | { kind: 'prepare-error'; message: string }
-  | { kind: 'review'; prepared: PreparedSwap }
+  | { kind: 'prepare-error'; message: string; landed?: Pending }
+  | { kind: 'review'; prepared: PreparedSwap; at: number }
   | { kind: 'broadcasting' }
   | { kind: 'success'; signature: string; prepared: PreparedSwap }
   | { kind: 'failed'; message: string; signature?: string; signed?: string; prepared: PreparedSwap }
 
 /** SOL kept back on a MAX swap so fees and a possible token account fit. */
 const MAX_SWAP_SOL_RESERVE = 5_000_000n
+/**
+ * SOL a USDC→SOL swap needs on hand: the network fee and the temporary
+ * wrapped-SOL account's deposit (returned in the same transaction).
+ */
+const USDC_SWAP_SOL_NEEDED = 3_000_000n
 
 export default function SolSwapModal({
   chain,
@@ -58,6 +74,8 @@ export default function SolSwapModal({
   // bumped to fetch a fresh route: after a failed test run, the same quote
   // would rebuild the same failing route for up to 30 s
   const [requote, setRequote] = useState(0)
+  // the reviewed quote outlived its blockhash and was fetched again (BM17)
+  const [expiredNote, setExpiredNote] = useState(false)
 
   const aliveRef = useRef(true)
   useEffect(() => {
@@ -75,40 +93,41 @@ export default function SolSwapModal({
   const fmtOut = (v: bigint) => (solToUsdc ? formatSolUsdc(chain, v) : formatSol(v))
   const inBalance = solToUsdc ? state.balance : state.usdcBalance
 
-  let parsedAmount: bigint | null = null
-  let amountError: string | null = null
-  const trimmed = amountStr.trim()
-  if (trimmed !== '') {
-    if (!/^\d*\.?\d*$/.test(trimmed) || trimmed === '.') {
-      amountError = 'Enter a plain number, like 0.25'
-    } else {
-      const [whole = '0', frac = ''] = trimmed.split('.')
-      if (frac.length > inDecimals) {
-        amountError = `${inSymbol} has at most ${inDecimals} decimal places`
-      } else {
-        parsedAmount = BigInt(whole + frac.padEnd(inDecimals, '0'))
-        if (parsedAmount <= 0n) {
-          parsedAmount = null
-          if (trimmed !== '') amountError = 'Amount must be more than zero'
-        }
-      }
-    }
-  }
+  const typed = readTypedAmount(amountStr, inDecimals, inSymbol, '0.25')
+  const parsedAmount = typed.amount
+  let amountError = typed.error
   const overBalance =
     parsedAmount !== null && inBalance !== null && parsedAmount > inBalance
   if (overBalance && amountError === null) {
     amountError = `You only have ${fmtIn(inBalance ?? 0n)} ${inSymbol}`
   }
+  // The SOL the swap itself needs, checked here: the network refused an
+  // amount it couldn't cover only in simulation, in raw words (bug audit
+  // 2026-10-27, BM21).
+  const solShort =
+    parsedAmount !== null &&
+    state.balance !== null &&
+    (solToUsdc ? parsedAmount + MAX_SWAP_SOL_RESERVE > state.balance : state.balance < USDC_SWAP_SOL_NEEDED)
+  if (solShort && amountError === null) {
+    amountError = solToUsdc
+      ? `Keep about ${formatSol(MAX_SWAP_SOL_RESERVE)} SOL for the network fee and account deposits: you can swap up to ${formatSol(
+          (state.balance ?? 0n) > MAX_SWAP_SOL_RESERVE ? (state.balance ?? 0n) - MAX_SWAP_SOL_RESERVE : 0n,
+        )} SOL.`
+      : `A swap to SOL needs about ${formatSol(USDC_SWAP_SOL_NEEDED)} SOL on hand for the network fee and a temporary account deposit (returned in the same swap).`
+  }
 
   // Live quote, debounced; a sequence guard keeps stale replies from landing.
+  // The sequence moves on first, so a quote still in flight for an amount
+  // that was since cleared or refused can't land on the form (bug audit
+  // 2026-10-27, BM20).
   useEffect(() => {
+    const seq = ++quoteSeqRef.current
     setQuote(null)
     setQuoteError(null)
-    if (parsedAmount === null || overBalance) {
+    if (parsedAmount === null || overBalance || solShort) {
       setQuoteLoading(false)
       return
     }
-    const seq = ++quoteSeqRef.current
     setQuoteLoading(true)
     const timer = setTimeout(() => {
       getSwapQuote(chain, direction, parsedAmount, solKey.address)
@@ -141,11 +160,26 @@ export default function SolSwapModal({
   // honest all the way to the review screen (audit 2026-10-26, M8). The
   // review checks again: a stale quote is rebuilt, and a failed route is
   // re-routed, after the form's check, so the route prepared can differ.
-  const gapOf = (inAmount: bigint, outAmount: bigint) => {
-    const gap = swapMarketGap(direction, inAmount, outAmount, price, usdcPrice, chain.usdc.decimals)
+  const gapOf = (d: SwapDirection, inAmount: bigint, outAmount: bigint) => {
+    const gap = swapMarketGap(d, inAmount, outAmount, price, usdcPrice, chain.usdc.decimals)
     return gap !== null && gap.pct > MARKET_GAP_WARN_PCT ? gap : null
   }
-  const ackKey = (inAmount: bigint, outAmount: bigint) => `${direction}:${inAmount}:${outAmount}`
+  const ackKey = (d: SwapDirection, inAmount: bigint, outAmount: bigint) => `${d}:${inAmount}:${outAmount}`
+  // A swap's own direction names its sides — on the review and after it, the
+  // form's toggle may say otherwise (BM20).
+  const sides = (d: SwapDirection) => {
+    const fromSol = d === 'sol-to-usdc'
+    return {
+      fromSol,
+      inSymbol: fromSol ? 'SOL' : chain.usdc.symbol,
+      outSymbol: fromSol ? chain.usdc.symbol : 'SOL',
+      fmtIn: (v: bigint) => (fromSol ? formatSol(v) : formatSolUsdc(chain, v)),
+      fmtOut: (v: bigint) => (fromSol ? formatSolUsdc(chain, v) : formatSol(v)),
+    }
+  }
+  const rs = sides(
+    step.kind === 'review' || step.kind === 'success' || step.kind === 'failed' ? step.prepared.direction : direction,
+  )
   const outPrice = solToUsdc ? usdcPrice : price
   const outUsd =
     quote !== null && outPrice !== undefined
@@ -161,19 +195,21 @@ export default function SolSwapModal({
       else next.delete(key)
       return next
     })
-  const badRate = quote !== null ? gapOf(quote.inAmount, quote.outAmount) : null
-  const rateAcked = quote !== null && rateAcks.has(ackKey(quote.inAmount, quote.outAmount))
-  const reviewGap = step.kind === 'review' ? gapOf(step.prepared.inAmount, step.prepared.outAmount) : null
+  const badRate = quote !== null ? gapOf(quote.direction, quote.inAmount, quote.outAmount) : null
+  const rateAcked = quote !== null && rateAcks.has(ackKey(quote.direction, quote.inAmount, quote.outAmount))
+  const reviewGap =
+    step.kind === 'review' ? gapOf(step.prepared.direction, step.prepared.inAmount, step.prepared.outAmount) : null
   const reviewAcked =
-    step.kind === 'review' && rateAcks.has(ackKey(step.prepared.inAmount, step.prepared.outAmount))
-  const rateWarning = (gap: MarketGap, acked: boolean, key: string) => (
+    step.kind === 'review' &&
+    rateAcks.has(ackKey(step.prepared.direction, step.prepared.inAmount, step.prepared.outAmount))
+  const rateWarning = (gap: MarketGap, acked: boolean, key: string, d: SwapDirection) => (
     <div className="warning-box" role="alert">
       <IconWarning size={20} />
       <div>
         <strong>This quote is {gap.pct.toFixed(1)}% below the market price</strong>
         <p>
-          You would get about {formatUsd(gap.outUsd)} of {outSymbol} for {formatUsd(gap.inUsd)} of{' '}
-          {inSymbol}, by the wallet&rsquo;s own price feed. A route can lag the market for a
+          You would get about {formatUsd(gap.outUsd)} of {sides(d).outSymbol} for {formatUsd(gap.inUsd)} of{' '}
+          {sides(d).inSymbol}, by the wallet&rsquo;s own price feed. A route can lag the market for a
           moment, but a gap this size usually means the quote is wrong. Try again in a minute
           before accepting it.
         </p>
@@ -196,18 +232,26 @@ export default function SolSwapModal({
         ? inBalance - MAX_SWAP_SOL_RESERVE
         : 0n
       : inBalance
-    setAmountStr(fmtIn(max))
+    setAmountStr(formatTypedAmount(max, inDecimals))
   }
 
   const handleContinue = () => {
-    if (quote === null) return
+    // only the quote for what the form says now (BM20)
+    if (quote === null || quote.direction !== direction || quote.inAmount !== parsedAmount) return
+    setExpiredNote(false)
     setStep({ kind: 'preparing' })
     prepareSwap(chain, solKey.address, quote)
       .then((prepared) => {
-        if (aliveRef.current) setStep({ kind: 'review', prepared })
+        if (aliveRef.current) setStep({ kind: 'review', prepared, at: Date.now() })
       })
       .catch((e: unknown) => {
-        if (aliveRef.current) setStep({ kind: 'prepare-error', message: errMessage(e) })
+        if (aliveRef.current) {
+          setStep({
+            kind: 'prepare-error',
+            message: errMessage(e),
+            landed: e instanceof EarlierSendLanded ? e.entry : undefined,
+          })
+        }
       })
   }
 
@@ -264,12 +308,16 @@ export default function SolSwapModal({
     }
     const signature = failed.signature
     setRetryChecking(true)
-    solTxSeen(chain, signature)
-      .then((seen) => {
+    solTxStatus(chain, signature)
+      .then((status) => {
         if (!aliveRef.current) return
-        if (seen) {
+        if (status === 'ok') {
           onSwapped()
           setStep({ kind: 'success', signature, prepared: failed.prepared })
+        } else if (status === 'failed') {
+          // it landed but failed there: not a success (BL25)
+          onSwapped()
+          setStep({ ...failed, kind: 'failed', message: SOL_LANDED_FAILED, signature: undefined, signed: undefined })
         } else {
           setStep({ kind: 'form' })
         }
@@ -409,7 +457,14 @@ export default function SolSwapModal({
 
           {badRate !== null &&
             quote !== null &&
-            rateWarning(badRate, rateAcked, ackKey(quote.inAmount, quote.outAmount))}
+            rateWarning(badRate, rateAcked, ackKey(quote.direction, quote.inAmount, quote.outAmount), quote.direction)}
+
+          {expiredNote && (
+            <p className="text-tertiary">
+              The quote you reviewed expired before you confirmed it, so here is a fresh one. Check it
+              and continue.
+            </p>
+          )}
 
           <button
             type="submit"
@@ -433,26 +488,16 @@ export default function SolSwapModal({
       )}
 
       {step.kind === 'prepare-error' && (
-        <div className="stack">
-          <div className="warning-box" role="alert">
-            <IconWarning size={20} />
-            <div>
-              <strong>Swap not signed</strong>
-              <p>{step.message}</p>
-            </div>
-          </div>
-          <button
-            type="button"
-            className="btn btn-secondary"
-            onClick={() => {
-              setStep({ kind: 'form' })
-              setRequote((n) => n + 1)
-            }}
-          >
-            <IconBack size={16} />
-            Back
-          </button>
-        </div>
+        <PrepareError
+          title="Swap not signed"
+          message={step.message}
+          landed={step.landed}
+          onBack={() => {
+            setStep({ kind: 'form' })
+            setRequote((n) => n + 1)
+          }}
+          onSendAgain={handleContinue}
+        />
       )}
 
       {step.kind === 'review' && (
@@ -464,21 +509,21 @@ export default function SolSwapModal({
             <div className="review-row">
               <dt>You pay</dt>
               <dd className="tnum">
-                {fmtIn(step.prepared.inAmount)} {inSymbol}
+                {rs.fmtIn(step.prepared.inAmount)} {rs.inSymbol}
               </dd>
             </div>
             <div className="review-row">
               <dt>You receive</dt>
               <dd className="tnum">
-                {solToUsdc
-                  ? `${formatSolUsdc(chain, step.prepared.simulatedUsdcDelta)} ${outSymbol}`
-                  : `${formatSol(step.prepared.simulatedSolDelta)} ${outSymbol}`}
+                {rs.fromSol
+                  ? `${formatSolUsdc(chain, step.prepared.simulatedUsdcDelta)} ${rs.outSymbol}`
+                  : `${formatSol(step.prepared.simulatedSolDelta)} ${rs.outSymbol}`}
               </dd>
             </div>
             <div className="review-row">
               <dt>Guaranteed minimum</dt>
               <dd className="tnum">
-                {fmtOut(step.prepared.minOutAmount)} {outSymbol}
+                {rs.fmtOut(step.prepared.minOutAmount)} {rs.outSymbol}
               </dd>
             </div>
             <div className="review-row">
@@ -496,7 +541,19 @@ export default function SolSwapModal({
               <dt>Network fee</dt>
               <dd className="tnum">{formatSol(step.prepared.feeLamports)} SOL</dd>
             </div>
+            {step.prepared.accountDepositLamports > 0n && (
+              <div className="review-row">
+                <dt>USDC account deposit (one-time)</dt>
+                <dd className="tnum">{formatSol(step.prepared.accountDepositLamports)} SOL</dd>
+              </div>
+            )}
           </dl>
+          {step.prepared.accountDepositLamports > 0n && (
+            <p className="text-tertiary">
+              This is your first USDC on Solana, so the swap also opens your USDC account: a deposit
+              the network requires, paid once in SOL.
+            </p>
+          )}
           {step.prepared.swapFeeBps > 0 && (
             <p className="text-tertiary">
               Kailah keeps {step.prepared.swapFeeBps / 100}% of each swap, paid in USDC; Jupiter
@@ -514,7 +571,12 @@ export default function SolSwapModal({
             </p>
           )}
           {reviewGap !== null &&
-            rateWarning(reviewGap, reviewAcked, ackKey(step.prepared.inAmount, step.prepared.outAmount))}
+            rateWarning(
+              reviewGap,
+              reviewAcked,
+              ackKey(step.prepared.direction, step.prepared.inAmount, step.prepared.outAmount),
+              step.prepared.direction,
+            )}
           <div className="btn-row">
             <button type="button" className="btn btn-ghost" onClick={() => setStep({ kind: 'form' })}>
               <IconBack size={16} />
@@ -524,7 +586,16 @@ export default function SolSwapModal({
               type="button"
               className="btn btn-primary"
               disabled={reviewGap !== null && !reviewAcked}
-              onClick={() => handleBroadcast(step.prepared)}
+              onClick={() => {
+                // a review left open past its blockhash gets a fresh quote first (BM17)
+                if (Date.now() - step.at > SOL_REVIEW_FRESH_MS) {
+                  setExpiredNote(true)
+                  setStep({ kind: 'form' })
+                  setRequote((n) => n + 1)
+                  return
+                }
+                handleBroadcast(step.prepared)
+              }}
             >
               Confirm swap
             </button>
@@ -547,8 +618,8 @@ export default function SolSwapModal({
           </div>
           <h3 className="state-title">Swapped</h3>
           <p className="text-secondary tnum">
-            {fmtIn(step.prepared.inAmount)} {inSymbol} → at least{' '}
-            {fmtOut(step.prepared.minOutAmount)} {outSymbol}. Balances update once the
+            {rs.fmtIn(step.prepared.inAmount)} {rs.inSymbol} → at least{' '}
+            {rs.fmtOut(step.prepared.minOutAmount)} {rs.outSymbol}. Balances update once the
             transaction confirms.
           </p>
           <div className="address-block">
@@ -577,11 +648,14 @@ export default function SolSwapModal({
             <div>
               <strong>Swap not completed</strong>
               <p>{step.message}</p>
-              <p>
-                If the network took it before the error, it can still go through for about a
-                minute. &ldquo;Send again&rdquo; re-sends this same transaction, which can&rsquo;t execute
-                twice; the wallet won&rsquo;t build a new one while this attempt could still land.
-              </p>
+              {step.signed !== undefined && (
+                <p>
+                  If the network took it before the error, it can still go through for about a
+                  minute. &ldquo;Send again&rdquo; re-sends this same transaction, which can&rsquo;t
+                  execute twice. Before any new swap, the wallet checks whether this one went
+                  through and tells you if it did.
+                </p>
+              )}
             </div>
           </div>
           <div className="btn-row">

@@ -20,6 +20,7 @@ import { EsploraProvider } from './esplora'
 import { BlockcypherProvider } from './blockcypher'
 import { BitcoreProvider } from './bitcore'
 import { readProviderPref, writeProviderPref } from './providerpref'
+import { storeSession } from './securestore'
 
 // Shell.tsx clears it on erase from providerpref.ts directly (keeping the
 // providers out of the first-load chunk); re-exported for callers of api.ts.
@@ -130,43 +131,48 @@ class FailoverClientImpl implements FailoverClient {
   private strikes: number[] = []
 
   /**
-   * One-time startup probe: race every provider's tip endpoint and start on
-   * the first that answers. Without this, a first load during a primary
-   * outage sends the whole initial scan burst into a dead host and the user
-   * stares at a skeleton while timeouts drain (live incident 2026-08-01).
-   * All-fail → keep the configured order; run()'s failover handles the rest.
+   * One-time startup probe: ask every provider's tip endpoint at once and
+   * start on the first IN THE CONFIGURED ORDER that answers. Without this, a
+   * first load during a primary outage sends the whole initial scan burst
+   * into a dead host and the user stares at a skeleton while timeouts drain
+   * (live incident 2026-08-01). It used to start on whichever answered
+   * FIRST, which made the fastest host the daily driver over the configured
+   * order (bug audit 2026-10-27, BL8): blockstream.info, listed last for its
+   * 700-requests-an-hour cap, could win. All fail → keep the order as it is;
+   * run()'s failover handles the rest.
    */
   private probePromise: Promise<void> | null = null
 
   private ensureProbed(): Promise<void> {
     this.probePromise ??= (async () => {
       // A chain with one regular provider (LTC, testnet4) has no choice to
-      // make — skip the probe entirely; a backup is never raced (BlockCypher's
-      // hourly budget: every request counts). Dogecoin races BlockCypher and
+      // make — skip the probe entirely; a backup is never asked (BlockCypher's
+      // hourly budget: every request counts). Dogecoin asks BlockCypher and
       // Bitcore: one tip request each per page load.
       const regular = this.providers.map((_, i) => i).filter((i) => !this.isBackup(i))
       if (regular.length < 2) return
-      try {
-        const winner = await Promise.any(
-          regular.map(async (i) => {
-            const p = this.providers[i]!
-            const tip = await Promise.race([
-              p.getTipHeight(),
-              new Promise<never>((_, reject) =>
-                setTimeout(() => reject(new Error('probe timeout')), 3_500),
-              ),
-            ])
-            if (typeof tip !== 'number' || tip <= 0) throw new Error('bad tip')
-            this.lastOkAt[i] = Date.now()
-            return i
-          }),
-        )
-        if (winner !== this.activeIndex && this.persistKey !== undefined) {
-          writeProviderPref(this.persistKey, this.providers[winner].providerName)
+      const session = storeSession()
+      const answered = regular.map(async (i) => {
+        try {
+          const p = this.providers[i]!
+          const tip = await Promise.race([
+            p.getTipHeight(),
+            new Promise<never>((_, reject) => setTimeout(() => reject(new Error('probe timeout')), 3_500)),
+          ])
+          if (typeof tip !== 'number' || tip <= 0) return false
+          this.lastOkAt[i] = Date.now()
+          return true
+        } catch {
+          return false
         }
-        this.activeIndex = winner
-      } catch {
-        // every probe failed — leave order as configured
+      })
+      for (const [k, i] of regular.entries()) {
+        if (!(await answered[k]!)) continue
+        if (i !== this.activeIndex && this.persistKey !== undefined && storeSession() === session) {
+          writeProviderPref(this.persistKey, this.providers[i]!.providerName)
+        }
+        this.activeIndex = i
+        return
       }
     })()
     return this.probePromise
@@ -174,6 +180,13 @@ class FailoverClientImpl implements FailoverClient {
 
   private isBackup(i: number): boolean {
     return this.providers[i]?.backupOnly === true
+  }
+
+  /** whether the last answer came from a backup (the regular providers were failing) */
+  private lastFromBackup = false
+
+  onBackup(): boolean {
+    return this.lastFromBackup
   }
 
   /** Active provider first, then healthy rest, then cooled-down last. */
@@ -219,6 +232,7 @@ class FailoverClientImpl implements FailoverClient {
    * succeeds as the new active one.
    */
   private async run<T>(label: string, op: (p: ProviderApi) => Promise<T>): Promise<T> {
+    const session = storeSession()
     await this.ensureProbed()
     let lastErr: unknown
     const giveUpAt = Date.now() + this.maxWaitMs
@@ -234,6 +248,22 @@ class FailoverClientImpl implements FailoverClient {
       const regularLeft = candidates.some((c) => !this.isBackup(c) && (this.downUntil[c] ?? 0) <= now)
       const eligible = regularLeft ? candidates.filter((c) => !this.isBackup(c)) : candidates
       const i = eligible.find((c) => (this.pauseUntil[c] ?? 0) <= now)
+      // A provider with an hourly budget (BlockCypher) isn't spent to dodge
+      // the active provider's brief pause: wait for the pause instead (bug
+      // audit 2026-10-27, BM6).
+      const a = this.activeIndex
+      const activeWake = this.pauseUntil[a] ?? 0
+      if (
+        i !== undefined &&
+        i !== a &&
+        this.providers[i]?.budgetLimited === true &&
+        eligible.includes(a) &&
+        activeWake > now &&
+        activeWake <= giveUpAt
+      ) {
+        await new Promise((r) => setTimeout(r, activeWake - now))
+        continue
+      }
       if (i === undefined) {
         const wake = Math.min(...eligible.map((c) => this.pauseUntil[c] ?? 0))
         if (wake > giveUpAt) break
@@ -244,10 +274,12 @@ class FailoverClientImpl implements FailoverClient {
       const provider = this.providers[i]
       try {
         const result = await op(provider)
+        this.lastFromBackup = this.isBackup(i)
         if (!this.isBackup(i)) {
           // a backup's success is never remembered: the next request tries
-          // the regular providers first again
-          if (this.activeIndex !== i && this.persistKey !== undefined) {
+          // the regular providers first again. Nor is anything written once
+          // the wallet has locked or been erased since (bug audit BL9).
+          if (this.activeIndex !== i && this.persistKey !== undefined && storeSession() === session) {
             writeProviderPref(this.persistKey, provider.providerName)
           }
           this.activeIndex = i
@@ -263,7 +295,14 @@ class FailoverClientImpl implements FailoverClient {
         const networkLevel = FailoverClientImpl.isNetworkLevel(err)
         const recentlyOk = Date.now() - (this.lastOkAt[i] ?? -Infinity) < FailoverClientImpl.RECENT_OK_MS
         const timeout = networkLevel && FailoverClientImpl.isTimeout(err)
-        const pushBack = burst && (visible429 || (networkLevel && recentlyOk && !(timeout && timedOut.has(i))))
+        // A visible 429 is push-back from any provider (Bitcore's limiter
+        // answers 429 with CORS: it was handled as an outage and sent the
+        // scan to BlockCypher's budget; bug audit 2026-10-27, BM6) except
+        // one with an hourly budget, where a 429 means the hour is spent; a
+        // bare network error counts only from a burst-limited one.
+        const pushBack =
+          (visible429 && provider.budgetLimited !== true) ||
+          (burst && networkLevel && recentlyOk && !(timeout && timedOut.has(i)))
         if (pushBack) {
           if (timeout) timedOut.add(i)
           this.pause(i)

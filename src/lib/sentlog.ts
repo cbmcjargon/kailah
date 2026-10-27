@@ -2,7 +2,8 @@
 // "you've paid this address before" the lookalike-address check trusts.
 //
 // Contract:
-//   recordSentTo(chainKey, address): void      — before a broadcast
+//   recordSentTo(chainKey, address): void      — once a send went out, or may
+//                                                have (never one every node refused)
 //   sentToAddresses(chainKey): string[]         — newest last
 //
 // A transaction history fetched from a data service can be edited by that

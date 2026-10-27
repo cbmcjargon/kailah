@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import type { SolChainConfig, SolKey, SolUiState } from '../lib/sol'
-import { formatSol, rebroadcastSol, SolBroadcastError, SolExpiredError } from '../lib/sol'
+import { formatSol, rebroadcastSol, SOL_REVIEW_FRESH_MS, SolBroadcastError, SolExpiredError } from '../lib/sol'
 import type { PreparedStakeAction, StakeAccountView, ValidatorOption } from '../lib/solstake'
 import {
   broadcastStakeAction,
@@ -11,10 +11,12 @@ import {
   prepareWithdraw,
 } from '../lib/solstake'
 import { evmToUsd } from '../lib/units'
-import { formatUsd, shortAddress } from '../lib/format'
+import { formatCoin, formatUsd, readTypedAmount, shortAddress } from '../lib/format'
 import Modal from './Modal'
 import { IconBack, IconCheck, IconExternal, IconWarning, Spinner } from './Icons'
 import { errMessage } from './ui'
+import { EarlierSendLanded, type Pending } from '../lib/pending'
+import PrepareError from './PrepareError'
 
 interface SolStakeModalProps {
   chain: SolChainConfig
@@ -29,8 +31,15 @@ type Step =
   | { kind: 'list' }
   | { kind: 'form' }
   | { kind: 'preparing' }
-  | { kind: 'prepare-error'; message: string }
-  | { kind: 'review'; prepared: PreparedStakeAction }
+  | { kind: 'prepare-error'; message: string; landed?: Pending }
+  | {
+      kind: 'review'
+      prepared: PreparedStakeAction
+      /** when it was prepared, and how to prepare it again once its blockhash lapses (BM17) */
+      at: number
+      redo: () => Promise<PreparedStakeAction>
+      refreshed?: boolean
+    }
   | { kind: 'broadcasting' }
   | { kind: 'success'; signature: string; prepared: PreparedStakeAction }
   | { kind: 'failed'; message: string; signature?: string; signed?: string; prepared?: PreparedStakeAction }
@@ -64,7 +73,10 @@ export default function SolStakeModal({
     }
   }, [])
 
-  // Validator list + live minimum load once, when the form first opens.
+  // Validator list + live minimum load once, when the form first opens; a
+  // failed load can be tried again from the form (it never retried before,
+  // bug audit 2026-10-27, BL28).
+  const [validatorTry, setValidatorTry] = useState(0)
   useEffect(() => {
     if (step.kind !== 'form' || validators !== null) return
     Promise.all([fetchValidators(chain), getMinimumStake(chain)])
@@ -78,27 +90,11 @@ export default function SolStakeModal({
         if (aliveRef.current) setValidators([])
       })
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [step.kind, chain])
+  }, [step.kind, chain, validatorTry])
 
-  let parsedAmount: bigint | null = null
-  let amountError: string | null = null
-  const trimmed = amountStr.trim()
-  if (trimmed !== '') {
-    if (!/^\d*\.?\d*$/.test(trimmed) || trimmed === '.') {
-      amountError = 'Enter a plain number, like 1.5'
-    } else {
-      const [whole = '0', frac = ''] = trimmed.split('.')
-      if (frac.length > 9) {
-        amountError = 'SOL has at most 9 decimal places'
-      } else {
-        parsedAmount = BigInt(whole + frac.padEnd(9, '0'))
-        if (parsedAmount <= 0n) {
-          parsedAmount = null
-          amountError = 'Amount must be more than zero'
-        }
-      }
-    }
-  }
+  const typed = readTypedAmount(amountStr, 9, 'SOL', '1.5')
+  const parsedAmount = typed.amount
+  let amountError = typed.error
   if (
     parsedAmount !== null &&
     minStake !== null &&
@@ -113,12 +109,18 @@ export default function SolStakeModal({
       ? evmToUsd(parsedAmount, 9, price)
       : null
 
-  const runPrepare = (p: Promise<PreparedStakeAction>) => {
+  const runPrepare = (make: () => Promise<PreparedStakeAction>, refreshed = false) => {
     setStep({ kind: 'preparing' })
-    p.then((prepared) => {
-      if (aliveRef.current) setStep({ kind: 'review', prepared })
+    make().then((prepared) => {
+      if (aliveRef.current) setStep({ kind: 'review', prepared, at: Date.now(), redo: make, refreshed })
     }).catch((e: unknown) => {
-      if (aliveRef.current) setStep({ kind: 'prepare-error', message: errMessage(e) })
+      if (aliveRef.current) {
+        setStep({
+          kind: 'prepare-error',
+          message: errMessage(e),
+          landed: e instanceof EarlierSendLanded ? e.entry : undefined,
+        })
+      }
     })
   }
 
@@ -189,7 +191,7 @@ export default function SolStakeModal({
                     <button
                       type="button"
                       className="btn btn-ghost btn-small"
-                      onClick={() => runPrepare(prepareDeactivate(chain, solKey, a))}
+                      onClick={() => runPrepare(() => prepareDeactivate(chain, solKey, a))}
                     >
                       Unstake
                     </button>
@@ -198,7 +200,7 @@ export default function SolStakeModal({
                     <button
                       type="button"
                       className="btn btn-secondary btn-small"
-                      onClick={() => runPrepare(prepareWithdraw(chain, solKey, a))}
+                      onClick={() => runPrepare(() => prepareWithdraw(chain, solKey, a))}
                     >
                       Withdraw
                     </button>
@@ -222,7 +224,7 @@ export default function SolStakeModal({
           onSubmit={(e) => {
             e.preventDefault()
             if (parsedAmount !== null && chosenVote !== '' && amountError === null) {
-              runPrepare(prepareCreateStake(chain, solKey, parsedAmount, chosenVote))
+              runPrepare(() => prepareCreateStake(chain, solKey, parsedAmount, chosenVote))
             }
           }}
         >
@@ -255,7 +257,17 @@ export default function SolStakeModal({
               </div>
             ) : validators.length === 0 ? (
               <span className="field-hint field-hint-error">
-                Couldn&rsquo;t load the validator list — try again in a minute.
+                Couldn&rsquo;t load the validator list.{' '}
+                <button
+                  type="button"
+                  className="btn btn-ghost btn-small"
+                  onClick={() => {
+                    setValidators(null)
+                    setValidatorTry((n) => n + 1)
+                  }}
+                >
+                  Try again
+                </button>
               </span>
             ) : (
               <>
@@ -308,19 +320,12 @@ export default function SolStakeModal({
       )}
 
       {step.kind === 'prepare-error' && (
-        <div className="stack">
-          <div className="warning-box" role="alert">
-            <IconWarning size={20} />
-            <div>
-              <strong>Couldn&rsquo;t prepare this</strong>
-              <p>{step.message}</p>
-            </div>
-          </div>
-          <button type="button" className="btn btn-secondary" onClick={() => setStep({ kind: 'list' })}>
-            <IconBack size={16} />
-            Back
-          </button>
-        </div>
+        <PrepareError
+          title="Couldn’t prepare this"
+          message={step.message}
+          landed={step.landed}
+          onBack={() => setStep({ kind: 'list' })}
+        />
       )}
 
       {step.kind === 'review' && (
@@ -346,7 +351,7 @@ export default function SolStakeModal({
             {step.prepared.amount > 0n && (
               <div className="review-row">
                 <dt>Amount</dt>
-                <dd className="tnum">{formatSol(step.prepared.amount)} SOL</dd>
+                <dd className="tnum">{formatCoin(step.prepared.amount, 9)} SOL</dd>
               </div>
             )}
             {step.prepared.validator !== null && (
@@ -366,6 +371,12 @@ export default function SolStakeModal({
               <dd className="tnum">{formatSol(step.prepared.feeLamports)} SOL</dd>
             </div>
           </dl>
+          {step.refreshed === true && (
+            <p className="text-tertiary">
+              The earlier version&rsquo;s network window closed before you confirmed it, so the wallet
+              prepared it again. Check it and confirm.
+            </p>
+          )}
           <div className="btn-row">
             <button type="button" className="btn btn-ghost" onClick={() => setStep({ kind: 'list' })}>
               <IconBack size={16} />
@@ -374,7 +385,9 @@ export default function SolStakeModal({
             <button
               type="button"
               className="btn btn-primary"
-              onClick={() => handleBroadcast(step.prepared)}
+              onClick={() =>
+                Date.now() - step.at > SOL_REVIEW_FRESH_MS ? runPrepare(step.redo, true) : handleBroadcast(step.prepared)
+              }
             >
               Confirm
             </button>
@@ -404,10 +417,10 @@ export default function SolStakeModal({
           </h3>
           <p className="text-secondary">
             {step.prepared.kind === 'create'
-              ? `${formatSol(step.prepared.amount)} SOL is delegated — it starts earning with the next epoch.`
+              ? `${formatCoin(step.prepared.amount, 9)} SOL is delegated — it starts earning with the next epoch.`
               : step.prepared.kind === 'deactivate'
                 ? 'Rewards stop at the end of this epoch; the Withdraw button appears once it is out.'
-                : `${formatSol(step.prepared.amount)} SOL is back in your balance.`}
+                : `${formatCoin(step.prepared.amount, 9)} SOL is back in your balance.`}
           </p>
           <a
             className="btn btn-secondary"
@@ -431,11 +444,13 @@ export default function SolStakeModal({
             <div>
               <strong>Not completed</strong>
               <p>{step.message}</p>
-              <p>
-                If the network took it before the error, it can still go through for about a
-                minute. &ldquo;Send again&rdquo; re-sends this same transaction; the wallet
-                won&rsquo;t build a new one while this attempt could still land.
-              </p>
+              {step.signed !== undefined && (
+                <p>
+                  If the network took it before the error, it can still go through for about a
+                  minute. &ldquo;Send again&rdquo; re-sends this same transaction. Before any new
+                  action, the wallet checks whether this one went through and tells you if it did.
+                </p>
+              )}
             </div>
           </div>
           <div className="btn-row">

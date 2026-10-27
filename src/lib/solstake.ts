@@ -21,14 +21,14 @@
 // waiting out the epoch. All of that is stated in the UI, not hidden.
 
 import { sha256 } from '@noble/hashes/sha2'
-import { recordPending } from './pending'
+import { recordPending, type PendingSol } from './pending'
 import { base58 } from '@scure/base'
 import { concatBytes, utf8ToBytes } from '@noble/hashes/utils'
 import * as solLib from 'micro-sol-signer'
 import { formatSol, getSolBalance, solRpc, type SolChainConfig, type SolKey,
   assertNoSolInFlight,
   blockHeightOf,
-  SolBroadcastError,
+  submitSolTx,
 } from './sol'
 
 export const STAKE_PROGRAM = 'Stake11111111111111111111111111111111111111'
@@ -218,7 +218,10 @@ export async function fetchStakeAccounts(
       validator = delegation.voter ?? null
       const act = BigInt(delegation.activationEpoch ?? '0')
       const deact = delegation.deactivationEpoch ?? U64_MAX_DEC
-      if (deact !== U64_MAX_DEC && BigInt(deact) < epoch) state = 'withdrawable'
+      // Deactivated in the epoch it was activated in, a stake never took
+      // effect, and is withdrawable at once (the stake program's rule; it
+      // showed as winding down, bug audit 2026-10-27, BL26).
+      if (deact !== U64_MAX_DEC && (BigInt(deact) < epoch || BigInt(deact) === act)) state = 'withdrawable'
       else if (deact !== U64_MAX_DEC) state = 'deactivating'
       else if (act >= epoch) state = 'activating'
       else state = 'active'
@@ -406,8 +409,12 @@ export async function prepareDeactivate(
 export async function prepareWithdraw(
   chain: SolChainConfig,
   key: SolKey,
-  account: StakeAccountView,
+  shown: StakeAccountView,
 ): Promise<PreparedStakeAction> {
+  // The account as it is now, not as the dashboard last saw it: rewards or a
+  // top-up change its balance, and the epoch may have moved (BL26).
+  const account = (await fetchStakeAccounts(chain, key.address)).find((a) => a.address === shown.address)
+  if (account === undefined) throw new Error('That stake account is no longer there — it may have been withdrawn already.')
   if (account.state !== 'withdrawable') {
     throw new Error(
       'This stake is still cooling down — withdrawing works after the current epoch ends (up to ~2 days).',
@@ -443,19 +450,13 @@ export async function broadcastStakeAction(
   const [txid, signed] = solLib.signTx(key.privateKey, prepared.unsigned)
   // recorded BEFORE the send: a create-stake whose answer is lost must not
   // be rebuilt into a second stake (audit 2026-10-26, L12)
-  recordPending({
+  const entry: PendingSol = {
     kind: 'sol',
     chainId: prepared.chain.id,
     signature: txid,
     ts: Date.now(),
     lastValidBlockHeight: prepared.lastValidBlockHeight,
-  })
-  try {
-    return await solRpc<string>(prepared.chain, 'sendTransaction', [
-      signed,
-      { encoding: 'base64', preflightCommitment: 'confirmed' },
-    ])
-  } catch (e) {
-    throw new SolBroadcastError(e instanceof Error ? e.message : String(e), txid, signed)
   }
+  recordPending(entry)
+  return submitSolTx(prepared.chain, txid, signed, entry)
 }

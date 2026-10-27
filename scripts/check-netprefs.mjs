@@ -16,7 +16,12 @@
 //      chooser's code never value-imports an engine (that would undo the
 //      code split);
 //   F. engineShown: which engine chunks load for a choice, in both modes;
-//   G. netprefs' static ids and labels match the engines' real configs.
+//   G. netprefs' static ids and labels match the engines' real configs;
+//   H. (bug audit 2026-10-27, BM8/BM9) a lookup that failed is "unknown",
+//      never "unused": EVM history that couldn't be read is an error, not an
+//      empty list; a used UTXO address is history; staked or unstaking TRX
+//      is funds and an activated TRON account is history; the portfolio
+//      counts staked SOL/TRX and a gas coin without its token's price.
 const store = new Map()
 globalThis.localStorage = {
   getItem: (k) => (store.has(k) ? store.get(k) : null),
@@ -121,6 +126,7 @@ console.log('--- C. activity ---')
 {
   const acct = (confirmed, unconfirmed, txs, incomplete) => ({
     balance: { confirmed, unconfirmed },
+    addresses: [],
     txs: Array.from({ length: txs }, (_, i) => ({ txid: String(i) })),
     ...(incomplete && { incomplete: { balance: true, utxos: true } }),
   })
@@ -265,6 +271,74 @@ console.log('--- G. static ids and labels match the engines ---')
     return l.name !== config(id).name || l.color !== config(id).color || l.assets !== assets(id)
   })
   check('G5 every Settings label (name, color, assets) matches its engine config', wrong.length === 0, wrong.join(', '))
+}
+
+console.log('--- H. lookups that failed, staked TRX, the portfolio (bug audit 2026-10-27, BM8/BM9) ---')
+{
+  const u = (o) => ({ account: { balance: { confirmed: 0n, unconfirmed: 0n }, addresses: [], txs: [], ...o }, loading: false, error: null })
+  check('H1 UTXO: a used address whose transactions didn\'t load is used, not unused', np.utxoActivity(u({ addresses: [{ used: true }, { used: false }] })) === 'used')
+  const e = (o) => ({ token: 0n, gas: 0n, others: [], txs: [], loading: false, error: null, ...o })
+  check('H2 EVM: a history or token lookup that failed can\'t say "unused"', np.evmActivity(e({ lookupFailed: true })) === 'unknown' && np.evmActivity(e({ lookupFailed: true, gas: 1n })) === 'funded')
+  const s = (o) => ({ balance: 0n, usdcBalance: 0n, stakeAccounts: [], txs: [], loading: false, error: null, ...o })
+  check('H3 Solana: nor can a history or stake lookup that failed', np.solActivity(s({ lookupFailed: true })) === 'unknown' && np.solActivity(s({ lookupFailed: false })) === 'unused')
+  const t = (o) => ({ balance: 0n, usdtBalance: 0n, txs: [], loading: false, error: null, ...o })
+  check('H4 TRON: staked or unstaking TRX alone is funds', np.tronActivity(t({ staked: 5_000_000n })) === 'funded')
+  check('H4b ...and an account that exists on chain is used, even with nothing listed (staking, votes)', np.tronActivity(t({ activated: true })) === 'used' && np.tronActivity(t({ activated: false })) === 'unused')
+
+  // the engines' side: a lookup that fails says so
+  const evm = await import('../src/lib/evm.ts')
+  const tron = await import('../src/lib/tron.ts')
+  tron.tronTuning.gapMs = 0
+  tron.tronTuning.v1GapMs = 0
+  const realFetch = globalThis.fetch
+  const ADDR = '0x9858EfFD232B4033E47d90003D41EC34EcaEda94'
+  const answer = (transfers, txs) => (globalThis.fetch = async (url) => {
+    const which = String(url).includes('token-transfers') ? transfers : txs
+    return which === 'fail' ? new Response('{"message":"Too Many Requests"}', { status: 429 }) : new Response(JSON.stringify({ items: which }), { status: 200 })
+  })
+  const outcome = async () => { try { return await evm.fetchEvmHistory(evm.EVM_CHAINS.ethereum, ADDR) } catch (err) { return err } }
+  answer('fail', 'fail')
+  check('H5 EVM history: both explorer calls failing is an error, not an empty history', (await outcome()) instanceof Error)
+  answer([], 'fail')
+  check('H5b one failing with nothing found is an error too', (await outcome()) instanceof Error)
+  answer('fail', [{ hash: '0x' + 'ab'.repeat(32), value: '5', from: { hash: '0x' + '11'.repeat(20) }, to: { hash: ADDR }, timestamp: '2026-10-01T00:00:00Z' }])
+  const partial = await outcome()
+  check('H5c one failing with rows found keeps the rows (that is history)', Array.isArray(partial) && partial.length === 1)
+  answer([], [])
+  const none = await outcome()
+  check('H5d both answering empty is a real empty history', Array.isArray(none) && none.length === 0)
+
+  globalThis.fetch = async (url, init) => {
+    const body = JSON.parse(init?.body ?? '{}')
+    if (String(url).endsWith('/wallet/getaccount')) {
+      return new Response(JSON.stringify(body.address === 'TNew' ? {} : {
+        address: body.address, balance: 1_000_000,
+        frozenV2: [{ amount: 50_000_000 }, { type: 'ENERGY', amount: 20_000_000 }, { type: 'TRON_POWER' }],
+        unfrozenV2: [{ unfreeze_amount: 3_000_000, unfreeze_expire_time: 1 }],
+        frozen: [{ frozen_balance: 7_000_000 }],
+        account_resource: { frozen_balance_for_energy: { frozen_balance: 2_000_000 } },
+      }), { status: 200 })
+    }
+    return new Response('{}', { status: 404 })
+  }
+  const acc = await tron.getTronAccount(tron.TRON_CHAINS.tron, 'TStaker')
+  check('H6 TRON: staked (Stake 2.0 for bandwidth and energy, legacy Stake 1.0) plus unstaking TRX is read, beside the liquid balance', acc.balance === 1_000_000n && acc.staked === 82_000_000n && acc.activated === true, `${acc.staked}`)
+  const fresh = await tron.getTronAccount(tron.TRON_CHAINS.tron, 'TNew')
+  check('H6b a never-activated address: nothing staked, not activated', fresh.balance === 0n && fresh.staked === 0n && fresh.activated === false)
+  globalThis.fetch = realFetch
+
+  // BM9: the portfolio counts staked SOL and TRX, and a network's gas coin without its USDC price
+  const dash = await readFile(new URL('../src/components/Dashboard.tsx', import.meta.url), 'utf8')
+  check('H7 the portfolio counts staked SOL and staked/unstaking TRX (BM9)', /evmToUsd\(st\.balance \+ staked, c\.decimals, price\)/.test(dash) && /evmToUsd\(st\.balance \+ \(st\.staked \?\? 0n\), c\.decimals, price\)/.test(dash))
+  check('H7b ...and a network\'s ETH/BNB even when the USDC price is missing', /if \(tokenUsd === null && gasUsd === null\) continue/.test(dash))
+  const tronCard = await readFile(new URL('../src/components/TronCard.tsx', import.meta.url), 'utf8')
+  check('H7c the TRON card shows staked TRX and never says "Nothing here yet" over it', /TRX staked/.test(tronCard) && /staked === 0n && \(/.test(tronCard))
+  check('H8 a modal whose network was hidden (the automatic pick) closes for good instead of coming back when it shows again (BL42)',
+    /if \(activeGone\) setActive\(null\)/.test(dash) && /'evmId' in active && activeEvmChain === undefined/.test(dash))
+  const buy = await readFile(new URL('../src/components/BuyModal.tsx', import.meta.url), 'utf8')
+  check('H9 the Buy modal\'s delivery address is fixed when it opens, and a Ledger account is sent to verify it on the device (BL43)',
+    /onBuy=\{\(\) => setActive\(\{ kind: 'buy', slot: s\.key, address: receiveAddressFor\(s\) \}\)\}/.test(dash) && /address=\{active\.address\}/.test(dash) &&
+      /onVerifyOnDevice: \(\) => setActive\(\{ kind: 'receive', slot: activeSlot\.key \}\)/.test(dash) && /Verify on Ledger/.test(buy))
 }
 
 console.log(failures === 0 ? '\nAll networks-shown checks passed.' : `\n${failures} CHECK(S) FAILED.`)

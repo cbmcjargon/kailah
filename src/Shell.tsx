@@ -9,7 +9,7 @@ import { clearTipCache } from './lib/scanner'
 import { clearStateCache } from './lib/statecache'
 import { clearAll as clearAddrCache } from './lib/addrcache'
 import { forgetLedgerDevices } from './lib/ledger/transport'
-import { hasVault, clearVault } from './lib/vault'
+import { hasVault, clearVault, VAULT_STORAGE_KEY } from './lib/vault'
 import { clearProviderPref } from './lib/providerpref'
 import { disableBiometric } from './lib/biometric'
 import { setNotifyPref } from './lib/notify'
@@ -79,6 +79,11 @@ export default function Shell() {
   // The unlocked wallet's handle on its own secrets: wipe() zeroes every key
   // it derived. Null while its chunk loads (no keys exist yet) and once locked.
   const sessionRef = useRef<WalletSession | null>(null)
+  // Erase starts a new epoch; an unlock that began before it opens nothing
+  // (the erased wallet reopened when its slow unlock finished after the
+  // erase; bug audit 2026-10-27, BL40).
+  const eraseEpochRef = useRef(0)
+  const unlockEpochRef = useRef(0)
 
   // ---- lock / erase --------------------------------------------------------
   const lock = useCallback(() => {
@@ -90,6 +95,7 @@ export default function Shell() {
   }, [])
 
   const erase = useCallback(() => {
+    eraseEpochRef.current += 1
     clearVault()
     disableBiometric()
     // The address map is xpub-keyed and would otherwise reveal the erased
@@ -112,6 +118,29 @@ export default function Shell() {
     setVaultState('none')
     setScreen('welcome')
   }, [])
+
+  // ---- another window of the wallet erased or replaced it -----------------
+  // Several windows share one storage. If another erases the wallet, this
+  // one must not keep its keys and go on writing the erased wallet's caches
+  // back; if the vault was replaced, this window's keys belong to the old
+  // one. Lock (bug audit 2026-10-27, BM11).
+  useEffect(() => {
+    const onStorage = (e: StorageEvent) => {
+      if (e.key !== null && e.key !== VAULT_STORAGE_KEY) return
+      if (!hasVault()) {
+        sessionRef.current?.wipe()
+        void closeLedgerSession()
+        lockSecureStore()
+        setMnemonic(null)
+        setVaultState('none')
+        setScreen('welcome')
+        return
+      }
+      if (e.key === VAULT_STORAGE_KEY && e.oldValue !== null && e.newValue !== e.oldValue) lock()
+    }
+    window.addEventListener('storage', onStorage)
+    return () => window.removeEventListener('storage', onStorage)
+  }, [lock])
 
   // ---- auto-lock after 15 min without pointer / key / touch activity -------
   // Runs for the whole unlocked state, including while the wallet chunk loads.
@@ -178,9 +207,20 @@ export default function Shell() {
   }, [])
 
   const handleUnlocked = useCallback(async (m: string) => {
+    const epoch = unlockEpochRef.current
+    const erased = () => epoch !== eraseEpochRef.current || !hasVault()
+    if (erased()) return
     await openCaches(m)
+    if (erased()) {
+      lockSecureStore()
+      return
+    }
     setMnemonic(m)
     setVaultState('unlocked')
+  }, [])
+  const handleUnlockStart = useCallback(() => {
+    unlockEpochRef.current = eraseEpochRef.current
+    preloadApp()
   }, [])
 
   // ---- render --------------------------------------------------------------
@@ -218,7 +258,7 @@ export default function Shell() {
   }
 
   if (vaultState === 'locked' || mnemonic === null) {
-    return <LockScreen onUnlockStart={preloadApp} onUnlocked={handleUnlocked} onErase={erase} />
+    return <LockScreen onUnlockStart={handleUnlockStart} onUnlocked={handleUnlocked} onErase={erase} />
   }
 
   const lockButton = (

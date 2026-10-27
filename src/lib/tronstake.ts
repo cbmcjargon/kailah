@@ -219,6 +219,7 @@ async function finish(
     rawData: r.raw_data,
     txID: computedId,
     expiration: Number(decoded.expiration),
+    timestamp: Number(decoded.timestamp),
     action,
     resource: extras.resource ?? null,
     votes: extras.votes ?? null,

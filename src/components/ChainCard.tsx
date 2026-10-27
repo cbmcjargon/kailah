@@ -37,7 +37,11 @@ export default function ChainCard({
 }: ChainCardProps) {
   const { account: acct, loading, error } = state
   const balance = acct?.balance ?? null
-  const isEmpty = balance !== null && balance.confirmed === 0n && balance.unconfirmed === 0n
+  // a scan that couldn't read every address, with no complete one to show
+  // instead (App keeps the last complete balance when it has one): the
+  // figure may be low, and is never "nothing here" (bug audit 2026-10-27, BM4)
+  const partialBalance = acct?.incomplete?.balance === true
+  const isEmpty = balance !== null && !partialBalance && balance.confirmed === 0n && balance.unconfirmed === 0n
   const showUsd = chain.priceSymbol !== undefined && price !== undefined && balance !== null
   const showSparkline = chain.priceSymbol !== undefined && priceHistory.length >= 2
 
@@ -100,6 +104,12 @@ export default function ChainCard({
               <span className="balance-ticker">{chain.ticker}</span>
             </div>
             {pendingLabel && <div className="balance-pending">{pendingLabel}</div>}
+            {partialBalance && (
+              <p className="zero-state">
+                Some addresses couldn&rsquo;t be read just now, so the balance may be higher. Refresh in a
+                moment.
+              </p>
+            )}
             {showUsd && balance !== null && (
               <div className="balance-usd">
                 {formatUsd(coinsToUsd(balance.confirmed, chain.decimals, price))}

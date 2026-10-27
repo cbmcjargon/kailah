@@ -154,10 +154,13 @@ globalThis.fetch = async (url, init) => {
     case 'getBalance':
       return rpcOk({ value: Number(SOL_BEFORE) })
     case 'getAccountInfo':
+      world.accountReads?.push(params)
       if (params[0] === SWAP_FEE_ACCOUNT) return rpcOk({ value: world.feeAccountMissing ? null : { data: [tokenAccountB64(FEE_BEFORE), 'base64'] } })
       if (params[0] === wsolAtaOf(OWNER) || params[0] === wsolAtaOf(SWAP_FEE_WALLET)) {
         return rpcOk({ value: world.wsolLamports > 0n ? { lamports: Number(world.wsolLamports), data: ['', 'base64'] } : null })
       }
+      // a first-time USDC holder has no USDC account yet
+      if (world.usdcAtaMissing && params[0] === solUsdcAta(MAINNET, OWNER)) return rpcOk({ value: null })
       return rpcOk({ value: { data: [tokenAccountB64(USDC_BEFORE), 'base64'] } })
     case 'getMinimumBalanceForRentExemption':
       return rpcOk(2_039_280)
@@ -190,14 +193,16 @@ globalThis.fetch = async (url, init) => {
         fee = (inA * bps) / 10_000n
         userUsdc = -inA
       }
-      world.fee = fee + world.feeSkew
+      world.fee = fee + world.feeSkew + (world.feeRaceOnce ?? 0n)
+      // another user's swap fee landing between the reads and this simulation, once
+      world.feeRaceOnce = 0n
       const solAfter =
         (world.direction === 'sol-to-usdc'
-          ? SOL_BEFORE - inA - 6_000n + world.wsolLamports + world.solSpendShort
+          ? SOL_BEFORE - inA - 6_000n + world.wsolLamports + world.solSpendShort - (world.usdcAtaMissing ? 2_039_280n : 0n)
           : SOL_BEFORE + out - 6_000n) - rent
       if (world.direction === 'usdc-to-sol') userUsdc += world.usdcSpendShort
       // the fee wallet's own USDC account IS the fee account
-      const ataBefore = wanted[1] === SWAP_FEE_ACCOUNT ? FEE_BEFORE : USDC_BEFORE
+      const ataBefore = wanted[1] === SWAP_FEE_ACCOUNT ? FEE_BEFORE : world.usdcAtaMissing ? 0n : USDC_BEFORE
       const usdcAfter = ataBefore + userUsdc + (wanted[1] === SWAP_FEE_ACCOUNT ? world.fee : 0n)
       return rpcOk({
         value: {
@@ -718,10 +723,10 @@ console.log('--- K. a route that fails in one exchange is named and re-routed on
     const r = await run('sol-to-usdc', (w) => {
       w.simFailures = [{ err: { InstructionError: [3, { Custom: 1 }] }, logs: [`Program ${TOKEN} invoke [1]`, 'Program log: Error: insufficient funds', `Program ${TOKEN} failed: custom program error: 0x1`] }]
     })
-    check('K a failure in the transaction\'s own plumbing is not re-routed, and says where',
-      r.prepared === null && world.builds === 1 && /\(the Token program failed: custom program error: 0x1\)$/.test(r.err?.message ?? ''), r.err?.message?.slice(0, 120))
+    check('K a failure in the transaction\'s own plumbing is not re-routed; a shortfall says so in plain words (bug audit 2026-10-27, BM21)',
+      r.prepared === null && world.builds === 1 && /^The swap was not signed: there isn't enough of the token you're paying with/.test(r.err?.message ?? ''), r.err?.message?.slice(0, 120))
     const r2 = await run('sol-to-usdc', (w) => { w.simFailures = [{ err: 'InsufficientFundsForFee', logs: [] }] })
-    check('K a failure with no logs is not re-routed', r2.prepared === null && world.builds === 1 && /fails in simulation.*InsufficientFundsForFee/.test(r2.err?.message ?? ''), r2.err?.message?.slice(0, 120))
+    check('K a failure with no logs is not re-routed (and a fee shortfall is said plainly)', r2.prepared === null && world.builds === 1 && /not signed: there isn't enough SOL for the network fee/.test(r2.err?.message ?? ''), r2.err?.message?.slice(0, 120))
     const r3 = await run('sol-to-usdc', (w) => { w.simErr = { InstructionError: [3, { Custom: 6001 }] } })
     check('K the older failing-simulation shape still stops the swap, with no re-route', r3.prepared === null && world.builds === 1 && /fails in simulation/.test(r3.err?.message ?? ''))
   }
@@ -780,6 +785,62 @@ console.log('--- K. a route that fails in one exchange is named and re-routed on
     check('K market gap: no price, no verdict',
       swapMarketGap('sol-to-usdc', 1n, 1n, undefined, 1, 6) === null && swapMarketGap('usdc-to-sol', 1n, 1n, 100, undefined, 6) === null && swapMarketGap('sol-to-usdc', 1n, 1n, 0, 1, 6) === null)
   }
+}
+
+console.log('--- L. the 2026-10-27 audit: shortfalls in plain words, the form\'s quote and reserve, reviews that expire ---')
+{
+  const { swapShortfall } = await import('../src/lib/solswap.ts')
+  const SYS = '11111111111111111111111111111111'
+  const TOKEN = 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA'
+  const fail = (program, reason) => [`Program ${program} invoke [2]`, `Program ${program} failed: ${reason}`]
+  check('L1 the System program\'s 0x1 (not enough lamports) reads as not enough SOL, swap a little less (BM21)',
+    /isn't enough SOL for the swap/.test(swapShortfall({ InstructionError: [3, { Custom: 1 }] }, fail(SYS, 'custom program error: 0x1')) ?? ''))
+  check('L1b ...as does a "Transfer: insufficient lamports" log line', /isn't enough SOL/.test(swapShortfall(null, ['Transfer: insufficient lamports 1000, need 2039280']) ?? ''))
+  check('L2 the Token program\'s 0x1 reads as not enough of the token', /isn't enough of the token/.test(swapShortfall({ InstructionError: [4, { Custom: 1 }] }, fail(TOKEN, 'custom program error: 0x1')) ?? ''))
+  check('L3 InsufficientFundsForRent reads as the rent minimum, InsufficientFundsForFee as the fee',
+    /rent minimum/.test(swapShortfall({ InsufficientFundsForRent: { account_index: 0 } }, []) ?? '') && /network fee/.test(swapShortfall('InsufficientFundsForFee', []) ?? ''))
+  check('L4 an exchange\'s failure is not a shortfall (it is named and re-routed, K)', swapShortfall({ InstructionError: [3, { Custom: 6001 }] }, fail('JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4', 'custom program error: 0x1771')) === null)
+
+  const { readFileSync } = await import('node:fs')
+  const swapForm = readFileSync(new URL('../src/components/SolSwapModal.tsx', import.meta.url), 'utf8')
+  check('L5 the form\'s quote sequence moves on before any early return, so a quote in flight can\'t land on a cleared amount (BM20)',
+    /useEffect\(\(\) => \{\n    const seq = \+\+quoteSeqRef\.current/.test(swapForm))
+  check('L5b Continue takes only the quote for what the form says now (direction and amount) (BM20)',
+    /quote\.direction !== direction \|\| quote\.inAmount !== parsedAmount\) return/.test(swapForm))
+  check('L5c the review and success screens label the swap by its own direction, not the toggle (BM20)',
+    /step\.prepared\.direction : direction/.test(swapForm) && /rs\.fmtIn\(step\.prepared\.inAmount\)\} \{rs\.inSymbol\}/.test(swapForm) && !/\{fmtIn\(step\.prepared/.test(swapForm))
+  check('L6 the form checks the SOL the swap needs (fee, deposits, rent) before quoting (BM21)',
+    /parsedAmount \+ MAX_SWAP_SOL_RESERVE > state\.balance/.test(swapForm) && /state\.balance < USDC_SWAP_SOL_NEEDED/.test(swapForm))
+  const sendForm = readFileSync(new URL('../src/components/SolSendModal.tsx', import.meta.url), 'utf8')
+  const stakeForm = readFileSync(new URL('../src/components/SolStakeModal.tsx', import.meta.url), 'utf8')
+  const sol = await import('../src/lib/sol.ts')
+  check('L7 a review left open past SOL_REVIEW_FRESH_MS (45 s, inside a blockhash\'s life) is prepared again before signing — send, stake and swap (BM17)',
+    sol.SOL_REVIEW_FRESH_MS === 45_000 &&
+      /Date\.now\(\) - step\.at > SOL_REVIEW_FRESH_MS \? handleContinue\(true\)/.test(sendForm) &&
+      /Date\.now\(\) - step\.at > SOL_REVIEW_FRESH_MS \? runPrepare\(step\.redo, true\)/.test(stakeForm) &&
+      /if \(Date\.now\(\) - step\.at > SOL_REVIEW_FRESH_MS\) \{\n\s+setExpiredNote\(true\)/.test(swapForm))
+
+  // BL24: the shared fee account, and the balance reads' commitment
+  const calm = await run('usdc-to-sol')
+  const baseSims = world.simulations.length
+  const raced = await run('usdc-to-sol', (w) => {
+    w.feeRaceOnce = 1_234n
+    w.accountReads = []
+  })
+  check('L8 another user\'s fee landing between the reads and the simulation no longer refuses an honest swap: it is measured again (BL24)',
+    calm.err === null && raced.err === null && raced.prepared !== null && world.simulations.length === baseSims + 1, raced.err?.message?.slice(0, 80) ?? `${world.simulations.length} vs ${baseSims} simulations`)
+  check('L8b the balances are read at the simulation\'s own commitment ("confirmed", not the finalized default)',
+    world.accountReads.length > 0 && world.accountReads.every((p) => p[1]?.commitment === 'confirmed'))
+  const skewed = await run('usdc-to-sol', (w) => { w.feeSkew = 5_000n })
+  check('L8c a fee that is wrong on every measurement is still refused, after the second look', refused(skewed) && world.simulations.length === baseSims + 1, skewed.err?.message?.slice(0, 60) ?? 'accepted!')
+
+  // BL27: the review shows the deposit that opens a first-time holder's USDC account
+  const firstUsdc = await run('sol-to-usdc', (w) => { w.usdcAtaMissing = true })
+  check('L9 a first-time USDC holder\'s swap carries the one-time account deposit for the review (BL27)', firstUsdc.err === null && firstUsdc.prepared?.accountDepositLamports === 2_039_280n, firstUsdc.err?.message?.slice(0, 80))
+  const holder = await run('sol-to-usdc')
+  check('L9b ...and an existing holder\'s carries none', holder.prepared?.accountDepositLamports === 0n)
+  check('L9c the review shows it, and the stake form can try the validator list again (BL28)',
+    /USDC account deposit \(one-time\)/.test(swapForm) && /setValidatorTry\(\(n\) => n \+ 1\)/.test(readFileSync(new URL('../src/components/SolStakeModal.tsx', import.meta.url), 'utf8')))
 }
 
 console.log(failures === 0 ? '\nAll swap-gate checks passed.' : `\n${failures} CHECK(S) FAILED.`)

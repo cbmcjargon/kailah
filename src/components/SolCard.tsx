@@ -101,7 +101,7 @@ export default function SolCard({
                 {usdcUsd !== null ? ` (${formatUsd(usdcUsd)})` : ''}
               </div>
             )}
-            {balance === 0n && (usdcBalance ?? 0n) === 0n && (
+            {balance === 0n && (usdcBalance ?? 0n) === 0n && stakedTotal === 0n && (
               <p className="zero-state">Nothing here yet — tap Receive to get your address.</p>
             )}
           </>

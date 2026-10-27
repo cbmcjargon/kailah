@@ -251,6 +251,8 @@ for (const resource of ['ENERGY', 'BANDWIDTH']) {
       body: JSON.stringify({ owner_address: FUNDED, frozen_balance: 2500000, resource, visible: true }),
     })
     const tx = await res.json()
+    // no bytes: the node's own words (a rate limit reads as a skip)
+    if (typeof tx.raw_data_hex !== 'string') throw new Error(`HTTP ${res.status}: ${tx.Error ?? JSON.stringify(tx).slice(0, 120)}`)
     const d = decodeTronRawTx(tx.raw_data_hex)
     const c = d.contracts[0]
     check(
@@ -377,15 +379,20 @@ try {
   const vint = (num, n) => Uint8Array.from([...varint(num << 3), ...varint(n)])
   const cat = (...parts) => Uint8Array.from(parts.flatMap((p) => [...p]))
   const { hexToBytes: h2b } = await import('@noble/hashes/utils')
-  const throwsUnexpected = (name, fn) => {
+  // local bytes, no network: a failure here is a FAIL even when the refusal's
+  // words mention the network (check() would read that as a skip)
+  const refuses = (name, pattern, fn) => {
     let msg = ''
     try {
       fn()
     } catch (e) {
       msg = e.message
     }
-    check(name, /unexpected or duplicate fields/.test(msg), msg || '(did not throw)')
+    const ok = pattern.test(msg)
+    console.log((ok ? 'PASS  ' : 'FAIL  ') + name + (ok ? '' : ` — ${msg || '(did not throw)'}`))
+    if (!ok) failures++
   }
+  const throwsUnexpected = (name, fn) => refuses(name, /unexpected or duplicate fields/, fn)
 
   const ownerBytes = h2b(tronAddressToHex(FUNDED))
   const toBytes = h2b(tronAddressToHex('TJvaAeFb8Lykt9RQcVyyTFN2iDvGMuyD4M'))
@@ -441,7 +448,7 @@ try {
   // Envelope pins: inflated fee_limit and far-future expiration
   throwsUnexpected('fee_limit mismatch refused by envelope check', () =>
     assertTronEnvelope(decodeTronRawTx(enc(cat(honest, vint(18, 30_000_000)))), 0n))
-  throwsUnexpected('far-future expiration refused by envelope check', () => {
+  refuses('far-future expiration refused by envelope check', /expiry is more than 10 minutes away/, () => {
     const far = cat(len(1, h2b('aabb')), vint(8, Date.now() + 90 * 24 * 3600 * 1000), len(11, transferContract(cat(len(1, ownerBytes), len(2, toBytes), vint(3, 1)))))
     assertTronEnvelope(decodeTronRawTx(enc(far)), 0n)
   })

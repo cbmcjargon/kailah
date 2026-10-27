@@ -74,6 +74,9 @@ interface BcOutput {
 
 interface BcFullTx {
   hash: string
+  /** how many inputs and outputs the transaction really has (the lists may be cut short) */
+  vin_sz?: number
+  vout_sz?: number
   block_height?: number
   confirmed?: string
   received?: string
@@ -111,6 +114,11 @@ const NO_BIP125: ReadonlySet<ChainId> = new Set<ChainId>(['doge'])
 // Cap history paging: two /full pages (~100 txs) is plenty for a personal
 // wallet and bounds free-tier spend.
 const MAX_TX_PAGES = 2
+// Inputs and outputs served per transaction. BlockCypher's default is 20, so
+// an exchange's batch payout lost the output paying us and read "Received 0
+// DOGE" (bug audit 2026-10-27, BM7). A transaction with more than this is
+// marked partial: its amount is shown as unknown, never as a wrong number.
+const TX_IO_LIMIT = 500
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
@@ -149,6 +157,7 @@ export class BlockcypherProvider implements ProviderApi {
   // No account (xpub) endpoint on the free tier — keep the seam open.
   readonly xpub: XpubApi | undefined = undefined
   readonly backupOnly: boolean
+  readonly budgetLimited = true
 
   private readonly base: string
   private readonly host: string
@@ -263,7 +272,7 @@ export class BlockcypherProvider implements ProviderApi {
 
     for (let page = 0; page < MAX_TX_PAGES; page += 1) {
       const q = before !== undefined ? `&before=${before}` : ''
-      const info = await this.getJson<BcAddressFull>(`/addrs/${enc}/full?limit=50${q}`)
+      const info = await this.getJson<BcAddressFull>(`/addrs/${enc}/full?limit=50&txlimit=${TX_IO_LIMIT}${q}`)
       const txs = info.txs ?? []
       for (const t of txs) {
         if (!collected.has(t.hash)) collected.set(t.hash, toRawTxInfo(t, !NO_BIP125.has(this.chain.id)))
@@ -319,10 +328,15 @@ export class BlockcypherProvider implements ProviderApi {
 
   async broadcast(txHex: string): Promise<string> {
     await throttle(this.host)
+    // A deadline like esplora's: a push that never answers must end, not
+    // hold the "Broadcasting…" screen forever (bug audit 2026-10-27, BL4).
+    // A timed-out broadcast is ambiguous, and the in-flight ledger treats it
+    // so (utxosend.ts).
     const res = await fetch(`${this.base}/txs/push`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ tx: txHex }),
+      ...(typeof AbortSignal !== 'undefined' && 'timeout' in AbortSignal && { signal: AbortSignal.timeout(20_000) }),
     })
     // fetch's TypeError (network) is left to propagate so api.ts can tell a
     // never-sent broadcast from a node rejection.
@@ -368,5 +382,6 @@ function toRawTxInfo(t: BcFullTx, bip125: boolean): RawTxInfo {
     // (never on Dogecoin, which doesn't implement it).
     rbfSignaled:
       bip125 && t.inputs.some((i) => typeof i.sequence === 'number' && i.sequence < 0xfffffffe),
+    ...(((t.vin_sz ?? 0) > t.inputs.length || (t.vout_sz ?? 0) > t.outputs.length) && { partial: true as const }),
   }
 }

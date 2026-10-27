@@ -9,9 +9,25 @@ interface BuyModalProps {
   chain: ChainConfig
   address: string
   onClose: () => void
+  /** a Ledger account: the address must be checked on the device first (opens Receive, which does that) */
+  onVerifyOnDevice?: () => void
 }
 
-export default function BuyModal({ chain, address, onClose }: BuyModalProps) {
+export default function BuyModal({ chain, address, onClose, onVerifyOnDevice }: BuyModalProps) {
+  // A Ledger account's address is only as good as the device's word for it:
+  // send people to Receive's "Verify on Ledger" before they pay to it (it was
+  // never checked here; bug audit 2026-10-27, BL43).
+  const deviceCheck = onVerifyOnDevice !== undefined && (
+    <div className="warning-box">
+      <div>
+        <strong>Check this address on your Ledger first</strong>
+        <p>Before you pay anyone to deliver coins here, confirm the address on the device.</p>
+        <button type="button" className="btn btn-secondary btn-small" onClick={onVerifyOnDevice}>
+          Verify on Ledger
+        </button>
+      </div>
+    </div>
+  )
   // Practice chains: the "onramp" is a faucet — coins are free.
   if (!chain.mainnet) {
     return (
@@ -25,6 +41,7 @@ export default function BuyModal({ chain, address, onClose }: BuyModalProps) {
             <div className="mono address-full">{address}</div>
             <CopyButton text={address} label="Copy address" withText />
           </div>
+          {deviceCheck}
           {chain.faucets && chain.faucets.length > 0 && (
             <div className="faucet-box">
               <span className="field-label">Faucets</span>
@@ -82,6 +99,7 @@ export default function BuyModal({ chain, address, onClose }: BuyModalProps) {
             <CopyButton text={address} label="Copy delivery address" withText />
           </div>
         </div>
+        {deviceCheck}
 
         {onramps.length > 0 && (
           <div className="field">

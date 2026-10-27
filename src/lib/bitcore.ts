@@ -84,7 +84,9 @@ interface BtPopulated {
   coins?: { inputs?: unknown; outputs?: unknown } | null
 }
 
-const MIN_REQUEST_GAP_MS = 250
+// bitcore-node's stock limiter allows 200 requests a minute per IP; 250 ms
+// (240 a minute) could trip it under a full scan (bug audit 2026-10-27, BM6)
+const MIN_REQUEST_GAP_MS = 330
 /** Transactions per address in history: the newest, pending ones first. */
 const MAX_HISTORY_TXS = 30
 /** Coins read to find those transactions (each names up to two). */
@@ -327,8 +329,20 @@ export class BitcoreProvider implements ProviderApi {
         out.push(known)
         continue
       }
-      const p = await this.getJson<BtPopulated>(`/tx/${encodeURIComponent(id)}/populated`)
-      const info = bitcoreTxInfo(p, id, bip125)
+      // One transaction Bitcore can't describe (an amount past 2^53, a txid
+      // its coin list names but /populated doesn't know) is left out, not the
+      // address's whole history (bug audit 2026-10-27, BL6). A rate limit or
+      // an outage still fails the call, for the FailoverClient to handle.
+      let p: BtPopulated
+      let info: RawTxInfo
+      try {
+        p = await this.getJson<BtPopulated>(`/tx/${encodeURIComponent(id)}/populated`)
+        info = bitcoreTxInfo(p, id, bip125)
+      } catch (e) {
+        const notFound = (e as { notFound?: unknown } | null)?.notFound === true
+        if (notFound || (e instanceof Error && e.message.startsWith('bitcore returned a malformed'))) continue
+        throw e
+      }
       out.push(info)
       const confirmations = typeof p.confirmations === 'number' ? p.confirmations : 0
       if (info.height !== null && confirmations >= SETTLED_CONFIRMATIONS) {

@@ -52,7 +52,8 @@ export default function EvmCard({
             className="chain-chip"
             style={{ backgroundColor: `${chain.color}24`, color: chain.color }}
           >
-            {chain.token.symbol}
+            {/* the card's headline asset: BNB on BNB Chain, not USDC (bug audit BL23) */}
+            {chain.gasPrimary === true ? chain.gas.symbol : chain.token.symbol}
           </span>
           <span className="chain-name">{chain.name}</span>
         </div>
@@ -188,9 +189,10 @@ export default function EvmCard({
         <div className="chain-activity">
           <h3 className="chain-activity-label">Activity</h3>
           <div className="tx-list">
-            {txs.slice(0, 3).map((t) => (
+            {txs.slice(0, 3).map((t, i) => (
               <button
-                key={`${t.hash}-${t.asset}-${t.direction}`}
+                // one transaction can carry two transfers of an asset (BL23)
+                key={`${t.hash}-${t.asset}-${t.direction}-${i}`}
                 type="button"
                 className="tx-row"
                 onClick={() => onTxClick(t)}
@@ -204,20 +206,28 @@ export default function EvmCard({
                     {t.asset === 'gas' ? ` (${chain.gas.symbol})` : t.tokenSymbol !== undefined ? ' (token)' : ''}
                   </span>
                   <span className="tx-sub">
-                    {t.pending
-                      ? 'Pending'
-                      : t.time !== null
-                        ? new Date(t.time * 1000).toLocaleDateString()
-                        : ''}
+                    {t.failed === true
+                      ? 'Failed: nothing was sent'
+                      : t.pending
+                        ? 'Pending'
+                        : t.time !== null
+                          ? new Date(t.time * 1000).toLocaleDateString()
+                          : ''}
                   </span>
                 </div>
-                <span className={`tx-amount tnum ${t.amount > 0n ? 'tx-amount-in' : ''}`}>
-                  {t.amount > 0n ? '+' : ''}
-                  {formatEvmAmount(
-                    t.amount,
-                    t.asset === 'gas' ? 18 : (t.tokenDecimals ?? chain.token.decimals),
-                  )}{' '}
-                  {t.asset === 'gas' ? chain.gas.symbol : (t.tokenSymbol ?? chain.token.symbol)}
+                <span className={`tx-amount tnum ${t.amount > 0n && t.failed !== true ? 'tx-amount-in' : ''} ${t.failed === true ? 'text-tertiary' : ''}`}>
+                  {t.failed === true ? (
+                    '—'
+                  ) : (
+                    <>
+                      {t.amount > 0n ? '+' : ''}
+                      {formatEvmAmount(
+                        t.amount,
+                        t.asset === 'gas' ? 18 : (t.tokenDecimals ?? chain.token.decimals),
+                      )}{' '}
+                      {t.asset === 'gas' ? chain.gas.symbol : (t.tokenSymbol ?? chain.token.symbol)}
+                    </>
+                  )}
                 </span>
               </button>
             ))}

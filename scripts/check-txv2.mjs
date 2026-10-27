@@ -21,7 +21,7 @@ import {
   verifiedRawTxInfo,
 } from '../src/lib/txbuild.ts'
 import { classifyTxs } from '../src/lib/history.ts'
-import { txsToCsv } from '../src/lib/csvexport.ts'
+import { csvExportHint, txsToCsv } from '../src/lib/csvexport.ts'
 
 let failures = 0
 function check(name, cond, detail = '') {
@@ -554,11 +554,28 @@ const csvRows = [
 ]
 const csv = txsToCsv(btc, csvRows)
 const lines = csv.split('\n')
-check('F1 header', lines[0] === 'Date,Type,Amount BTC,Fee BTC,Counterparty,Txid,Confirmations')
+check('F1 header: the amount is the net change, and the fee column says it is already in it (bug audit 2026-10-27, BL2)', lines[0] === 'Date,Type,Net amount BTC,Fee paid BTC (included in net amount),Counterparty,Txid,Confirmations', lines[0])
 check('F2 in row: date ISO + positive amount + empty fee', lines[1] === `${new Date(1700000000 * 1000).toISOString()},in,1,,bc1qexample,aaa,3`)
 check('F3 out row: pending date + negative amount', lines[2].startsWith('pending,out,-0.00075,0.00005,'))
 check('F4 RFC-4180 quoting of comma+quote field', lines[2].includes('"weird,addr""x"'))
 check('F5 exactly 3 lines (header + 2)', lines.length === 3)
+const inWithFee = txsToCsv(btc, [{ ...csvRows[0], fee: 1234n }]).split('\n')[1]
+check('F6 an incoming row has no fee: the sender paid it (BL2)', inWithFee === `${new Date(1700000000 * 1000).toISOString()},in,1,,bc1qexample,aaa,3`, inWithFee)
+{
+  const { readFileSync } = await import('node:fs')
+  const detail = readFileSync(new URL('../src/components/TxDetailModal.tsx', import.meta.url), 'utf8')
+  const settings = readFileSync(new URL('../src/components/SettingsModal.tsx', import.meta.url), 'utf8')
+  const app = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8')
+  check('F7 the detail view says an incoming fee was the sender\'s (BL2)', /paid by the sender/.test(detail))
+  check('F8 the export hint names the networks the file holds, each once (BL2)',
+    csvExportHint([]) === 'No history yet' &&
+    csvExportHint(['Bitcoin testnet']) === 'One file: Bitcoin testnet history' &&
+    csvExportHint(['Bitcoin', 'Dogecoin']) === 'One file: Bitcoin and Dogecoin history' &&
+    csvExportHint(['Bitcoin', 'Litecoin', 'Dogecoin', 'Bitcoin']) === 'One file: Bitcoin, Litecoin and Dogecoin history')
+  check('F9 ...the row shows that hint, from the shown networks with history (not a fixed list)',
+    /\{csvExportHint\(csvNetworks\)\}/.test(settings) && !/One file/.test(settings) &&
+    /const csvNetworks = \[\s*\.\.\.shownIn\(chainsForMode\(mode\), netPrefs\)\.filter\(/.test(app))
+}
 
 // ===========================================================================
 // Case G: raw-byte verification for RBF bumps (decodeVerifiedTx & friends) —
@@ -729,6 +746,123 @@ console.log('--- Case I: bump verification with non-palindromic txids ---')
   } catch (e) {
     check('I2/I3 verified bump chain', false, e.message)
   }
+}
+
+// ===========================================================================
+// Case D7: Speed up after the 2026-10-27 bug audit (BH5, BM25, BM26, BL1)
+// ===========================================================================
+console.log('--- Case D7: Speed up — fresh coins, the floor, the rate rule, the node floor ---')
+{
+  const { assertBumpRules, bumpExtraUtxos } = await import('../src/lib/txbuild.ts')
+  const dArgs = {
+    chain: btc,
+    original: originalD,
+    ourAddresses: new Set([kD.address, changeD.address, kExtra.address, bumpChangeD.address]),
+    keyFor: (addr) => (addr === kD.address ? kD : null),
+    originalUtxos: [uD],
+    extraUtxos: [uExtra],
+    extraKeyFor: () => kExtra,
+    changeAddress: bumpChangeD.address,
+  }
+  // BM25: an outside spender paid 10 000 sats, so the floor (~10 491) is far
+  // above the rate's fee (~1 254) and above the 5 000 recovered from the
+  // original. Covering the rate alone stopped before the spare coin and
+  // reported "not enough funds"; BM26 then refused the rate anyway.
+  let d7a = null
+  try {
+    d7a = buildBump({ ...dArgs, newFeeRate: 6n, conflictExtraFees: 10_000n })
+  } catch (e) {
+    d7a = e
+  }
+  check('D7a a floor above the rate pulls in the spare coin (BM25) and passes the rate rule (BM26)',
+    d7a?.hex !== undefined && RawTx.decode(hex.decode(d7a.hex)).inputs.length === 2 && d7a.fee >= origD.fee + 10_000n + BigInt(d7a.vbytes),
+    d7a?.message ?? `fee=${d7a?.fee} vbytes=${d7a?.vbytes}`)
+  check('D7a ...and balances to the sat', d7a?.hex === undefined || d7a.fee + d7a.amount + d7a.change === uD.value + uExtra.value)
+  let d7b = null
+  try {
+    d7b = buildBump({ ...dArgs, newFeeRate: 3n, absoluteFeeFloor: 12_000n })
+  } catch (e) {
+    d7b = e
+  }
+  check('D7b a node-reported floor above the recovered value pulls in the spare coin too', d7b?.hex !== undefined && d7b.fee >= 12_000n, d7b?.message ?? `fee=${d7b?.fee}`)
+  checkThrows('D7b ...and with no spare coin it is still "not enough funds", not a bad transaction',
+    () => buildBump({ ...dArgs, extraUtxos: [], newFeeRate: 3n, absoluteFeeFloor: 12_000n }), /aren't enough funds/)
+
+  // BM26: the rate rule compares with the original's OWN rate
+  const newVsize = 209 // one input more than the original's 141 vB
+  let passed = true
+  try {
+    assertBumpRules(btc, originalD, 10_000n, origD.fee + 10_000n + BigInt(newVsize), newVsize)
+  } catch {
+    passed = false
+  }
+  check('D7c a replacement paying the whole floor at a larger size passes (outside spenders count toward the fee, not the rate)', passed)
+  checkThrows('D7d a rate at or below the original\'s own is still refused',
+    () => assertBumpRules(btc, { ...originalD, fee: 14_100n }, 0n, 14_100n + BigInt(newVsize), newVsize), /isn't higher/)
+
+  // BH5: coins a Speed up may add, from the fresh scan
+  const T = (c) => c.repeat(64)
+  const state = {
+    utxos: [
+      { txid: T('1'), vout: 0, value: 1n, confirmed: true },   // spare: kept
+      { txid: T('2'), vout: 1, value: 1n, confirmed: false },  // unconfirmed: BIP125 rule 2
+      { txid: T('3'), vout: 0, value: 1n, confirmed: true },   // spent by a pending payment C
+      { txid: T('a'), vout: 1, value: 1n, confirmed: true },   // an output of the tx being replaced
+      { txid: T('4'), vout: 2, value: 1n },                    // confirmation unknown: kept as before
+    ],
+    rawTxs: [
+      { txid: T('c'), height: null, inputs: [{ prevTxid: T('3'), prevVout: 0 }] },
+      { txid: T('d'), height: 800_000, inputs: [{ prevTxid: T('4'), prevVout: 2 }] }, // confirmed long ago, so its coin isn't listed anyway
+    ],
+  }
+  const extras = bumpExtraUtxos(state, T('a')).map((u) => u.txid[0])
+  check('D7e Speed up adds only confirmed coins no pending payment spends (BH5)', extras.join() === '1,4', extras.join())
+
+  // BL1: the node's floor sits past 200 characters; the provider keeps it
+  const { EsploraProvider } = await import('../src/lib/esplora.ts')
+  const { replacementFloorFrom } = await import('../src/lib/utxosend.ts')
+  const ep = new EsploraProvider({ name: 'mock', kind: 'esplora', base: 'https://esplora.invalid/api', pageSize: 50 }, btc)
+  const realFetch = globalThis.fetch
+  const answer = (body) => (globalThis.fetch = async () => new Response(body, { status: 400 }))
+  const refusal = async () => { try { await ep.broadcast('00'); return '' } catch (e) { return e.message } }
+  answer(`sendrawtransaction RPC error: {"code":-26,"message":"insufficient fee, rejecting replacement ${T('b')}; less fees than conflicting txs; 0.00000564 < 0.00001046"}`)
+  const m1 = await refusal()
+  check('D7f the node\'s floor survives the provider\'s bound (the full body is 216 characters)', replacementFloorFrom(m1, 8) === 1046n, m1)
+  check('D7f ...in a short, attributed message', m1.length < 140 && m1.startsWith('mock: '), `${m1.length} chars`)
+  answer('x'.repeat(5000))
+  const m2 = await refusal()
+  check('D7g any other refusal is still cut at 200 characters', m2.length === 'mock: '.length + 200)
+  answer(`less fees than conflicting txs; 1 < ${'9'.repeat(400)}`)
+  const m3 = await refusal()
+  check('D7h a hostile "floor" with hundreds of digits is not taken as one', replacementFloorFrom(m3, 8) === null && m3.length === 'mock: '.length + 200, m3.slice(0, 80))
+  globalThis.fetch = realFetch
+  check('D7i the floor parser reads exact decimals (no floats)', replacementFloorFrom('…less fees than conflicting txs; 0.1 < 1.23456789', 8) === 123_456_789n && replacementFloorFrom('insufficient fee', 8) === null)
+
+  // BH5 wiring: the modal scans fresh and checks unseen attempts first
+  const { readFileSync } = await import('node:fs')
+  const bm = readFileSync(new URL('../src/components/BumpModal.tsx', import.meta.url), 'utf8')
+  check('D7j Speed up builds from a fresh scan, after the unseen-attempt check, with the fresh coins (no mount-time snapshot)',
+    /utxoUnseenBlock\(chain\.id/.test(bm) && /snap = await scanAccount\(account, client\)/.test(bm) && /bumpExtraUtxos\(snap, original\.txid\)/.test(bm) && !/snapRef|accountState/.test(bm))
+}
+
+// ===========================================================================
+// Case D8: a transaction the data service served in part (bug audit 2026-10-27, BM7)
+// ===========================================================================
+console.log('--- Case D8: partly served transactions ---')
+{
+  const me = deriveAt(btc, 0, 0).address
+  const big = {
+    txid: 'f8'.repeat(32), height: null, time: 1, fee: 500n, rbfSignaled: true, partial: true,
+    inputs: [{ address: me, value: 50_000n, prevTxid: 'f9'.repeat(32), prevVout: 0 }],
+    outputs: [{ address: 'bc1qsomeoneelse0000000000000000000000000', value: 1_000n }],
+  }
+  const [row] = classifyTxs([big], new Set([me]), 100)
+  check('D8a a partly served transaction is marked partial, so its amount shows as unknown, not a wrong number', row?.partial === true)
+  check('D8b ...and is never offered for Speed up (it can\'t be rebuilt)', row?.bumpable === false)
+  const [whole] = classifyTxs([{ ...big, partial: undefined }], new Set([me]), 100)
+  check('D8c the same transaction served whole is an ordinary row', whole?.partial === undefined && whole?.bumpable === true)
+  const csv = txsToCsv(btc, [row]).split('\n')[1]?.split(',') ?? []
+  check('D8d the CSV says "unknown", with no amount or counterparty to mislead', csv[1] === 'unknown' && csv[2] === '' && csv[4] === '', csv.join(','))
 }
 
 console.log(`\n${failures === 0 ? 'ALL CHECKS PASSED' : `${failures} CHECK(S) FAILED`}`)

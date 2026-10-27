@@ -23,6 +23,7 @@ import type {
 // into signed, newest-first TxSummary rows using tipHeight for confirmations.
 import { classifyTxs } from './history'
 import * as addrcache from './addrcache'
+import { storeSession } from './securestore'
 
 /** BIP44 address gap limit. */
 const GAP_LIMIT = 20
@@ -69,14 +70,15 @@ export function clearTipCache(): void {
   }
 }
 
-async function resolveTipHeight(chain: string, client: FailoverClient): Promise<number> {
+async function resolveTipHeight(chain: string, client: FailoverClient, session: number): Promise<number> {
   const cached = readTipCache()[chain]
   if (cached && typeof cached.h === 'number' && Date.now() - cached.at < TIP_FRESH_MS) {
     return cached.h
   }
   try {
     const h = await client.getTipHeight()
-    writeTipCache(chain, h)
+    // not after a lock or erase: an erased wallet's cache must not come back
+    if (storeSession() === session) writeTipCache(chain, h)
     return h
   } catch (e) {
     if (cached && typeof cached.h === 'number') return cached.h
@@ -147,18 +149,28 @@ function cappedLowestUnused(scanUsed: number[], cacheUsed: number[]): number {
  * Bounded-concurrency worker pool that preserves the cap. With limit === 1 it
  * runs fully sequentially in item order (used for BlockCypher/DOGE).
  */
-async function runPool<T>(
+export async function runPool<T>(
   items: T[],
   limit: number,
   fn: (item: T) => Promise<void>,
 ): Promise<void> {
   const size = Math.max(1, limit)
   let cursor = 0
+  // Once one item fails the pool has failed: the other workers stop taking
+  // items instead of spending requests on a result nobody reads (bug audit
+  // 2026-10-27, BL12; DOGE's budget).
+  let failed = false
   const worker = async (): Promise<void> => {
     for (;;) {
+      if (failed) return
       const idx = cursor++
       if (idx >= items.length) return
-      await fn(items[idx]!)
+      try {
+        await fn(items[idx]!)
+      } catch (e) {
+        failed = true
+        throw e
+      }
     }
   }
   const workers: Promise<void>[] = []
@@ -288,6 +300,16 @@ async function quickUnchanged(
   }
 }
 
+/** `state` with its confirmations counted from `tip`, when the chain has moved on. */
+function atTip(state: AccountState, tip: number): AccountState {
+  if (tip <= state.tipHeight) return state
+  return {
+    ...state,
+    tipHeight: tip,
+    txs: state.txs.map((t) => (t.height === null ? t : { ...t, confirmations: Math.max(0, tip - t.height + 1) })),
+  }
+}
+
 /**
  * Scan an HD account into a full AccountState: balance, used addresses, fresh
  * receive/change, annotated utxos, and classified transaction history.
@@ -298,17 +320,30 @@ async function quickUnchanged(
 export async function scanAccount(
   account: WatchAccountKeys,
   client: FailoverClient,
-  opts?: { quickCheckAgainst?: AccountState },
+  opts?: {
+    quickCheckAgainst?: AccountState
+    /** whether the account is still the caller's when the scan ends (a removed Ledger account isn't): its address map is kept only then */
+    persist?: () => boolean
+  },
 ): Promise<AccountState> {
+  // the unlock this scan belongs to, before anything is awaited
+  const session = storeSession()
   const prev = opts?.quickCheckAgainst
   if (prev !== undefined && (await quickUnchanged(account, client, prev))) {
-    return prev
+    // Nothing moved, but blocks did: advance the confirmations from the tip
+    // (cached for 10 minutes), or a payment that just confirmed showed
+    // "1 conf" until the balance next changed (bug audit 2026-10-27, BM10).
+    try {
+      return atTip(prev, await resolveTipHeight(account.chain, client, session))
+    } catch {
+      return prev
+    }
   }
 
   // Tip height: needed for confirmation math. Served from a short-lived cache
   // when fresh; falls back to the last known value if the live call fails, so
   // a busy provider degrades confirmations slightly instead of killing scans.
-  const tipHeight = await resolveTipHeight(account.chain, client)
+  const tipHeight = await resolveTipHeight(account.chain, client, session)
 
   const cache = addrcache.get(account.xpubs.xpub)
 
@@ -347,7 +382,8 @@ export async function scanAccount(
   const usedChange = usedIndices(changeStats)
 
   // Persist discovered used indices so the next scan starts warm.
-  addrcache.update(account.xpubs.xpub, { receive: usedReceive, change: usedChange })
+  // only into the store this scan started in (a lock or erase since: no write)
+  if (storeSession() === session && (opts?.persist?.() ?? true)) addrcache.update(account.xpubs.xpub, { receive: usedReceive, change: usedChange })
 
   // Balance = sum over every used address on both branches.
   let confirmed = 0n
@@ -430,7 +466,11 @@ export async function scanAccount(
 
   const rawTxs = [...rawByTxid.values()]
   const ours = new Set<string>(usedAddrs.map((a) => a.address))
-  const txs: TxSummary[] = classifyTxs(rawTxs, ours, tipHeight)
+  // A cached tip can trail a transaction the provider already shows in a
+  // block: a confirmed payment read "0 confirmations" (BM10). The chain is at
+  // least as high as anything in it.
+  const tip = rawTxs.reduce((h, t) => (t.height !== null && t.height > h ? t.height : h), tipHeight)
+  const txs: TxSummary[] = classifyTxs(rawTxs, ours, tip)
 
   return {
     balance,
@@ -440,7 +480,7 @@ export async function scanAccount(
     utxos,
     txs,
     rawTxs,
-    tipHeight,
+    tipHeight: tip,
     incomplete: { balance: balanceIncomplete, utxos: utxosIncomplete },
   }
 }

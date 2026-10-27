@@ -17,7 +17,14 @@ interface TxDetailModalProps {
 export default function TxDetailModal({ chain, tx, price, onClose, onBump }: TxDetailModalProps) {
   const abs = tx.amount < 0n ? -tx.amount : tx.amount
   const sign = tx.amount > 0n ? '+' : tx.amount < 0n ? '−' : ''
-  const heading = tx.direction === 'in' ? 'Received' : tx.direction === 'out' ? 'Sent' : 'Sent to self'
+  const unknown = tx.partial === true
+  const heading = unknown
+    ? 'Too large to read in full'
+    : tx.direction === 'in'
+      ? 'Received'
+      : tx.direction === 'out'
+        ? 'Sent'
+        : 'Sent to self'
   const cpLabel = tx.direction === 'in' ? 'From' : tx.direction === 'out' ? 'To' : 'Address'
   const fmt = (v: bigint) => `${formatCoin(v, chain.decimals)} ${chain.ticker}`
 
@@ -25,12 +32,22 @@ export default function TxDetailModal({ chain, tx, price, onClose, onBump }: TxD
     <Modal title="Transaction" onClose={onClose}>
       <div className="stack">
         <div className="tx-detail-hero">
-          <span className={`tx-amount tnum tx-amount-${tx.direction} tx-detail-amount`}>
-            {sign}
-            {fmt(abs)}
-          </span>
+          {unknown ? (
+            <span className="tx-amount tx-detail-amount text-tertiary">Amount unknown</span>
+          ) : (
+            <span className={`tx-amount tnum tx-amount-${tx.direction} tx-detail-amount`}>
+              {sign}
+              {fmt(abs)}
+            </span>
+          )}
           <span className="text-secondary">{heading}</span>
-          {price !== undefined && abs > 0n && (
+          {unknown && (
+            <p className="text-tertiary">
+              The network data service sent only part of this transaction, so the wallet can&rsquo;t
+              tell how much it moved. The explorer shows all of it.
+            </p>
+          )}
+          {price !== undefined && abs > 0n && !unknown && (
             <span className="text-tertiary tnum">
               {formatUsd(coinsToUsd(abs, chain.decimals, price))}
             </span>
@@ -52,11 +69,12 @@ export default function TxDetailModal({ chain, tx, price, onClose, onBump }: TxD
           </div>
           {tx.fee !== null && (
             <div className="review-row">
-              <dt>Network fee</dt>
+              {/* an incoming payment's fee was the sender's, not yours (BL2) */}
+              <dt>{tx.direction === 'in' ? 'Network fee (paid by the sender)' : 'Network fee'}</dt>
               <dd className="tnum">{fmt(tx.fee)}</dd>
             </div>
           )}
-          {tx.counterparty !== null && (
+          {tx.counterparty !== null && !unknown && (
             <div className="review-row">
               <dt>{cpLabel}</dt>
               <dd className="tx-detail-cp">

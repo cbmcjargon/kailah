@@ -10,14 +10,18 @@ interface RestoreFlowProps {
   onBack: () => void
 }
 
+/** Every phrase length BIP39 defines; 15, 18 and 21 words read "Not a valid phrase" before (bug audit 2026-10-27, BL37). */
+export const PHRASE_LENGTHS: readonly number[] = [12, 15, 18, 21, 24]
+
 export default function RestoreFlow({ onComplete, onBack }: RestoreFlowProps) {
   const [raw, setRaw] = useState('')
   const [step, setStep] = useState<'phrase' | 'password'>('phrase')
 
   const normalized = normalizeMnemonic(raw)
   const wordCount = normalized === '' ? 0 : normalized.split(' ').length
-  const valid = (wordCount === 12 || wordCount === 24) && isValidMnemonic(normalized)
-  const showInvalid = !valid && wordCount >= 12
+  const valid = PHRASE_LENGTHS.includes(wordCount) && isValidMnemonic(normalized)
+  // judged at a full length, not on the way to a longer phrase
+  const showInvalid = !valid && (PHRASE_LENGTHS.includes(wordCount) || wordCount > 24)
 
   return (
     <div className="onboard-screen">
@@ -37,7 +41,7 @@ export default function RestoreFlow({ onComplete, onBack }: RestoreFlowProps) {
         <div className="stack">
           <h1 className="screen-title">Restore from phrase</h1>
           <p className="text-secondary">
-            Enter your 12 or 24 word recovery phrase, separated by spaces. Order matters.
+            Enter your recovery phrase (12 to 24 words), separated by spaces. Order matters.
           </p>
           <label className="field">
             <span className="field-label">Recovery phrase</span>

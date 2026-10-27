@@ -62,7 +62,10 @@ const T4_BASE = CHAINS['btc-testnet'].providers[0].base
 
 let failures = 0
 function check(label, ok, detail) {
-  if (ok) console.log(`PASS  ${label}`)
+  // A live provider being unreachable or rate-limited is not a wallet defect
+  // (the app fails over): a skip, as in the other live suites (_live.mjs)
+  if (!ok && NET_ISSUE.test(String(detail))) console.log(`SKIP  ${label} — live dependency unavailable: ${String(detail).slice(0, 90)}`)
+  else if (ok) console.log(`PASS  ${label}`)
   else {
     failures++
     console.error(`FAIL  ${label}${detail ? ` — ${detail}` : ''}`)

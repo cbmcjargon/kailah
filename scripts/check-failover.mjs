@@ -23,7 +23,14 @@
 //      startup, never remembered, never used for a mere rate limit;
 //   I. the BlockCypher adapter serves Litecoin: fee estimates from the chain
 //      root, BIP125 from input sequences (never on Dogecoin), no raw-hex
-//      fetches for segwit, and one request gate shared by every chain.
+//      fetches for segwit, and one request gate shared by every chain;
+//   J. after the 2026-10-27 audit: a visible 429 from any provider but
+//      BlockCypher is push-back, and BlockCypher's budget isn't spent to
+//      dodge the active provider's pause; the start-up probe keeps the
+//      configured order; the client says when a backup answers (polls slow
+//      down); nothing is remembered once the wallet locked or was erased;
+//      BlockCypher serves up to 500 inputs/outputs and marks a bigger
+//      transaction partial; its broadcast has a deadline.
 const { createFailoverClient } = await import('../src/lib/api.ts')
 
 let failures = 0
@@ -56,7 +63,7 @@ const STATS = { balance: { confirmed: 0n, unconfirmed: 0n }, txCount: 0 }
  * CORS-less 429 or a dead host); 'timeout' (AbortSignal.timeout's
  * DOMException); 'http' (the server answered with another error).
  */
-function provider(name, log, { tip = 'ok', stats = ['ok'], burstLimited = true, backupOnly = false, logTip = false, push = 'ok' } = {}) {
+function provider(name, log, { tip = 'ok', stats = ['ok'], burstLimited = true, backupOnly = false, budgetLimited = false, logTip = false, push = 'ok', tipDelay = 0 } = {}) {
   let n = 0
   const act = async (outcome) => {
     log.push(`${name}:${outcome}`)
@@ -71,9 +78,11 @@ function provider(name, log, { tip = 'ok', stats = ['ok'], burstLimited = true, 
     providerName: name,
     ...(burstLimited ? { burstLimited: true } : {}),
     ...(backupOnly ? { backupOnly: true } : {}),
+    ...(budgetLimited ? { budgetLimited: true } : {}),
     getTipHeight: () => {
       if (logTip) log.push(`${name}:tip`)
-      return tip === 'ok' ? Promise.resolve(100) : Promise.reject(new TypeError('Load failed'))
+      if (tip !== 'ok') return Promise.reject(new TypeError('Load failed'))
+      return tipDelay > 0 ? new Promise((r) => setTimeout(() => r(100), tipDelay)) : Promise.resolve(100)
     },
     getAddressStats: () => act(typeof stats === 'function' ? stats(n++) : stats[Math.min(n++, stats.length - 1)]),
     broadcast: async () => {
@@ -182,11 +191,11 @@ console.log('--- D. timeouts, BlockCypher, HTTP errors ---')
 }
 for (const refusal of ['net', 'rl']) {
   const log = []
-  const c = client([provider('BC', log, { stats: ['ok', refusal], burstLimited: false }), provider('P2', log, { tip: 'net', stats: ['http'] })])
+  const c = client([provider('BC', log, { stats: ['ok', refusal], burstLimited: false, budgetLimited: true }), provider('P2', log, { tip: 'net', stats: ['http'] })])
   await c.getAddressStats('a')
   const m = log.length
   await rejects(() => c.getAddressStats('a'))
-  check(`D4 a provider without burstLimited (BlockCypher: hourly budget) is not retried after '${refusal}'`, log.slice(m).join(' ') === `BC:${refusal} P2:http`, log.slice(m).join(' '))
+  check(`D4 BlockCypher (an hourly budget, not burst-limited) is not retried after '${refusal}'`, log.slice(m).join(' ') === `BC:${refusal} P2:http`, log.slice(m).join(' '))
 }
 {
   const log = []
@@ -395,6 +404,105 @@ console.log('--- I. BlockCypher as the Litecoin backup ---')
   await Promise.all([ltcBc.getTipHeight(), dogeBc.getTipHeight(), ltcBc.getTipHeight(), dogeBc.getTipHeight()])
   const gaps = calls.slice(1).map((c, k) => c.at - calls[k].at)
   check('I11 concurrent Litecoin and Dogecoin requests queue behind one gate, 500 ms apart', calls.length === 4 && gaps.every((g) => g >= 480), gaps.join(', ') + ' ms')
+  globalThis.fetch = realFetch
+}
+
+console.log('--- J. after the 2026-10-27 audit: rate limits, start-up order, backups, writes after erase, BlockCypher limits ---')
+{
+  // BM6: Bitcore's limiter answers a visible 429; that is push-back, and
+  // BlockCypher's budget is not spent to dodge it
+  const log = []
+  const c = client([
+    provider('BC', log, { tip: 'net', burstLimited: false, budgetLimited: true }),
+    provider('BT', log, { burstLimited: false, stats: ['ok', 'rl', 'ok'] }),
+  ])
+  await c.getAddressStats('a')
+  const { value, err } = await timed(() => c.getAddressStats('a'))
+  check('J1 a visible 429 from a provider that isn\'t burst-limited (Bitcore) pauses it and retries it (BM6)', err === null && value?.from === 'BT' && log.join(' ') === 'BT:ok BT:rl BT:ok', log.join(' '))
+  check('J1b ...without spending a request of BlockCypher\'s hourly budget', !log.some((e) => e.startsWith('BC:')))
+  const log2 = []
+  const c2 = client([provider('BT', log2, { burstLimited: false, stats: ['ok', 'rl', 'ok'] }), provider('P2', log2, { stats: ['ok'] })])
+  await c2.getAddressStats('a')
+  await c2.getAddressStats('a')
+  check('J1c an unmetered second provider still covers the pause at once, as before', log2.join(' ') === 'BT:ok BT:rl P2:ok', log2.join(' '))
+}
+{
+  // BL8: the start-up probe keeps the configured order when the first answers
+  const log = []
+  const c = client([provider('P1', log, { tipDelay: 60 }), provider('P2', log)])
+  await c.getAddressStats('a')
+  check('J2 a slower but healthy first provider stays the daily driver (the fastest no longer wins) (BL8)', c.activeProvider() === 'P1' && log[0] === 'P1:ok', `${c.activeProvider()} / ${log.join(' ')}`)
+  const log2 = []
+  const c2 = client([provider('P1', log2, { tip: 'net', stats: ['net'] }), provider('P2', log2, { tipDelay: 30 })])
+  await c2.getAddressStats('a')
+  check('J2b a first provider that doesn\'t answer the probe is passed over', c2.activeProvider() === 'P2' && log2[0] === 'P2:ok', `${c2.activeProvider()} / ${log2.join(' ')}`)
+}
+{
+  // BL7: the client says when a backup is answering, so polls slow down
+  const log = []
+  const c = createFailoverClient([provider('LS', log, { tip: 'net', stats: (n) => (n === 0 ? 'net' : 'ok') }), provider('BC', log, { burstLimited: false, backupOnly: true, budgetLimited: true })], undefined, TUNING)
+  check('J3 a fresh client is not on a backup', c.onBackup() === false)
+  await c.getAddressStats('a')
+  check('J3b with the regular provider down, a backup answers and the client says so (BL7)', c.onBackup() === true && log.join(' ') === 'LS:net BC:ok', log.join(' '))
+  advance(61_000)
+  await c.getAddressStats('a')
+  check('J3c once the regular provider answers again, it doesn\'t', c.onBackup() === false && log.at(-1) === 'LS:ok', log.join(' '))
+}
+{
+  // BL9: no provider preference written after the wallet locked or was erased
+  const store = new Map()
+  globalThis.localStorage = {
+    getItem: (k) => (store.has(k) ? store.get(k) : null),
+    setItem: (k, v) => void store.set(k, String(v)),
+    removeItem: (k) => void store.delete(k),
+  }
+  const { lockSecureStore } = await import('../src/lib/securestore.ts')
+  const gated = (lock) => {
+    let release
+    const gate = new Promise((r) => (release = r))
+    const p1 = { providerName: 'P1', getTipHeight: async () => 100, getAddressStats: async () => { await gate; throw new TypeError('Load failed') } }
+    const p2 = { providerName: 'P2', getTipHeight: async () => 100, getAddressStats: async () => STATS }
+    const c = createFailoverClient([p1, p2], 'btc', TUNING)
+    const req = c.getAddressStats('a')
+    return (async () => {
+      await new Promise((r) => setTimeout(r, 10))
+      if (lock) lockSecureStore() // the user locks (or erases) while the request is out
+      release()
+      await req
+      return JSON.parse(store.get('kailah.provider.v1') ?? '{}').btc
+    })()
+  }
+  check('J4 a failover remembers the provider that answered (control)', (await gated(false)) === 'P2')
+  store.clear()
+  check('J4b ...but not when the wallet locked or was erased while the request was out (BL9)', (await gated(true)) === undefined)
+  delete globalThis.localStorage
+}
+{
+  // BM7, BL4: BlockCypher serves every input and output up to its limit, a
+  // transaction past it is marked partial, and a broadcast has a deadline
+  const { BlockcypherProvider } = await import('../src/lib/blockcypher.ts')
+  const { CHAINS } = await import('../src/lib/networks.ts')
+  const DOGE = CHAINS.doge
+  const realFetch = globalThis.fetch
+  const seen = []
+  const D = 'DBus3bamQjgJULBJtYXpEzDWQRwF5iwxgC'
+  const out = (n) => Array.from({ length: n }, (_, k) => ({ value: 1000 + k, addresses: [k === 0 ? D : 'DOther'] }))
+  globalThis.fetch = async (url, init) => {
+    seen.push({ url: String(url), signal: init?.signal })
+    if (String(url).includes('/txs/push')) return new Response(JSON.stringify({ tx: { hash: 'ee'.repeat(32) } }), { status: 201 })
+    return new Response(JSON.stringify({ txs: [
+      { hash: 'a1'.repeat(32), block_height: 5, confirmed: '2026-10-01T00:00:00Z', fees: 1, vin_sz: 1, vout_sz: 30, inputs: [{ prev_hash: 'b1'.repeat(32), output_index: 0, output_value: 99_999, addresses: ['DExchange'] }], outputs: out(30) },
+      { hash: 'a2'.repeat(32), block_height: 5, confirmed: '2026-10-01T00:00:00Z', fees: 1, vin_sz: 1, vout_sz: 900, inputs: [{ prev_hash: 'b2'.repeat(32), output_index: 0, output_value: 99_999, addresses: ['DExchange'] }], outputs: out(500) },
+    ] }), { status: 200 })
+  }
+  const bc = new BlockcypherProvider(DOGE.providers[0], DOGE)
+  const txs = await bc.getAddressTxs(D)
+  check('J5 the history request asks for every input and output up to 500 (BlockCypher\'s default is 20) (BM7)', /[?&]txlimit=500\b/.test(seen[0]?.url ?? ''), seen[0]?.url)
+  check('J5b a batch payout served whole is read whole', txs[0]?.outputs.length === 30 && txs[0]?.partial === undefined)
+  check('J5c one with more outputs than were served is marked partial, not read as a wrong amount', txs[1]?.partial === true)
+  seen.length = 0
+  await bc.broadcast('00')
+  check('J6 a BlockCypher broadcast has a deadline, so "Broadcasting…" can\'t hang forever (BL4)', seen[0]?.signal instanceof AbortSignal)
   globalThis.fetch = realFetch
 }
 

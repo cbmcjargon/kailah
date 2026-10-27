@@ -12,7 +12,10 @@
 //   D. per-network normalization: 0x and EVM checksum case, bech32 prefix and
 //      case, TRON's leading T; and the match thresholds;
 //   E. the send log: per chain, deduplicated, capped, encrypted at rest, gone
-//      on erase.
+//      on erase;
+//   F. case is folded only for this wallet's real bech32 prefixes in one
+//      case: a Solana, TRON or legacy Litecoin address that merely starts
+//      like one stays case-sensitive, so its case-flipped twin warns.
 const store = new Map()
 globalThis.localStorage = {
   getItem: (k) => (store.has(k) ? store.get(k) : null),
@@ -145,6 +148,31 @@ console.log('--- E. the send log ---')
   check('E unlocked: the log is back', sentToAddresses('sol').includes(PAID))
   clearSecureStore()
   check('E erase removes it', !store.has('kailah.sec.sentto') && sentToAddresses('sol').length === 0)
+}
+
+console.log('--- F. case folding only for real bech32 (bug audit 2026-10-27, BM12) ---')
+{
+  // a case-sensitive address that merely STARTS like bech32 ("..1q") was
+  // lowercased, so a lookalike differing from it only in letter case read as
+  // the same address and never warned
+  const flip = (a, from) => a.slice(0, from) + [...a.slice(from, -4)].map((c) => (c === c.toLowerCase() ? c.toUpperCase() : c.toLowerCase())).join('') + a.slice(-4)
+  const SOL_PAID = 'Ab1qEGdJqWwCAavfwy4GVdTVeZUwaAn2Zjq6KxGTZoT6M'
+  const solTwin = flip(SOL_PAID, 4)
+  const m1 = findLookalike(solTwin, knownAddresses([], [], [SOL_PAID]), SOL_FORMAT)
+  check('F1 Solana: a case-flipped twin of a paid address starting "Ab1q" warns', solTwin !== SOL_PAID && m1?.known === SOL_PAID, show(m1))
+  const TRON_PAID = 'TAb1pHXWJ7v2sMkPBxNnpfgDqkhJ6ZMRSWy'
+  const tronTwin = flip(TRON_PAID, 5)
+  const m2 = findLookalike(tronTwin, knownAddresses([], [], [TRON_PAID]), TRON_FORMAT)
+  check('F2 TRON: likewise for "TAb1p…"', tronTwin !== TRON_PAID && m2?.known === TRON_PAID, show(m2))
+  const LTC_LEGACY = 'Ltc1qQ8Fz7b3N9xWJbN5yVt2KcLdRzXyAbC'
+  const ltcTwin = flip(LTC_LEGACY, 5)
+  const m3 = findLookalike(ltcTwin, knownAddresses([], [], [LTC_LEGACY]), UTXO_FORMAT)
+  check('F3 a legacy (base58) Litecoin address that starts "Ltc1q" is case-sensitive too', m3?.known === LTC_LEGACY, show(m3))
+  const BECH = 'bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq'
+  check('F4 a real bech32 address in capitals is still the same address (no warning)', findLookalike(BECH.toUpperCase(), knownAddresses([], [], [BECH]), UTXO_FORMAT) === null)
+  const bechTwin = 'bc1qar0sXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXf5mdq'.toLowerCase().replace(/x/g, 'q')
+  const m5 = findLookalike(bechTwin, knownAddresses([], [], [BECH]), UTXO_FORMAT)
+  check('F5 ...and a real bech32 lookalike still warns, past the shared "bc1q"', m5?.known === BECH && m5.sameStart >= 4, show(m5))
 }
 
 console.log(failures === 0 ? '\nAll lookalike checks passed.' : `\n${failures} CHECK(S) FAILED.`)

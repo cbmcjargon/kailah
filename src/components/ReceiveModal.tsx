@@ -71,7 +71,10 @@ export default function ReceiveModal({ chain, account, accountState, onClose }: 
   }, [address])
 
   return (
-    <Modal title={`Receive ${chain.ticker}${hw !== null ? ' · Ledger' : ''}`} onClose={onClose}>
+    // not while the Ledger shows the address: closing then left the check
+    // running, and the next device action timed out behind it (bug audit
+    // 2026-10-27, BM28)
+    <Modal title={`Receive ${chain.ticker}${hw !== null ? ' · Ledger' : ''}`} onClose={onClose} canDismiss={!device.busy}>
       <div className="stack receive-body">
         <div className="qr-frame">
           {qr ? (

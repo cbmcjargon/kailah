@@ -3,6 +3,7 @@ import type { HardwareAccountRecord, NetMode } from '../lib/types'
 import { CHAINS } from '../lib/networks'
 import { NETWORK_LABELS, PRACTICE_TWINS, REAL_NETWORKS, type RealNetworkId } from '../lib/netprefs'
 import { shortAddress } from '../lib/format'
+import { csvExportHint } from '../lib/csvexport'
 import { unlockVault } from '../lib/vault'
 import Modal from './Modal'
 import WordGrid from './WordGrid'
@@ -24,10 +25,10 @@ interface SettingsModalProps {
   notifyEnabled: boolean
   notifyPermission: NotificationPermission
   onToggleNotify: (on: boolean) => Promise<void>
-  /** export transaction history for the visible chains as CSV files */
+  /** export the shown networks' transaction history as one CSV file */
   onExportCsv: () => void
-  /** false when no visible chain has any history to export */
-  csvAvailable: boolean
+  /** names of the networks the export covers (shown, this mode, with history); empty disables it */
+  csvNetworks: string[]
   /** Ledger accounts on this wallet (all modes) */
   hwRecords: HardwareAccountRecord[]
   onAddHardware: () => void
@@ -73,7 +74,7 @@ export default function SettingsModal({
   notifyPermission,
   onToggleNotify,
   onExportCsv,
-  csvAvailable,
+  csvNetworks,
   hwRecords,
   onAddHardware,
   onRemoveHardware,
@@ -398,14 +399,14 @@ export default function SettingsModal({
               type="button"
               className="settings-row"
               onClick={onExportCsv}
-              disabled={!csvAvailable}
+              disabled={csvNetworks.length === 0}
             >
               <span className="settings-row-with-icon">
                 <IconDownload size={16} />
                 Export transactions (CSV)
               </span>
               <span className="settings-row-hint">
-                {csvAvailable ? 'One file per chain' : 'No history yet'}
+                {csvExportHint(csvNetworks)}
               </span>
             </button>
           </section>

@@ -48,6 +48,8 @@ export type LedgerErrorKind =
   | 'wrong-device'
   | 'disconnected'
   | 'protocol'
+  /** not the device's doing: a data service or the wallet itself (BL48) */
+  | 'other'
 
 /** Every failure a Ledger operation can end in, with user-facing copy. */
 export class LedgerError extends Error {
@@ -71,7 +73,8 @@ export function toLedgerError(e: unknown, appName = 'Bitcoin'): LedgerError {
   if (e instanceof LedgerStatusError) {
     switch (e.sw) {
       case 0x6985:
-        return new LedgerError('rejected', 'You rejected it on your Ledger. Nothing was sent.')
+        // declined on the device: true of a signature and of an address check alike (BL48)
+        return new LedgerError('rejected', 'You declined it on your Ledger, so nothing was signed.')
       case 0x5515:
       case 0x6982:
         return new LedgerError('locked', 'Unlock your Ledger with its PIN, then try again.')
@@ -101,7 +104,9 @@ export function toLedgerError(e: unknown, appName = 'Bitcoin'): LedgerError {
       'The browser could not open your Ledger. Close Ledger Live or other wallet tabs, replug the device, and try again.',
     )
   }
-  return new LedgerError('protocol', e instanceof Error && e.message ? e.message : 'Ledger request failed.')
+  // Anything else came from outside the device (a data service fetching
+  // the funding transactions, say): not a "Ledger problem" (BL48)
+  return new LedgerError('other', e instanceof Error && e.message ? e.message : 'Something went wrong.')
 }
 
 // ---------------------------------------------------------------------------
@@ -115,7 +120,15 @@ let session: LedgerTransport | null = null
  */
 export function browserTransport(prompt: boolean): TransportSource {
   return async () => {
-    if (session) return session
+    if (session) {
+      // Opening or closing an app on the Ledger (or a replug) re-enumerates
+      // it and leaves the old handle dead: reopen rather than fail the tap
+      // with "Your Ledger disconnected" (bug audit 2026-10-27, BM27).
+      if (session.alive?.() !== false) return session
+      const stale = session
+      session = null
+      await stale.close().catch(() => undefined)
+    }
     if (ledgerSupport() === null) {
       throw new LedgerError(
         'unsupported',
@@ -123,7 +136,7 @@ export function browserTransport(prompt: boolean): TransportSource {
       )
     }
     const t = await openLedgerTransport(prompt)
-    if (t === null) throw new LedgerError('no-device', 'Connect your Ledger, unlock it, then tap Connect.')
+    if (t === null) throw new LedgerError('no-device', 'Connect your Ledger, unlock it, then try again.')
     session = t
     return t
   }
@@ -153,8 +166,9 @@ async function withLedger<T>(
     return await fn(t)
   } catch (e) {
     const err = toLedgerError(e, appName)
-    // A stale or wedged handle is useless; the next tap reconnects.
-    if (err.kind === 'disconnected' || err.kind === 'busy') {
+    // A stale or wedged handle is useless; the next tap reconnects. So is
+    // one to the wrong app: opening the right one re-enumerates the device.
+    if (err.kind === 'disconnected' || err.kind === 'busy' || err.kind === 'wrong-app') {
       if (session === t) session = null
       await t.close().catch(() => undefined)
     }

@@ -24,7 +24,18 @@ import { mnemonicToSeedSync } from '@scure/bip39'
 import { normalizeMnemonic } from './keys'
 import * as solLib from 'micro-sol-signer'
 import { formatEvmAmount } from './units'
-import { agoText, recordPending, solInFlightBlock } from './pending'
+import { formatCoin } from './format'
+import {
+  agoText,
+  dropPending,
+  dismissLanded,
+  EarlierSendLanded,
+  markPendingFailed,
+  pendingSol,
+  recordPending,
+  solInFlightBlock,
+  type PendingSol,
+} from './pending'
 import { recordSentTo } from './sentlog'
 import type { NetMode } from './types'
 
@@ -203,9 +214,12 @@ async function rpc<T>(chain: SolChainConfig, method: string, params: unknown[]):
     }
   }
   const detail = lastErr instanceof Error ? lastErr.message : String(lastErr)
-  if (/load failed|failed to fetch|networkerror|timed? ?out|abort/i.test(detail)) {
-    throw new Error(
-      `Couldn't reach the ${chain.networkName} network right now. Your coins are safe; try again in a few minutes.`,
+  if (lastErr instanceof TypeError || /load failed|failed to fetch|networkerror|timed? ?out|abort/i.test(detail)) {
+    // no answer at all: for a read that's harmless; a broadcast reads
+    // `unreachable` as "it may have gone out" (submitSolTx)
+    throw Object.assign(
+      new Error(`Couldn't reach the ${chain.networkName} network right now. Your coins are safe; try again in a few minutes.`),
+      { unreachable: true },
     )
   }
   throw new Error(detail)
@@ -512,6 +526,15 @@ export async function prepareSolSend(args: SolSendArgs): Promise<PreparedSolSend
         `an account to hold. Send a bit less, or use Max to send everything.`,
     )
   }
+  // An address that doesn't exist yet is created by this transfer, and the
+  // network refuses to create one below the rent-exempt minimum
+  // ("InsufficientFundsForRent", after signing; bug audit 2026-10-27, BM18).
+  if (toInfo.value == null && amount < rentMin) {
+    throw new Error(
+      `That address has never held SOL, and Solana won't open it with less than ${formatCoin(rentMin, 9)} SOL. ` +
+        `Send at least that much.`,
+    )
+  }
 
   const instruction = solLib.sys.transferSol({
     source: key.address,
@@ -520,7 +543,10 @@ export async function prepareSolSend(args: SolSendArgs): Promise<PreparedSolSend
   })
   const unsigned = solLib.createTx(
     key.address,
-    [withReference(instruction, extras.reference), ...memoInstructions(key.address, extras.memo)],
+    // Solana Pay puts the memo immediately before the transfer; its
+    // validator (and so the merchant) doesn't credit it after (bug audit
+    // 2026-10-27, BM19)
+    [...memoInstructions(key.address, extras.memo), withReference(instruction, extras.reference)],
     blockhashRes.value.blockhash,
   )
 
@@ -538,6 +564,14 @@ export async function prepareSolSend(args: SolSendArgs): Promise<PreparedSolSend
     blockhash: blockhashRes.value.blockhash,
   }
 }
+
+/**
+ * How long a reviewed Solana transaction stays confirmable. Its blockhash
+ * lasts ~60-90 s; a review left open longer is prepared again before it is
+ * signed, instead of failing with a lapsed blockhash (bug audit 2026-10-27,
+ * BM17).
+ */
+export const SOL_REVIEW_FRESH_MS = 45_000
 
 /** A token account, a program's account: not a wallet. The system program owns plain wallets. */
 function assertWalletDestination(toInfo: AccountInfoResult): void {
@@ -676,7 +710,8 @@ async function prepareUsdcSend(
   const last = instructions.length - 1
   const transfer = instructions[last]
   if (transfer !== undefined) instructions[last] = withReference(transfer, extras.reference)
-  instructions.push(...memoInstructions(key.address, extras.memo))
+  // the memo immediately before the transfer, as in the SOL path
+  instructions.splice(last, 0, ...memoInstructions(key.address, extras.memo))
   const unsigned = solLib.createTx(key.address, instructions, blockhash)
 
   return {
@@ -721,33 +756,147 @@ export class SolExpiredError extends Error {
   }
 }
 
+type SolSubmitOutcome = 'landed' | 'expired' | 'refused' | 'unclear'
+
+/** What a failed sendTransaction means. Unrecognised failures count as "may have gone out". */
+function solSubmitOutcome(e: unknown): SolSubmitOutcome {
+  if ((e as { unreachable?: unknown } | null)?.unreachable === true) return 'unclear'
+  const msg = e instanceof Error ? e.message : String(e)
+  if (/already (been )?processed/i.test(msg)) return 'landed'
+  if (/blockhash not found|block height exceeded/i.test(msg)) return 'expired'
+  // preflight: the RPC simulated it and refused before forwarding it anywhere
+  if (/transaction simulation failed|insufficient funds|insufficientfunds|invalid transaction|signature verification|could not be decoded|accountnotfound|account not found/i.test(msg)) {
+    return 'refused'
+  }
+  return 'unclear'
+}
+
+function solRefusalText(msg: string): string {
+  if (/insufficientfundsforrent|insufficient funds for rent/i.test(msg)) {
+    return "an account would be left below Solana's minimum balance for an account (rent)."
+  }
+  if (/insufficient (funds|lamports)|insufficientfundsforfee|custom program error: 0x1\b/i.test(msg)) {
+    return "there isn't enough SOL for this plus the network fee."
+  }
+  return `${msg.slice(0, 140)}.`
+}
+
 /**
- * Send the SAME signed bytes again after a failed broadcast. Sending twice is
- * harmless (same signature, the network keeps one); building a fresh
- * transaction is what could pay twice. "Already processed" means the first
- * try did land; an expired blockhash means it never will.
+ * Hand signed bytes to the network: the one path for sends, swaps, stake
+ * actions and resends (bug audit 2026-10-27, BH1). "Already processed" means
+ * an earlier try landed: success. A preflight refusal took nothing: the
+ * record goes and a plain error says so. An expired blockhash can't land now
+ * — but an earlier try may have landed before it expired, so the chain is
+ * asked before the wallet says "did not go through". No answer, or one the
+ * wallet doesn't recognise: the record stays, marked failed, and the same
+ * bytes can be sent again (SolBroadcastError).
  */
-export async function rebroadcastSol(chain: SolChainConfig, signature: string, signed: string): Promise<string> {
+export async function submitSolTx(
+  chain: SolChainConfig,
+  signature: string,
+  signed: string,
+  entry?: PendingSol,
+): Promise<string> {
   try {
     await rpc<string>(chain, 'sendTransaction', [signed, { encoding: 'base64', preflightCommitment: 'confirmed' }])
     return signature
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e)
-    if (/already (been )?processed/i.test(msg)) return signature
-    if (/blockhash not found|block height exceeded|expired/i.test(msg)) throw new SolExpiredError()
-    throw new SolBroadcastError(msg, signature, signed)
+    const outcome = solSubmitOutcome(e)
+    // "already processed" says it landed, not that it worked
+    const landedAs = async () => {
+      const st = await solTxStatus(chain, signature).catch(() => null)
+      if (st === 'failed') {
+        if (entry !== undefined) dropPending(entry)
+        throw new Error(SOL_LANDED_FAILED)
+      }
+      return signature
+    }
+    if (outcome === 'landed') return landedAs()
+    if (outcome === 'expired') {
+      const seen = await solTxSeen(chain, signature).catch(() => null)
+      if (seen === true) return landedAs()
+      // "Blockhash not found" from one RPC is expired only once the chain's
+      // height has passed the blockhash's last valid height: a lagging node
+      // says it too (bug audit 2026-10-27, BM17)
+      const lvbh = entry?.lastValidBlockHeight
+      const passed =
+        lvbh === undefined || lvbh === Number.MAX_SAFE_INTEGER
+          ? true
+          : await solBlockHeight(chain).then((h) => h > lvbh, () => false)
+      if (seen === false && passed) {
+        if (entry !== undefined) dropPending(entry)
+        throw new SolExpiredError()
+      }
+      if (entry !== undefined) markPendingFailed(entry)
+      throw new SolBroadcastError(
+        seen === false
+          ? "The network node didn't recognise this transaction's window, though the chain says it is still open, so it may yet go through. The wallet holds new sends until it knows."
+          : "The transaction's network window closed, and the wallet couldn't ask whether it landed first.",
+        signature,
+        signed,
+      )
+    }
+    if (outcome === 'refused') {
+      if (entry !== undefined) dropPending(entry)
+      throw new Error(`The network refused this transaction: ${solRefusalText(msg)} Nothing was sent.`)
+    }
+    if (entry !== undefined) markPendingFailed(entry)
+    throw new SolBroadcastError(
+      `The network didn't confirm it received this transaction (${msg.slice(0, 80)}). It may still go through.`,
+      signature,
+      signed,
+    )
   }
 }
 
-/** The RPC's current block height, for the ledger's expiry by blockhash validity. */
+/**
+ * Send the SAME signed bytes again after a failed broadcast. Sending twice is
+ * harmless (same signature, the network keeps one); building a fresh
+ * transaction is what could pay twice. "Already processed" means the first
+ * try did land; an expired blockhash that the chain never saw means it never
+ * will.
+ */
+export async function rebroadcastSol(chain: SolChainConfig, signature: string, signed: string): Promise<string> {
+  const entry = pendingSol(chain.id).find((p) => p.signature === signature)
+  return submitSolTx(chain, signature, signed, entry)
+}
+
+/**
+ * The chain's current block height, for the ledger's expiry by blockhash
+ * validity — from getEpochInfo: publicnode answers getBlockHeight with the
+ * SLOT (~22 million higher on mainnet), which made every attempt look
+ * expired (bug audit 2026-10-27, BM2).
+ */
 export function solBlockHeight(chain: SolChainConfig): Promise<number> {
-  return rpc<number>(chain, 'getBlockHeight', [{ commitment: 'confirmed' }]).then((h) => {
+  return rpc<{ blockHeight?: unknown }>(chain, 'getEpochInfo', [{ commitment: 'confirmed' }]).then((r) => {
+    const h = r?.blockHeight
     if (typeof h !== 'number' || !Number.isSafeInteger(h)) throw new Error('bad block height')
     return h
   })
 }
 
 /** True once the network reports the signature at any confirmation level. */
+/**
+ * Where an attempt stands: landed and did what it said ('ok'), landed but
+ * failed there ('failed': only its fee was spent; bug audit 2026-10-27,
+ * BL25 — it used to read as a success), or not on the network ('unseen').
+ * A failed lookup throws.
+ */
+export async function solTxStatus(chain: SolChainConfig, signature: string): Promise<'ok' | 'failed' | 'unseen'> {
+  const r = await rpc<{ value?: ({ err?: unknown } | null)[] }>(chain, 'getSignatureStatuses', [
+    [signature],
+    { searchTransactionHistory: true },
+  ])
+  const st = r.value?.[0] ?? null
+  if (st === null) return 'unseen'
+  return st.err != null ? 'failed' : 'ok'
+}
+
+/** The message for an attempt that landed but failed on chain. */
+export const SOL_LANDED_FAILED =
+  'The transaction reached the network but failed there, so nothing was sent; only its network fee was spent. You can try again.'
+
 export async function solTxSeen(chain: SolChainConfig, signature: string): Promise<boolean> {
   const r = await rpc<{ value?: (object | null)[] }>(chain, 'getSignatureStatuses', [
     [signature],
@@ -769,31 +918,46 @@ export async function assertNoSolInFlight(chain: SolChainConfig): Promise<void> 
     () => solBlockHeight(chain),
   )
   if (block === null) return
+  const p = block.entry
+  if (block.reason === 'landed') {
+    // landed, but failed there: nothing was paid, so say that instead (BL25)
+    if ((await solTxStatus(chain, p.signature).catch(() => null)) === 'failed') {
+      dismissLanded(p)
+      throw new Error(`Your transaction from ${agoText(p.ts)} on ${chain.networkName} reached the network but failed there, so nothing was paid (its network fee was spent). You can go ahead now.`)
+    }
+    throw new EarlierSendLanded(
+      p,
+      `Your transaction from ${agoText(p.ts)}${p.to !== undefined ? ` (to ${p.to.slice(0, 8)}…)` : ''} on ${chain.networkName}`,
+    )
+  }
   throw new Error(
     block.reason === 'pending'
-      ? `A send from ${agoText(block.entry.ts)} may still go through — its network window hasn't closed. Wait a minute, then try again; sending now could pay twice.`
-      : `Couldn't check whether your send from ${agoText(block.entry.ts)} went through. Wait a minute and try again — sending without knowing could pay twice.`,
+      ? `A send from ${agoText(p.ts)} may still go through — its network window hasn't closed. Wait a minute, then try again; sending now could pay twice.`
+      : `Couldn't check whether your send from ${agoText(p.ts)} went through. Wait a minute and try again — sending without knowing could pay twice.`,
   )
 }
 
 export async function broadcastSolSend(key: SolKey, prepared: PreparedSolSend): Promise<string> {
   const [txid, signed] = solLib.signTx(key.privateKey, prepared.unsigned)
   // recorded BEFORE the send so even a timed-out attempt leaves a trace
-  recordPending({
+  const entry: PendingSol = {
     kind: 'sol',
     chainId: prepared.chain.id,
     signature: txid,
+    to: prepared.to,
     ts: Date.now(),
     lastValidBlockHeight: prepared.lastValidBlockHeight,
-  })
-  recordSentTo(prepared.chain.id, prepared.to)
+  }
+  recordPending(entry)
+  // the send log trusts an address paid, or maybe paid: not one the network
+  // refused, nor an attempt that expired unseen (bug audit 2026-10-27, BL19)
   try {
-    return await rpc<string>(prepared.chain, 'sendTransaction', [
-      signed,
-      { encoding: 'base64', preflightCommitment: 'confirmed' },
-    ])
+    const sig = await submitSolTx(prepared.chain, txid, signed, entry)
+    recordSentTo(prepared.chain.id, prepared.to)
+    return sig
   } catch (e) {
-    throw new SolBroadcastError(e instanceof Error ? e.message : String(e), txid, signed)
+    if (e instanceof SolBroadcastError) recordSentTo(prepared.chain.id, prepared.to)
+    throw e
   }
 }
 
@@ -811,6 +975,19 @@ export function formatSol(v: bigint): string {
 
 export function formatSolUsdc(chain: SolChainConfig, v: bigint): string {
   return formatEvmAmount(v, chain.usdc.decimals)
+}
+
+/**
+ * A Solana Pay amount (a plain decimal, already checked) in the asset's
+ * smallest units. More decimal places than the asset has make the request
+ * invalid: rounding would leave the payment short (bug audit 2026-10-27, BH6).
+ */
+export function solPayUnits(raw: string, decimals: number, symbol: string): bigint {
+  const [whole = '', frac = ''] = raw.split('.')
+  if (frac.length > decimals) {
+    throw new Error(`That payment request asks for more decimal places than ${symbol} has (${decimals}).`)
+  }
+  return BigInt((whole === '' ? '0' : whole) + frac.padEnd(decimals, '0'))
 }
 
 /** Bare base58 address or a Solana Pay URI (solana:<address>?amount=…). */
@@ -854,20 +1031,24 @@ export function parseSolScanned(text: string): {
       }
       memo = m
     }
-    const raw = q.get('amount')
-    const validAmount = raw !== null && /^\d*\.?\d*$/.test(raw) && raw !== '' && raw !== '.'
+    // The amount is exact: a merchant credits a payment only when it is
+    // paid to the last unit, so a malformed amount, or one with more
+    // decimal places than the asset has, makes the request invalid instead
+    // of being rounded or dropped (bug audit 2026-10-27, BH6).
+    const raw = q.get('amount') ?? ''
+    if (raw !== '' && !/^(\d+\.?\d*|\.\d+)$/.test(raw)) {
+      throw new Error("That payment request's amount isn't a valid number.")
+    }
+    const hasAmount = raw !== ''
     const spl = q.get('spl-token')
     if (spl !== null) {
       // Per Solana Pay, `amount` is then denominated in THAT token, not SOL —
       // treating it as SOL would autofill e.g. a 100-USDC request as 100 SOL.
       splToken = spl
-      if (validAmount) tokenAmount = raw
-    } else if (validAmount) {
-      const [whole = '0', frac = ''] = raw.split('.')
-      if (frac.length <= 9) {
-        const v = BigInt(whole + frac.padEnd(9, '0'))
-        if (v > 0n) amount = v
-      }
+      if (hasAmount) tokenAmount = raw
+    } else if (hasAmount) {
+      const v = solPayUnits(raw, 9, 'SOL')
+      if (v > 0n) amount = v
     }
   }
   if (isValidSolAddress(candidate)) {
@@ -896,6 +1077,8 @@ export interface SolUiState {
   /** seed-derived stake accounts (solstake.ts); best-effort like history */
   stakeAccounts: import('./solstake').StakeAccountView[]
   txs: SolTx[]
+  /** the last refresh's history or stake lookup failed (bug audit 2026-10-27, BM8) */
+  lookupFailed?: boolean
   loading: boolean
   error: string | null
 }

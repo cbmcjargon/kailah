@@ -17,6 +17,8 @@ import type { ArgonJob, ArgonReply } from './argon.worker'
 export type ProgressFn = (fraction: number) => void
 
 const STORAGE_KEY = 'kailah.vault.v1'
+/** The vault's storage key, for windows watching each other's erase (Shell.tsx). */
+export const VAULT_STORAGE_KEY = STORAGE_KEY
 const SALT_BYTES = 16
 const IV_BYTES = 12
 
@@ -209,13 +211,27 @@ function inRange(n: unknown, [lo, hi]: readonly [number, number]): n is number {
 export async function unlockVault(password: string, onProgress?: ProgressFn): Promise<string> {
   let mnemonic: string
   let legacy = false
+  // A record that can't be read (not JSON, bad base64, an unknown version,
+  // impossible lengths) is damaged, whatever the password: only a failed
+  // decryption means the password is wrong (bug audit 2026-10-27, BL38).
+  let record: VaultRecord
+  let salt: Uint8Array
+  let iv: Uint8Array
+  let ct: Uint8Array
   try {
     const raw = localStorage.getItem(STORAGE_KEY)
     if (raw === null) throw new Error('no vault')
-    const record = JSON.parse(raw) as VaultRecord
-    const salt = base64.decode(record.salt)
-    const iv = base64.decode(record.iv)
-    const ct = base64.decode(record.ct)
+    record = JSON.parse(raw) as VaultRecord
+    salt = base64.decode(record.salt)
+    iv = base64.decode(record.iv)
+    ct = base64.decode(record.ct)
+  } catch {
+    throw new Error(DAMAGED)
+  }
+  const known = (record.v === 2 && record.kdf === KDF_V2) || (record.v === 1 && record.kdf === KDF_V1)
+  // AES-GCM: a 12-byte IV, and a ciphertext that holds at least the 16-byte tag and one byte
+  if (!known || iv.length !== 12 || ct.length < 17 || salt.length < 16) throw new Error(DAMAGED)
+  try {
     let key: CryptoKey
     if (record.v === 2 && record.kdf === KDF_V2) {
       if (

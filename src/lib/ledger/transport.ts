@@ -16,6 +16,8 @@ export interface LedgerTransport {
   readonly kind: 'webhid' | 'webusb' | 'emulator'
   exchange(apdu: Uint8Array): Promise<Uint8Array>
   close(): Promise<void>
+  /** false once the handle is known dead: the device re-enumerated (an app opened or closed) or was unplugged */
+  alive?(): boolean
 }
 
 /** A status word other than the ones the caller accepts. */
@@ -131,6 +133,10 @@ class WebHidTransport implements LedgerTransport {
     hid.addEventListener('disconnect', this.onDisconnect)
   }
 
+  alive(): boolean {
+    return this.dead === null && this.device.opened
+  }
+
   private fail(err: unknown): void {
     this.dead = err
     if (this.waiter) {
@@ -224,6 +230,10 @@ class WebUsbTransport implements LedgerTransport {
     private readonly usb: UsbLike,
   ) {
     usb.addEventListener('disconnect', this.onDisconnect)
+  }
+
+  alive(): boolean {
+    return !this.dead && this.device.opened
   }
 
   static async open(device: UsbDeviceLike, usb: UsbLike): Promise<WebUsbTransport> {

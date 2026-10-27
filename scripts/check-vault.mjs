@@ -43,6 +43,80 @@ await writeV1(M, 'legacy pass 123')
 { let msg = ''; try { await unlockVault('nope nope nope') } catch (e) { msg = e.message }; check('v1 wrong password -> Wrong password, no upgrade', msg === 'Wrong password' && rec().v === 1, msg) }
 { const r = rec(); r.iter = 2000000000; localStorage.setItem('kailah.vault.v1', JSON.stringify(r)); let msg = ''; try { await unlockVault('legacy pass 123') } catch (e) { msg = e.message }; check('v1 absurd iter still refused as damaged', /damaged/.test(msg), msg) }
 
+// --- a damaged record is not a wrong password (bug audit 2026-10-27, BL38) --
+{
+  await saveVault(M, 'correct horse battery staple')
+  const good = localStorage.getItem('kailah.vault.v1')
+  const tryWith = async (raw) => {
+    localStorage.setItem('kailah.vault.v1', raw)
+    try { await unlockVault('correct horse battery staple'); return 'unlocked' } catch (e) { return e.message }
+  }
+  const r = JSON.parse(good)
+  const cases = {
+    'not JSON': '{"v":2,"kdf":',
+    'bad base64': JSON.stringify({ ...r, iv: '***not base64***' }),
+    'an unknown version': JSON.stringify({ ...r, v: 7 }),
+    'a short IV': JSON.stringify({ ...r, iv: base64.encode(new Uint8Array(4)) }),
+    'a ciphertext shorter than its tag': JSON.stringify({ ...r, ct: base64.encode(new Uint8Array(8)) }),
+  }
+  const answers = {}
+  for (const [what, raw] of Object.entries(cases)) answers[what] = await tryWith(raw)
+  check('a record that can\'t be read says it is damaged, not "Wrong password": ' + Object.keys(cases).join(', '),
+    Object.values(answers).every((m) => /damaged/.test(m)), JSON.stringify(answers))
+  check('...while a readable record with the wrong password still says Wrong password', (await tryWith(good).then(async () => { try { await unlockVault('wrong password here'); return '' } catch (e) { return e.message } })) === 'Wrong password')
+  localStorage.setItem('kailah.vault.v1', good)
+  check('...and the intact record still unlocks', (await unlockVault('correct horse battery staple')) === M)
+}
+
+// --- every BIP39 phrase length restores (BL37) --------------------------------
+{
+  const { PHRASE_LENGTHS } = await import('../src/components/RestoreFlow.tsx')
+  const { isValidMnemonic } = await import('../src/lib/keys.ts')
+  const { generateMnemonic } = await import('@scure/bip39')
+  const { wordlist } = await import('@scure/bip39/wordlists/english')
+  const phrases = [128, 160, 192, 224, 256].map((bits) => generateMnemonic(wordlist, bits))
+  check('the restore form takes 12, 15, 18, 21 and 24 words, and each length validates (15/18/21 read "Not a valid phrase")',
+    PHRASE_LENGTHS.join() === '12,15,18,21,24' && phrases.every((p) => PHRASE_LENGTHS.includes(p.split(' ').length) && isValidMnemonic(p)))
+}
+
+// --- a biometric setup that fails gives its passkey back (BL39) ---------------
+{
+  const signals = []
+  globalThis.location = { hostname: 'wallet.example' }
+  const rawId = Uint8Array.from([1, 2, 3, 250, 251, 252]).buffer
+  Object.defineProperty(globalThis, 'navigator', {
+    value: { credentials: { create: async () => ({ rawId, getClientExtensionResults: () => ({ prf: { enabled: false } }) }) } },
+    configurable: true,
+    writable: true,
+  })
+  globalThis.PublicKeyCredential = { signalUnknownCredential: async (o) => void signals.push(o) }
+  const { enrollBiometric } = await import('../src/lib/biometric.ts')
+  let msg = ''
+  try { await enrollBiometric(M) } catch (e) { msg = e.message }
+  check('a passkey created by a setup that then failed is signalled unknown, so the device drops it (it was left behind)',
+    /does not support biometric key protection/.test(msg) && signals.length === 1 && signals[0].rpId === 'wallet.example' && signals[0].credentialId === 'AQID-vv8', `${msg} / ${JSON.stringify(signals)}`)
+  delete globalThis.PublicKeyCredential
+  msg = ''
+  try { await enrollBiometric(M) } catch (e) { msg = e.message }
+  check('...and where the browser can\'t be asked, the message says where the leftover passkey is', /may be left in this device's passkey list/.test(msg), msg)
+  check('...and nothing was stored', localStorage.getItem('kailah.biovault.v1') === null)
+  delete globalThis.navigator
+  delete globalThis.location
+}
+
+// --- the shell and the wallet (BL40, BL41), read from the source -------------
+{
+  const { readFileSync } = await import('node:fs')
+  const read = (f) => readFileSync(new URL(`../src/${f}`, import.meta.url), 'utf8')
+  const shell = read('Shell.tsx')
+  check('an erase while a (slow) unlock runs wins: that unlock opens nothing (BL40)',
+    /const erase = useCallback\(\(\) => \{\n    eraseEpochRef\.current \+= 1/.test(shell) &&
+      /const erased = \(\) => epoch !== eraseEpochRef\.current \|\| !hasVault\(\)/.test(shell) && /onUnlockStart=\{handleUnlockStart\}/.test(shell))
+  const app = read('App.tsx')
+  check('the wallet zeroes its keys whenever it unmounts — a render error included — but not on StrictMode\'s rehearsal (BL41)',
+    /if \(!mountedRef\.current\) wipeRef\.current\(\)/.test(app) && /mountedRef\.current = true/.test(app))
+}
+
 // --- password policy ------------------------------------------------------
 check('short password rejected', passwordProblem('abc12345') !== null)
 check('common password rejected', passwordProblem('iloveyou') !== null && passwordProblem('password1') !== null)

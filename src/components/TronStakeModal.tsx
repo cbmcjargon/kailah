@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import type { TronChainConfig, TronKey } from '../lib/tron'
-import { broadcastTronSend, formatTron } from '../lib/tron'
+import { broadcastTronSend, formatTron, rebroadcastTron, TRON_REVIEW_FRESH_MS, TronBroadcastError } from '../lib/tron'
 import type { PreparedTronStake, TronResource, TronStakeView, TronWitness } from '../lib/tronstake'
 import {
   fetchTronStake,
@@ -12,10 +12,12 @@ import {
   prepareWithdrawUnfrozen,
 } from '../lib/tronstake'
 import { evmToUsd } from '../lib/units'
-import { formatUsd, shortAddress } from '../lib/format'
+import { formatUsd, readTypedAmount, shortAddress } from '../lib/format'
 import Modal from './Modal'
 import { IconBack, IconCheck, IconExternal, IconWarning, Spinner } from './Icons'
 import { errMessage } from './ui'
+import { EarlierSendLanded, type Pending } from '../lib/pending'
+import PrepareError from './PrepareError'
 
 interface TronStakeModalProps {
   chain: TronChainConfig
@@ -31,11 +33,18 @@ type Step =
   | { kind: 'stake-form' }
   | { kind: 'unstake-form' }
   | { kind: 'preparing' }
-  | { kind: 'prepare-error'; message: string }
-  | { kind: 'review'; prepared: PreparedTronStake }
+  | { kind: 'prepare-error'; message: string; landed?: Pending }
+  | {
+      kind: 'review'
+      prepared: PreparedTronStake
+      /** when it was built, and how to build it again once it is about to expire (BL32) */
+      at: number
+      redo: () => Promise<PreparedTronStake>
+      refreshed?: boolean
+    }
   | { kind: 'broadcasting' }
   | { kind: 'success'; txId: string; prepared: PreparedTronStake }
-  | { kind: 'failed'; message: string }
+  | { kind: 'failed'; message: string; err?: TronBroadcastError }
 
 const ACTION_TITLE: Record<PreparedTronStake['action'], string> = {
   freeze: 'Stake',
@@ -53,6 +62,7 @@ export default function TronStakeModal({
   onChanged,
 }: TronStakeModalProps) {
   const [step, setStep] = useState<Step>({ kind: 'loading' })
+  const sentRef = useRef<PreparedTronStake | null>(null)
   const [stake, setStake] = useState<TronStakeView | null>(null)
   const [witnesses, setWitnesses] = useState<TronWitness[] | null>(null)
   const [chosenSr, setChosenSr] = useState('')
@@ -67,66 +77,68 @@ export default function TronStakeModal({
     }
   }, [])
 
+  // A reload shows its own loading screen and lands on the overview only if
+  // nothing else started meanwhile: a Confirm during a silent reload used to
+  // lose its broadcasting screen to the overview (bug audit 2026-10-27, BL31).
   const reload = () => {
+    setStep({ kind: 'loading' })
     Promise.all([fetchTronStake(chain, tronKey.address), fetchTronWitnesses(chain)])
       .then(([s, w]) => {
         if (!aliveRef.current) return
         setStake(s)
         setWitnesses(w)
         if (w.length > 0 && chosenSr === '') setChosenSr(w[0]!.address)
-        setStep({ kind: 'overview' })
+        setStep((cur) => (cur.kind === 'loading' ? { kind: 'overview' } : cur))
       })
       .catch((e: unknown) => {
-        if (aliveRef.current) setStep({ kind: 'prepare-error', message: errMessage(e) })
+        if (aliveRef.current) setStep((cur) => (cur.kind === 'loading' ? { kind: 'prepare-error', message: errMessage(e) } : cur))
       })
   }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(reload, [])
 
-  let parsedAmount: bigint | null = null
-  let amountError: string | null = null
-  const trimmed = amountStr.trim()
-  if (trimmed !== '') {
-    if (!/^\d*\.?\d*$/.test(trimmed) || trimmed === '.') {
-      amountError = 'Enter a plain number, like 100'
-    } else {
-      const [whole = '0', frac = ''] = trimmed.split('.')
-      if (frac.length > 6) {
-        amountError = 'TRX has at most 6 decimal places'
-      } else {
-        parsedAmount = BigInt(whole + frac.padEnd(6, '0'))
-        if (parsedAmount <= 0n) {
-          parsedAmount = null
-          amountError = 'Amount must be more than zero'
-        }
-      }
-    }
-  }
+  const typed = readTypedAmount(amountStr, 6, 'TRX', '100')
+  const parsedAmount = typed.amount
+  const amountError = typed.error
 
   const usdHint =
     price !== undefined && parsedAmount !== null && chain.mainnet
       ? evmToUsd(parsedAmount, 6, price)
       : null
 
-  const runPrepare = (p: Promise<PreparedTronStake>) => {
+  const runPrepare = (make: () => Promise<PreparedTronStake>, refreshed = false) => {
     setStep({ kind: 'preparing' })
-    p.then((prepared) => {
-      if (aliveRef.current) setStep({ kind: 'review', prepared })
+    make().then((prepared) => {
+      if (aliveRef.current) setStep({ kind: 'review', prepared, at: Date.now(), redo: make, refreshed })
     }).catch((e: unknown) => {
-      if (aliveRef.current) setStep({ kind: 'prepare-error', message: errMessage(e) })
+      if (aliveRef.current) {
+        setStep({
+          kind: 'prepare-error',
+          message: errMessage(e),
+          landed: e instanceof EarlierSendLanded ? e.entry : undefined,
+        })
+      }
     })
   }
 
-  const handleBroadcast = (prepared: PreparedTronStake) => {
+  const settle = (p: Promise<string>, prepared: PreparedTronStake) => {
     setStep({ kind: 'broadcasting' })
-    broadcastTronSend(tronKey, prepared)
-      .then((txId) => {
-        onChanged()
-        if (aliveRef.current) setStep({ kind: 'success', txId, prepared })
-      })
-      .catch((e: unknown) => {
-        if (aliveRef.current) setStep({ kind: 'failed', message: errMessage(e) })
-      })
+    p.then((txId) => {
+      onChanged()
+      if (aliveRef.current) setStep({ kind: 'success', txId, prepared })
+    }).catch((e: unknown) => {
+      if (aliveRef.current) {
+        setStep({ kind: 'failed', message: errMessage(e), err: e instanceof TronBroadcastError ? e : undefined })
+      }
+    })
+  }
+  const handleBroadcast = (prepared: PreparedTronStake) => {
+    sentRef.current = prepared
+    settle(broadcastTronSend(tronKey, prepared), prepared)
+  }
+  // the SAME signed transaction again — never a rebuilt one, which could act twice
+  const handleResend = (err: TronBroadcastError) => {
+    if (sentRef.current !== null) settle(rebroadcastTron(chain, err), sentRef.current)
   }
 
   const spare = stake !== null ? stake.powerTotal - stake.powerUsed : 0n
@@ -199,6 +211,19 @@ export default function TronStakeModal({
             </div>
           )}
 
+          {spare > 0n && witnesses !== null && witnesses.length > 0 && (
+            <label className="field">
+              {/* the representative "Vote all" votes for, in the open: it used to be one the overview never showed (BL30) */}
+              <span className="field-label">Vote for</span>
+              <select className="input" value={chosenSr} onChange={(e) => setChosenSr(e.target.value)}>
+                {witnesses.map((w) => (
+                  <option key={w.address} value={w.address}>
+                    {w.label} — {shortAddress(w.address)}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
           <div className="btn-row">
             <button type="button" className="btn btn-primary" onClick={() => setStep({ kind: 'stake-form' })}>
               Stake
@@ -208,17 +233,17 @@ export default function TronStakeModal({
                 type="button"
                 className="btn btn-secondary"
                 onClick={() =>
-                  runPrepare(prepareVote(chain, tronKey, [{ address: chosenSr, count: spare + stake.powerUsed }]))
+                  runPrepare(() => prepareVote(chain, tronKey, [{ address: chosenSr, count: spare + stake.powerUsed }]))
                 }
               >
-                Vote all
+                Vote all for {witnesses.find((w) => w.address === chosenSr)?.label ?? shortAddress(chosenSr)}
               </button>
             )}
             {stake.unclaimedReward > 0n && (
               <button
                 type="button"
                 className="btn btn-secondary"
-                onClick={() => runPrepare(prepareClaimReward(chain, tronKey))}
+                onClick={() => runPrepare(() => prepareClaimReward(chain, tronKey))}
               >
                 Claim
               </button>
@@ -234,7 +259,7 @@ export default function TronStakeModal({
               <button
                 type="button"
                 className="btn btn-secondary"
-                onClick={() => runPrepare(prepareWithdrawUnfrozen(chain, tronKey))}
+                onClick={() => runPrepare(() => prepareWithdrawUnfrozen(chain, tronKey))}
               >
                 Withdraw {formatTron(withdrawableSun)} TRX
               </button>
@@ -250,10 +275,11 @@ export default function TronStakeModal({
           onSubmit={(e) => {
             e.preventDefault()
             if (parsedAmount === null || amountError !== null) return
+            const amount = parsedAmount
             runPrepare(
               step.kind === 'stake-form'
-                ? prepareFreeze(chain, tronKey, parsedAmount, resource)
-                : prepareUnfreeze(chain, tronKey, parsedAmount, resource),
+                ? () => prepareFreeze(chain, tronKey, amount, resource)
+                : () => prepareUnfreeze(chain, tronKey, amount, resource),
             )
           }}
         >
@@ -347,19 +373,7 @@ export default function TronStakeModal({
       )}
 
       {step.kind === 'prepare-error' && (
-        <div className="stack">
-          <div className="warning-box" role="alert">
-            <IconWarning size={20} />
-            <div>
-              <strong>Couldn&rsquo;t prepare this</strong>
-              <p>{step.message}</p>
-            </div>
-          </div>
-          <button type="button" className="btn btn-secondary" onClick={reload}>
-            <IconBack size={16} />
-            Back
-          </button>
-        </div>
+        <PrepareError title="Couldn’t prepare this" message={step.message} landed={step.landed} onBack={reload} />
       )}
 
       {step.kind === 'review' && (
@@ -399,12 +413,36 @@ export default function TronStakeModal({
               <dd className="tnum">free bandwidth or ~{formatTron(step.prepared.estimatedFeeSun)} TRX</dd>
             </div>
           </dl>
+          {step.prepared.action === 'vote' && stake !== null && stake.votes.length > 0 && (
+            <div className="warning-box">
+              <IconWarning size={20} />
+              <div>
+                <strong>This replaces your current votes</strong>
+                <p>
+                  A TRON vote replaces all earlier ones. You now vote for{' '}
+                  {stake.votes.map((v) => `${shortAddress(v.address)} (${v.count.toString()})`).join(', ')}.
+                </p>
+              </div>
+            </div>
+          )}
+          {step.refreshed === true && (
+            <p className="text-tertiary">
+              The earlier version was about to expire on the network, so the wallet built it again.
+              Check it and confirm.
+            </p>
+          )}
           <div className="btn-row">
             <button type="button" className="btn btn-ghost" onClick={reload}>
               <IconBack size={16} />
               Back
             </button>
-            <button type="button" className="btn btn-primary" onClick={() => handleBroadcast(step.prepared)}>
+            <button
+              type="button"
+              className="btn btn-primary"
+              onClick={() =>
+                Date.now() - step.at > TRON_REVIEW_FRESH_MS ? runPrepare(step.redo, true) : handleBroadcast(step.prepared)
+              }
+            >
               Confirm
             </button>
           </div>
@@ -452,7 +490,7 @@ export default function TronStakeModal({
                       setStep({ kind: 'prepare-error', message: 'Voting power not visible yet — try Vote again in a few seconds.' })
                       return
                     }
-                    runPrepare(prepareVote(chain, tronKey, [{ address: chosenSr, count: power }]))
+                    runPrepare(() => prepareVote(chain, tronKey, [{ address: chosenSr, count: power }]))
                   })
                   .catch((e: unknown) => {
                     if (aliveRef.current) setStep({ kind: 'prepare-error', message: errMessage(e) })
@@ -484,20 +522,32 @@ export default function TronStakeModal({
             <div>
               <strong>Not completed</strong>
               <p>{step.message}</p>
-              <p>
-                If the network took it before the error, it can still go through. The wallet
-                checks for that before it lets you try again.
-              </p>
+              {step.err !== undefined && (
+                <p>
+                  If the network took it before the error, it can still go through for about a
+                  minute. &ldquo;Send again&rdquo; re-sends this same transaction. Before any new
+                  action, the wallet checks whether this one went through and tells you if it did.
+                </p>
+              )}
             </div>
           </div>
           <div className="btn-row">
             <button type="button" className="btn btn-ghost" onClick={onClose}>
               Close
             </button>
-            <button type="button" className="btn btn-primary" onClick={reload}>
+            <button
+              type="button"
+              className={step.err !== undefined ? 'btn btn-secondary' : 'btn btn-primary'}
+              onClick={reload}
+            >
               <IconBack size={16} />
               Back
             </button>
+            {step.err !== undefined && (
+              <button type="button" className="btn btn-primary" onClick={() => handleResend(step.err!)}>
+                Send again
+              </button>
+            )}
           </div>
         </div>
       )}

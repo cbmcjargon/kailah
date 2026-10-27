@@ -5,7 +5,14 @@
 //    can't cause address reuse);
 //  • a provider inventing a run of fake-used addresses can push the frontier
 //    at most GAP_LIMIT−1 past the pre-scan cache frontier, never past MAX_INDEX;
-//  • a persisted snapshot must re-derive from the account's keys.
+//  • a persisted snapshot must re-derive from the account's keys;
+//  • after the 2026-10-27 audit: a failed worker pool stops taking items;
+//    a scan from before a lock or erase writes nothing afterwards; a
+//    snapshot carries its own flag; and the dashboard keeps the last
+//    complete balance, queues rescans as asked, polls a chain on a backup
+//    slowly, and a send says when coins couldn't load; confirmations count
+//    from a tip no lower than the payment's block, and quick polls advance
+//    them.
 const store = new Map()
 globalThis.localStorage = {
   getItem: (k) => (store.has(k) ? store.get(k) : null),
@@ -90,6 +97,113 @@ lockSecureStore()
 store.set('kailah.sec.addrmap', blob.slice(0, -4) + 'AAAA') // tamper the ciphertext tail
 await unlockSecureStore(MNEMONIC)
 check('tampered blob is rejected (reads empty, no throw)', addrcache.get(acct.xpubs.xpub).receive.length === 0)
+
+// --- after the 2026-10-27 bug audit -------------------------------------------
+{
+  const { runPool } = await import('../src/lib/scanner.ts')
+  const { secureGet, secureRemove, clearSecureStore } = await import('../src/lib/securestore.ts')
+  const { saveStateSnapshot, loadStateSnapshot } = await import('../src/lib/statecache.ts')
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+
+  // BL12: a failed pool stops taking items
+  let calls = 0
+  const err = await runPool([...Array(20).keys()], 4, async (i) => {
+    calls++
+    await sleep(5)
+    if (i === 0) throw new Error('down')
+  }).then(() => null, (e) => e)
+  await sleep(50)
+  check('S1 once one item fails, the pool stops taking items: no requests spent on a pass that has failed (BL12)', err?.message === 'down' && calls === 4, `${calls} calls`)
+
+  // BL9: an erased wallet's scan writes nothing afterwards
+  lockSecureStore()
+  await unlockSecureStore(MNEMONIC)
+  const used = acct.address(0, 0).address
+  let release = () => {}
+  let gate = Promise.resolve()
+  const client = {
+    getTipHeight: async () => {
+      await gate
+      return 800_000
+    },
+    getAddressStats: async (addr) => ({ balance: { confirmed: addr === used ? 1n : 0n, unconfirmed: 0n }, txCount: addr === used ? 1 : 0 }),
+    getAddressUtxos: async () => [],
+    getAddressTxs: async () => [],
+  }
+  store.delete('kailah.tipcache.v1')
+  secureRemove('addrmap')
+  const control = await scanAccount(acct, client)
+  await sleep(50)
+  check('S2 control: a scan writes the tip cache and the address map', store.has('kailah.tipcache.v1') && Object.keys(secureGet('addrmap') ?? {}).includes(acct.xpubs.xpub))
+  store.delete('kailah.tipcache.v1')
+  secureRemove('addrmap')
+  gate = new Promise((r) => (release = r))
+  const orphan = scanAccount(acct, client)
+  clearSecureStore() // the user erases the wallet mid-scan…
+  const OTHER = 'legal winner thank year wave sausage worth useful legal winner thank yellow'
+  await unlockSecureStore(OTHER) // …and restores another
+  release()
+  await orphan
+  await sleep(100)
+  check('S2b the erased wallet\'s scan, finishing afterwards, writes no tip cache back (BL9)', !store.has('kailah.tipcache.v1'))
+  check('S2c ...and none of its address map into the next wallet\'s store', !Object.keys(secureGet('addrmap') ?? {}).includes(acct.xpubs.xpub))
+  lockSecureStore()
+  await unlockSecureStore(MNEMONIC)
+
+  // BL10: a snapshot says it's one; a real partial scan doesn't
+  saveStateSnapshot('btc', control)
+  const snap = loadStateSnapshot('btc')
+  check('S3 a restored snapshot carries its own flag, a scan doesn\'t (BL10)', snap?.snapshot === true && snap.incomplete?.utxos === true && control.snapshot === undefined)
+
+  // the dashboard's side, read from the source
+  const { readFileSync } = await import('node:fs')
+  const read = (f) => readFileSync(new URL(`../src/${f}`, import.meta.url), 'utf8')
+  const app = read('App.tsx')
+  check('S4 polls tell a snapshot by its flag, not by a real scan\'s missing coins (BL10)', /const snapshotOnly = baseline\?\.snapshot === true/.test(app) && !/snapshotOnly = baseline\?\.incomplete/.test(app))
+  check('S5 a partial scan keeps the last complete balance on screen, with a note (BM4)', /const keepLast = kept != null && kept\.incomplete\?\.balance !== true/.test(app) && /showing the last complete balance/.test(app))
+  check('S6 a rescan queued mid-scan runs as asked (quick stays quick) and not for a network hidden since (BL11)',
+    /pendingManualScanRef\.current\[key\] = \{ quick: opts\?\.quick === true/.test(app) && /if \(shown\) refreshSlotRef\.current\?\.\(key, queued\.quick \? \{ quick: true \} : undefined\)/.test(app))
+  check('S7 a chain whose backup is answering polls on the slow, 10-minute cadence (BL7)', /getClient\(chain\)\.onBackup\(\)/.test(app) && /poll\('slow'\), 600_000/.test(app))
+  const card = read('components/ChainCard.tsx')
+  check('S8 a possibly-low balance is marked and never reads "Nothing here yet" (BM4)', /const isEmpty = balance !== null && !partialBalance/.test(card) && /balance may be higher/.test(card))
+  const send = read('components/SendModal.tsx')
+  check('S9 with coins that couldn\'t load, a send says so instead of "Insufficient funds" (BM5)', /state\.incomplete\?\.utxos === true && \/\^Insufficient funds\//.test(send))
+
+  // BM10: confirmations from a tip that can't trail the chain, advanced on quick polls
+  const a0 = acct.address(0, 0).address
+  let tip = 900_005
+  let tipCalls = 0
+  const TX = {
+    txid: 'ab'.repeat(32), height: 900_000, time: 1_760_000_000, fee: 500n, rbfSignaled: false,
+    inputs: [{ address: 'bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh', value: 100_500n, prevTxid: 'cd'.repeat(32), prevVout: 0 }],
+    outputs: [{ address: a0, value: 100_000n }],
+  }
+  const chainClient = {
+    getTipHeight: async () => (tipCalls++, tip),
+    getAddressStats: async (x) => (x === a0 ? { balance: { confirmed: 100_000n, unconfirmed: 0n }, txCount: 1 } : { balance: { confirmed: 0n, unconfirmed: 0n }, txCount: 0 }),
+    getAddressUtxos: async (x) => (x === a0 ? [{ txid: TX.txid, vout: 0, value: 100_000n, confirmed: true }] : []),
+    getAddressTxs: async (x) => (x === a0 ? [TX] : []),
+  }
+  // a cached tip (fresh, so no network call) that trails the block the payment is in
+  store.set('kailah.tipcache.v1', JSON.stringify({ btc: { h: 899_990, at: Date.now() } }))
+  const full = await scanAccount(acct, chainClient)
+  check('S10 a confirmed payment never reads 0 confirmations: the tip is at least its block (BM10)', full.txs[0]?.confirmations === 1 && full.tipHeight === 900_000, `${full.txs[0]?.confirmations} conf at tip ${full.tipHeight}`)
+  store.set('kailah.tipcache.v1', JSON.stringify({ btc: { h: 900_000, at: 0 } })) // stale: the next tip read goes out
+  const quick = await scanAccount(acct, chainClient, { quickCheckAgainst: full })
+  check('S11 a quick poll that finds nothing changed still advances the confirmations', quick.txs[0]?.confirmations === 6 && quick.tipHeight === 900_005 && quick.balance === full.balance, `${quick.txs[0]?.confirmations} conf`)
+  tipCalls = 0
+  const again = await scanAccount(acct, chainClient, { quickCheckAgainst: quick })
+  check('S11b ...from the tip cache while it is fresh (no extra request), handing back the same state when the tip hasn\'t moved', again === quick && tipCalls === 0)
+
+  // BM29: a scan for an account removed meanwhile keeps no address map
+  secureRemove('addrmap')
+  await scanAccount(acct, chainClient, { persist: () => false })
+  await sleep(50)
+  check('S12 a scan whose account was removed meanwhile (persist says no) writes no address map (BM29)', !Object.keys(secureGet('addrmap') ?? {}).includes(acct.xpubs.xpub))
+  await scanAccount(acct, chainClient, { persist: () => true })
+  await sleep(50)
+  check('S12b ...and one whose account is still there does', Object.keys(secureGet('addrmap') ?? {}).includes(acct.xpubs.xpub))
+}
 
 console.log(failures === 0 ? '\nAll checks passed' : `\n${failures} CHECK(S) FAILED.`)
 process.exit(failures === 0 ? 0 : 1)

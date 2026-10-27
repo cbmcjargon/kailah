@@ -24,7 +24,11 @@
 //      fees (0.00001 LTC/kB is exactly 1 per vbyte), and a 429;
 //   F. failover: Dogecoin rides out BlockCypher's limit on Bitcore, Litecoin
 //      reaches Bitcore before BlockCypher, and backups are never raced;
-//   G. requests to the host queue 250 ms apart.
+//   G. requests to the host queue 330 ms apart (bitcore-node allows 200 a
+//      minute);
+//   H. one transaction Bitcore can't describe is left out of the history,
+//      not the address's whole history; a rate limit or an outage still
+//      fails the call.
 const { readFileSync } = await import('node:fs')
 const { BitcoreProvider, bitcoreBalance, bitcoreTxInfo } = await import('../src/lib/bitcore.ts')
 const { BlockcypherProvider } = await import('../src/lib/blockcypher.ts')
@@ -53,6 +57,7 @@ const D = 'DBus3bamQjgJULBJtYXpEzDWQRwF5iwxgC'
 const L = 'ltc1qjmxnz78nmc8nq77wuxh25n2es7rzm5c2rkk4wh'
 const FUND = F.dogeRawHex.txid
 const NET_WORDS = /timed? ?out|abort|load failed|failed to fetch|networkerror/i
+const DEFAULT_GAP = BitcoreProvider.requestGapMs
 BitcoreProvider.requestGapMs = 0
 
 // --- the fake network ---------------------------------------------------------
@@ -364,14 +369,44 @@ console.log('--- F. failover ---')
 
 console.log('--- G. one request gate per host ---')
 {
-  BitcoreProvider.requestGapMs = 250
+  BitcoreProvider.requestGapMs = DEFAULT_GAP
   reset({ [BC_DOGE]: () => json({ height: 5 }), [BC_LTC]: () => json({ height: 6 }) })
   const d = doge()
   const l = ltc()
   await Promise.all([d.getTipHeight(), l.getTipHeight(), d.getTipHeight(), l.getTipHeight()])
   const gaps = log.slice(1).map((r, k) => r.at - log[k].at)
-  check('G1 concurrent Dogecoin and Litecoin requests to Bitcore queue 250 ms apart', log.length === 4 && gaps.every((g) => g >= 240), gaps.join(', ') + ' ms')
+  check('G1 concurrent Dogecoin and Litecoin requests to Bitcore queue 330 ms apart: under bitcore-node\'s 200 a minute (it was 250 ms, 240 a minute; bug audit 2026-10-27, BM6)',
+    DEFAULT_GAP >= 330 && log.length === 4 && gaps.every((g) => g >= DEFAULT_GAP - 10), `${DEFAULT_GAP} ms default; ` + gaps.join(', ') + ' ms')
   BitcoreProvider.requestGapMs = 0
+}
+
+console.log('--- H. one transaction Bitcore can\'t describe (bug audit 2026-10-27, BL6) ---')
+{
+  const coins = [coin(D, { mintTxid: tx(1), mintHeight: 600 }), coin(D, { mintTxid: tx(2), mintHeight: 500 }), coin(D, { mintTxid: tx(3), mintHeight: 400 })]
+  const huge = populated(tx(2), D, {
+    coins: {
+      inputs: [coin('DExchangeHot', { mintTxid: tx(99), mintIndex: 0, value: 15_000_000_000_000_000, spentTxid: tx(2), spentHeight: 500 })],
+      outputs: [coin(D, { mintTxid: tx(2), value: 5000 })],
+    },
+  })
+  const answering = (special) => (path) => {
+    if (path.startsWith(`/address/${D}`)) return json(coins)
+    const m = /^\/tx\/([0-9a-f]{64})\/populated$/.exec(path)
+    if (m) return special(m[1]) ?? json(populated(m[1], D))
+    return text('no', 404)
+  }
+  const ids = (list) => list.map((t) => t.txid).sort().join()
+  reset({ [BC_DOGE]: answering((id) => (id === tx(2) ? json(huge) : null)) })
+  const h1 = await rejects(async () => (answering.got = await doge().getAddressTxs(D)))
+  check('H1 an exchange input past 2^53 koinu leaves that one transaction out, not the address\'s whole history', h1 === null && ids(answering.got) === [tx(1), tx(3)].join(), h1?.message)
+  reset({ [BC_DOGE]: answering((id) => (id === tx(2) ? text(F.notFound.text, F.notFound.status) : null)) })
+  const h2 = await rejects(async () => (answering.got = await doge().getAddressTxs(D)))
+  check('H2 so does a txid the coin list names but /populated answers 404 for', h2 === null && ids(answering.got) === [tx(1), tx(3)].join(), h2?.message)
+  reset({ [BC_DOGE]: answering((id) => (id === tx(2) ? text('Too many requests', 429) : null)) })
+  const h3 = await rejects(() => doge().getAddressTxs(D))
+  check('H3 a rate limit still fails the call, for the failover client to pause and retry', h3?.rateLimited === true)
+  reset({ [BC_DOGE]: answering((id) => (id === tx(2) ? text('boom', 500) : null)) })
+  check('H4 and so does a server error', (await rejects(() => doge().getAddressTxs(D))) !== null)
 }
 
 console.log(failures === 0 ? '\nAll Bitcore checks passed.' : `\n${failures} CHECK(S) FAILED.`)
