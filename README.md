@@ -1,6 +1,6 @@
 # Kailah Wallet
 
-**v2.7.2** — a self-custody wallet for Bitcoin, Dogecoin, Litecoin, USDC + ETH
+**v2.7.3** — a self-custody wallet for Bitcoin, Dogecoin, Litecoin, USDC + ETH
 (Base / Ethereum / Arbitrum), BNB, Solana (SOL + USDC, with in-wallet swaps
 and native staking), and TRON (TRX + USDT) that runs entirely in the browser. No servers, no accounts, no custody: keys are
 generated on your device, encrypted with your password, and never leave it.
@@ -247,8 +247,11 @@ This is a personal, hobby-grade wallet. Keep amounts small.
   crowd a real custom token out of the list.
 - The real-mode confirmation is shown once per device; after that the
   practice/real toggle is one tap (the banner, header and card colors change).
-- DOGE runs on BlockCypher's free tier (~100 requests/hour) — scans are
-  throttled and deliberately frugal.
+- Dogecoin reads from two free services, BlockCypher (~100 requests/hour,
+  shared with Litecoin's last backup) and BitPay's Bitcore; scans are
+  throttled and deliberately frugal. A Dogecoin send still needs each coin's
+  funding transaction from BlockCypher, which the wallet keeps for the
+  session once it hashes to its txid.
 - No MWEB/Monero: confidential-transaction cryptography has no trustworthy
   browser implementation today. MWEB addresses are detected and explained
   rather than mis-rejected. For MWEB/XMR, restore the same seed in Cake Wallet.
@@ -269,8 +272,11 @@ src/lib/          — all money logic, UI-free, contracts in types.ts
   biometric.ts    WebAuthn PRF vault
   networks.ts     chain configs + ordered provider lists
   esplora.ts      mempool.space-style provider (BTC, tBTC, LTC)
-  blockcypher.ts  DOGE provider (throttled)
+  blockcypher.ts  DOGE provider + LTC's last backup (throttled)
+  bitcore.ts      BitPay's Bitcore: DOGE's second provider, LTC's first backup
+  rawtxcache.ts   legacy funding txs, kept once they hash to their txid
   api.ts          failover client over the provider list
+  providerpref.ts last-good provider per chain (no provider imports)
   scanner.ts      gap-limit account scan → AccountState
   addrcache.ts    warm-scan cache of used indices (public data; cleared on erase)
   history.ts      raw tx → classified TxSummary
@@ -335,7 +341,8 @@ Verification suites (run with `npx tsx scripts/<name>.mjs`):
 | check-swapgate.mjs | the Jupiter Swap V2 gate, offline, on two recorded /build answers: honest builds compile to exactly the instructions Jupiter described and sign byte-exactly; any change to the decoded amount, quoted output, slippage, platform fee, positive-slippage share, variant or authority is refused, as are "other"/tip instructions, foreign signers, a second Jupiter instruction, Approve, a CloseAccount paying someone else, unlisted programs, stake accounts, lookup tables that disagree with the chain, and a simulation short of the decoded floor; the fee is exactly 0.5% (none for the fee wallet itself), and a token account opened for an intermediate token is closed in the same transaction; a route that fails its test run in one exchange is named from the innermost log line and re-routed once, through the whole gate again (a dishonest fresh route is still refused), while failures of the transaction's own plumbing are not re-routed |
 | check-lookalike.mjs | the send form's lookalike-address check, offline: the real poisoning seen on a Solana wallet is caught; addresses you've paid, your own, new ones and people who paid you don't warn; history an attacker can write (incoming dust, TRON zero-value USDT, EVM custom-token rows) never makes an address trusted; 0x/EVM case, bech32 prefix and case, TRON's T, and the 3-and-3 threshold |
 | check-failover.mjs | rate limit vs outage in the provider failover: a provider that pushes back (a 429, or the bare network error a browser shows for a CORS-less 429) is paused and retried, a healthy backup covers the pause, timeouts get one retry, a dead provider fails over at once with a 60 s cooldown, BlockCypher's hourly limit is never retried, and a request never waits or retries past its limits |
-| check-providers.mjs | live API shapes + failover (spends BlockCypher budget — run sparingly) |
+| check-providers.mjs | live API shapes + failover (spends BlockCypher budget — run sparingly; `bitcore` runs only Bitcore's section, with no BlockCypher requests) |
+| check-bitcore.mjs | the Bitcore provider, offline, on answers recorded 2026-10-27: the provider lists and that every provider host is in both CSP copies and PRIVACY.md; transactions parse (outputs by index, BIP125 only on Litecoin, malformed answers refused); balances from unspent coins (a pending send isn't counted twice); Dogecoin's funding txs verified against their txid and fetched once per session; a rejected broadcast is final; Dogecoin rides out BlockCypher's limit on Bitcore and Litecoin reaches Bitcore before BlockCypher |
 
 ## Deployment
 

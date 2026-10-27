@@ -1,8 +1,9 @@
 // api.ts — getClient(chain): a FailoverClient over the chain's ordered
 // ProviderApi list (types.ts / networks.ts). Providers are tried in order; the
-// last-good one is remembered and tried first next time. BTC mainnet has a
-// genuine second provider and Litecoin a backup-only one (BlockCypher,
-// ProviderApi.backupOnly); the others run single-provider through the same
+// last-good one is remembered and tried first next time. BTC mainnet and
+// Dogecoin (BlockCypher + Bitcore) have a genuine second provider, and
+// Litecoin two backup-only ones (Bitcore, then BlockCypher;
+// ProviderApi.backupOnly); testnet4 runs single-provider through the same
 // client so the seam is uniform.
 
 import type {
@@ -17,57 +18,43 @@ import type {
 } from './types'
 import { EsploraProvider } from './esplora'
 import { BlockcypherProvider } from './blockcypher'
+import { BitcoreProvider } from './bitcore'
+import { readProviderPref, writeProviderPref } from './providerpref'
+
+// Shell.tsx clears it on erase from providerpref.ts directly (keeping the
+// providers out of the first-load chunk); re-exported for callers of api.ts.
+export { clearProviderPref } from './providerpref'
 
 /**
  * Build the ProviderApi list for a chain from its ordered `providers` spec.
- * `kind` selects the implementation; primary is first.
+ * `kind` selects the implementation; primary is first. Bitcore has no raw
+ * transaction endpoint, so it borrows the other providers' (in order) for
+ * the funding txs a legacy chain signs with.
  */
-function buildProviders(chain: ChainConfig): ProviderApi[] {
-  return chain.providers.map((spec) =>
-    spec.kind === 'esplora'
-      ? new EsploraProvider(spec, chain)
-      : new BlockcypherProvider(spec, chain),
-  )
-}
-
-/**
- * Last-good provider per chain, persisted so a fresh page load starts on the
- * backend that actually answered last time. During the live mempool.space
- * outage (2026-08-01), every reload re-burned a full timeout burst against the
- * dead primary before failing over — this makes the failover stick.
- * Public data only (a provider name); cleared with every other kailah.* key.
- */
-const PROVIDER_PREF_KEY = 'kailah.provider.v1'
-
-function readProviderPref(persistKey: string): string | null {
-  try {
-    const raw = localStorage.getItem(PROVIDER_PREF_KEY)
-    if (!raw) return null
-    const map: unknown = JSON.parse(raw)
-    const v = map && typeof map === 'object' ? (map as Record<string, unknown>)[persistKey] : null
-    return typeof v === 'string' ? v : null
-  } catch {
-    return null
+export function buildProviders(chain: ChainConfig): ProviderApi[] {
+  const providers: ProviderApi[] = []
+  const rawHexElsewhere = async (txid: string): Promise<string> => {
+    let lastErr: unknown = new Error('no provider serves raw transactions')
+    for (const p of providers) {
+      if (p instanceof BitcoreProvider) continue
+      try {
+        return await p.getRawTxHex(txid)
+      } catch (e) {
+        lastErr = e
+      }
+    }
+    throw lastErr
   }
-}
-
-function writeProviderPref(persistKey: string, providerName: string): void {
-  try {
-    const raw = localStorage.getItem(PROVIDER_PREF_KEY)
-    const map = raw ? ((JSON.parse(raw) as Record<string, string>) ?? {}) : {}
-    map[persistKey] = providerName
-    localStorage.setItem(PROVIDER_PREF_KEY, JSON.stringify(map))
-  } catch {
-    // best-effort
+  for (const spec of chain.providers) {
+    providers.push(
+      spec.kind === 'esplora'
+        ? new EsploraProvider(spec, chain)
+        : spec.kind === 'blockcypher'
+          ? new BlockcypherProvider(spec, chain)
+          : new BitcoreProvider(spec, chain, rawHexElsewhere),
+    )
   }
-}
-
-export function clearProviderPref(): void {
-  try {
-    localStorage.removeItem(PROVIDER_PREF_KEY)
-  } catch {
-    // ignore
-  }
+  return providers
 }
 
 class FailoverClientImpl implements FailoverClient {
@@ -153,9 +140,10 @@ class FailoverClientImpl implements FailoverClient {
 
   private ensureProbed(): Promise<void> {
     this.probePromise ??= (async () => {
-      // A chain with one regular provider (DOGE, LTC) has no choice to make —
-      // skip the probe entirely; a backup is never raced (BlockCypher's hourly
-      // budget: every request counts).
+      // A chain with one regular provider (LTC, testnet4) has no choice to
+      // make — skip the probe entirely; a backup is never raced (BlockCypher's
+      // hourly budget: every request counts). Dogecoin races BlockCypher and
+      // Bitcore: one tip request each per page load.
       const regular = this.providers.map((_, i) => i).filter((i) => !this.isBackup(i))
       if (regular.length < 2) return
       try {

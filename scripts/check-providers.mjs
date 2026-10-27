@@ -1,11 +1,12 @@
 // Live, read-only smoke test for the v2 provider layer:
-//   src/lib/esplora.ts, src/lib/blockcypher.ts, src/lib/api.ts, src/lib/prices.ts
+//   src/lib/esplora.ts, src/lib/blockcypher.ts, src/lib/bitcore.ts, src/lib/api.ts,
+//   src/lib/prices.ts
 //
 // Hits each real backend ONCE per method against a known-history address and
 // asserts the normalized shapes (RawTxInfo, Balance, FeeOption, tip height) plus
 // FailoverClient behavior and fetchPriceHistory. NEVER broadcasts.
 //
-// Run from the repo root: npx tsx scripts/check-providers.mjs [btc|btc-testnet|ltc|doge|failover|prices]
+// Run from the repo root: npx tsx scripts/check-providers.mjs [btc|btc-testnet|ltc|doge|bitcore|failover|prices]
 // (one name runs only that section: BlockCypher's hourly budget and
 // mempool.space's IP blocks make a full run something to do sparingly).
 
@@ -139,6 +140,7 @@ async function main() {
   if (want('btc-testnet')) await testnetSection()
   if (want('ltc')) await ltcSection()
   if (want('doge')) await dogeSection()
+  if (want('bitcore')) await bitcoreSection()
   if (want('failover')) await failoverSection()
   if (want('prices')) await pricesSection()
 
@@ -148,6 +150,57 @@ async function main() {
     process.exit(1)
   }
   console.log('All provider checks passed')
+}
+
+async function bitcoreSection() {
+  // Bitcore (BitPay's public API): Dogecoin's second service and Litecoin's
+  // first backup. It never asks BlockCypher for anything here: Dogecoin's
+  // raw-bytes path is proven offline (check-bitcore D, F).
+  const { BitcoreProvider } = await import('../src/lib/bitcore.ts')
+  const noRawBytes = async () => {
+    throw new Error('this check never fetches raw bytes')
+  }
+  for (const [chain, addr] of [[CHAINS.doge, DOGE_ADDR], [CHAINS.ltc, LTC_ADDR]]) {
+    const spec = chain.providers.find((p) => p.kind === 'bitcore')
+    const label = `${chain.id}/bitcore`
+    console.log(`\n=== ${label} ===`)
+    const p = new BitcoreProvider(spec, chain, noRawBytes)
+    await tryProvider(label, async () => {
+      const stats = await p.getAddressStats(addr)
+      check(`${label}: the test address reads as used`, stats.txCount > 0 && typeof stats.balance.confirmed === 'bigint' && typeof stats.balance.unconfirmed === 'bigint', `confirmed=${stats.balance.confirmed} unconfirmed=${stats.balance.unconfirmed}`)
+      try {
+        const utxos = await p.getAddressUtxos(addr)
+        check(`${label}: getAddressUtxos parses`, Array.isArray(utxos) && utxos.every((u) => typeof u.value === 'bigint' && typeof u.confirmed === 'boolean'), `${utxos.length} utxo(s)`)
+      } catch (e) {
+        if (!/raw transaction for a coin/.test(String(e?.message))) throw e
+        console.log(`SKIP  ${label}: getAddressUtxos — the address holds legacy coins, whose bytes this check doesn't fetch`)
+      }
+      const txs = await p.getAddressTxs(addr)
+      assertRawTxs(label, txs)
+      if (chain.id === 'doge') check(`${label}: no Dogecoin tx is ever replaceable`, txs.every((t) => t.rbfSignaled === false))
+      const tip = await p.getTipHeight()
+      check(`${label}: getTipHeight is a large int`, Number.isInteger(tip) && tip > 1_000_000, `tip=${tip}`)
+      const fees = await p.getFeeOptions()
+      check(
+        `${label}: fees (Dogecoin flat; Litecoin three rates, fast >= normal >= slow >= 1)`,
+        chain.fixedFeeRate !== undefined
+          ? fees.length === 1 && fees[0].rate === chain.fixedFeeRate
+          : fees.length === 3 && fees[0].rate >= fees[1].rate && fees[1].rate >= fees[2].rate && fees[2].rate >= 1n,
+        fees.map((f) => `${f.label} ${f.rate}`).join(', '),
+      )
+      const seen = txs.length > 0 && (await p.txSeen(txs[0].txid))
+      const unseen = await p.txSeen('ab'.repeat(32))
+      check(`${label}: txSeen knows a real tx and not a made-up one`, seen === true && unseen === false)
+      if (chain.id === 'ltc') {
+        const ls = new EsploraProvider(chain.providers[0], chain)
+        await tryProvider('ltc: Bitcore vs litecoinspace', async () => {
+          const [lsStats, lsTip] = [await ls.getAddressStats(addr), await ls.getTipHeight()]
+          check('ltc: Bitcore and litecoinspace agree on the balance', lsStats.balance.confirmed === stats.balance.confirmed, `bitcore ${stats.balance.confirmed} vs litecoinspace ${lsStats.balance.confirmed}`)
+          check('ltc: their tips are within 30 blocks', Math.abs(lsTip - tip) <= 30, `bitcore ${tip} vs litecoinspace ${lsTip}`)
+        })
+      }
+    })
+  }
 }
 
 async function btcSection() {

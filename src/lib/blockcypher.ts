@@ -1,5 +1,6 @@
-// BlockCypher ProviderApi implementation: Dogecoin mainnet (its only
-// provider) and Litecoin mainnet (backup only, behind litecoinspace.org).
+// BlockCypher ProviderApi implementation: Dogecoin mainnet (beside Bitcore,
+// which borrows its raw transactions) and Litecoin mainnet (the last backup,
+// behind litecoinspace.org and Bitcore).
 //
 // BUDGET WARNING: the free tier allows only ~100-200 requests per HOUR (not per
 // second) per IP, shared by every chain it serves — every call here is
@@ -33,6 +34,7 @@ import type {
   XpubApi,
 } from './types'
 import { toRate } from './esplora'
+import { cachedRawTx, rememberRawTx } from './rawtxcache'
 
 // ---------------------------------------------------------------------------
 // Wire shapes
@@ -235,23 +237,22 @@ export class BlockcypherProvider implements ProviderApi {
       confirmed,
     }))
 
-    // Legacy (p2pkh) signing needs each funding tx's full raw hex. Fetch once
-    // per DISTINCT txid, through the throttle, to conserve the hourly budget.
-    // Segwit signing only needs the prevout amount (as in esplora.ts).
+    // Legacy (p2pkh) signing needs each funding tx's full raw hex. Fetch each
+    // DISTINCT txid once per session (rawtxcache.ts keeps the bytes once they
+    // hash to their txid), through the throttle, to conserve the hourly
+    // budget. Segwit signing only needs the prevout amount (as in esplora.ts).
     if (this.chain.addressType === 'p2wpkh') return utxos
-    const distinct = [...new Set(utxos.map((u) => u.txid))]
-    const hexByTxid = new Map<string, string>()
-    for (const txid of distinct) {
+    for (const txid of [...new Set(utxos.map((u) => u.txid))]) {
+      if (cachedRawTx(txid) !== undefined) continue
       const tx = await this.getJson<BcTxHex>(`/txs/${encodeURIComponent(txid)}?includeHex=true`)
       if (!tx.hex) {
         throw new Error(`blockcypher did not return raw hex for tx ${txid}`)
       }
-      hexByTxid.set(txid, tx.hex)
+      if (!rememberRawTx(txid, tx.hex)) {
+        throw new Error(`blockcypher returned bytes that are not tx ${txid}`)
+      }
     }
-    for (const u of utxos) {
-      const hex = hexByTxid.get(u.txid)
-      if (hex !== undefined) u.rawTxHex = hex
-    }
+    for (const u of utxos) u.rawTxHex = cachedRawTx(u.txid)
     return utxos
   }
 
@@ -281,8 +282,12 @@ export class BlockcypherProvider implements ProviderApi {
   }
 
   async getRawTxHex(txid: string): Promise<string> {
+    const cached = cachedRawTx(txid)
+    if (cached !== undefined) return cached
     const tx = await this.getJson<BcTxHex>(`/txs/${encodeURIComponent(txid)}?includeHex=true`)
     if (!tx.hex) throw new Error(`blockcypher did not return raw hex for tx ${txid}`)
+    // kept only if they hash to the txid (a legacy tx; segwit bytes never do)
+    rememberRawTx(txid, tx.hex)
     return tx.hex
   }
 

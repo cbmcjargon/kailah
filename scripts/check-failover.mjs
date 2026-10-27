@@ -347,8 +347,8 @@ console.log('--- I. BlockCypher as the Litecoin backup ---')
   const LTC = CHAINS.ltc
   const DOGE = CHAINS.doge
   const ltcSpec = LTC.providers.find((p) => p.kind === 'blockcypher')
-  check('I1 Litecoin lists BlockCypher second, as a backup only', LTC.providers[0]?.name === 'litecoinspace.org' && LTC.providers.length === 2 && ltcSpec?.backupOnly === true && ltcSpec.base === 'https://api.blockcypher.com/v1/ltc/main')
-  check('I2 Dogecoin\'s BlockCypher stays its regular provider', DOGE.providers.length === 1 && DOGE.providers[0].backupOnly !== true)
+  check('I1 Litecoin lists BlockCypher last, as a backup only (Bitcore is the first backup; check-bitcore)', LTC.providers[0]?.name === 'litecoinspace.org' && LTC.providers.length === 3 && LTC.providers.at(-1) === ltcSpec && ltcSpec?.backupOnly === true && ltcSpec.base === 'https://api.blockcypher.com/v1/ltc/main')
+  check('I2 Dogecoin\'s BlockCypher stays a regular provider, first in its list', DOGE.providers[0].kind === 'blockcypher' && DOGE.providers[0].backupOnly !== true)
   const realFetch = globalThis.fetch
   const calls = []
   const replies = new Map()

@@ -312,9 +312,10 @@ export async function scanAccount(
 
   const cache = addrcache.get(account.xpubs.xpub)
 
-  // DOGE is BlockCypher-backed with a ~100-200 req/hour free tier, so scan it
-  // strictly sequentially (the provider also self-throttles) and lean on the
-  // cache. Esplora chains parallelize a small batch.
+  // DOGE reads from BlockCypher (~100-200 req/hour free tier) and Bitcore (no
+  // published budget), so scan it strictly sequentially (both providers also
+  // self-throttle) and lean on the cache. Esplora chains parallelize a small
+  // batch.
   //
   // Call budget (DOGE): cold empty account ~= GAP_LIMIT stats probes per branch
   // (~40 getAddressStats, no utxo/tx calls since nothing is used). Active

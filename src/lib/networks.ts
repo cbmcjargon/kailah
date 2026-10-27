@@ -83,6 +83,11 @@ export const CHAINS: Record<ChainId, ChainConfig> = {
     mainnet: true,
     providers: [
       { name: 'blockcypher', kind: 'blockcypher', base: 'https://api.blockcypher.com/v1/doge/main' },
+      // A second, independent service (2026-10-27): BlockCypher's hourly
+      // budget is shared with Litecoin's backup, and when it ran out Dogecoin
+      // went dark. Bitcore has no raw-tx endpoint; the funding txs Dogecoin
+      // signs with still come from BlockCypher, cached (rawtxcache.ts).
+      { name: 'bitcore', kind: 'bitcore', base: 'https://api.bitcore.io/api/DOGE/mainnet' },
     ],
     explorerTx: (t) => `https://dogechain.info/tx/${t}`,
     explorerAddr: (a) => `https://dogechain.info/address/${a}`,
@@ -109,9 +114,11 @@ export const CHAINS: Record<ChainId, ChainConfig> = {
     mainnet: true,
     providers: [
       { name: 'litecoinspace.org', kind: 'esplora', base: 'https://litecoinspace.org/api', pageSize: 50 },
-      // Backup only: its free budget (~100 requests an hour) is shared with
-      // Dogecoin, so it serves Litecoin only while litecoinspace is failing
-      // (it timed out for the owner, 2026-10-26).
+      // Backups only, in this order, while litecoinspace is failing (it timed
+      // out for the owner, 2026-10-26, and lagged ~14 blocks, 2026-10-27).
+      // Bitcore first: BlockCypher's ~100 requests an hour are shared with
+      // Dogecoin, and a full Litecoin scan there costs ~70 of them.
+      { name: 'bitcore', kind: 'bitcore', base: 'https://api.bitcore.io/api/LTC/mainnet', backupOnly: true },
       { name: 'blockcypher', kind: 'blockcypher', base: 'https://api.blockcypher.com/v1/ltc/main', backupOnly: true },
     ],
     explorerTx: (t) => `https://litecoinspace.org/tx/${t}`,

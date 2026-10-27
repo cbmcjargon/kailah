@@ -45,7 +45,7 @@ which is why the builds are reproducible and the dependencies pinned (see
   They never receive your recovery phrase, private keys or password.
   - **Bitcoin, Litecoin, Dogecoin:** mempool.space, mempool.emzy.de,
     mempool.bitaroo.net, blockstream.info, litecoinspace.org,
-    api.blockcypher.com.
+    api.blockcypher.com, api.bitcore.io (BitPay, for Dogecoin and Litecoin).
   - **Base, Ethereum, Arbitrum, BNB Chain:** mainnet.base.org,
     sepolia.base.org, base-rpc.publicnode.com, ethereum-rpc.publicnode.com,
     arbitrum-one-rpc.publicnode.com, bsc-rpc.publicnode.com,

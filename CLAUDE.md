@@ -1,6 +1,6 @@
 # Kailah Wallet — maintenance notes
 
-Self-custody browser wallet, v2.7.2: four engines — UTXO (BTC/DOGE/LTC),
+Self-custody browser wallet, v2.7.3: four engines — UTXO (BTC/DOGE/LTC),
 EVM (USDC+ETH on Base/Ethereum/Arbitrum + BNB on BSC, no explorer API there),
 Solana (SOL + SPL USDC + Jupiter swaps + native staking via hand-built
 stake-program instructions in solstake.ts), TRON (TRX + USDT-TRC20 + Stake 2.0 via tron.ts/tronstake.ts — the node builds raw txs and the wallet DECODES the protobuf bytes
@@ -36,7 +36,7 @@ not feature building, unless the user asks for something new.
   committing, and never `git add -A` right after a deploy without checking.
   The public snapshot's leak scan refuses that path (it caught it once,
   2026-10-25).
-- Tests: `npm run check:offline` (keys, txbuild, txv2, qrparse, vault, scanner, hw, pending, netprefs, failover, swapgate, lookalike, trondecode —
+- Tests: `npm run check:offline` (keys, txbuild, txv2, qrparse, vault, scanner, hw, pending, netprefs, failover, swapgate, lookalike, trondecode, bitcore —
   no network; this is what CI runs on every push) and `npm run check:live`
   (account, evm, sol, solswap, solstake, tron — real networks; a provider being
   down or rate-limited prints SKIP, never FAIL). check-providers.mjs is run by
@@ -113,13 +113,27 @@ not feature building, unless the user asks for something new.
   layer multiplies requests, and mempool.space and mempool.emzy.de block a
   whole IP for a while after heavy bursts (2026-10-25). Keep live testnet
   scans and burst tests rare.
-- Litecoin's BlockCypher provider is backupOnly (ProviderApi.backupOnly):
-  used only while litecoinspace.org has failed or is cooling down, never
-  raced at startup, never remembered, never used for a mere rate limit.
-  BlockCypher requests from every chain share one 500 ms queue (one per-IP
-  budget, ~100/hr). A full LTC scan through it costs ~70 requests for the
-  test wallet, so browser-test a failover with Dogecoin's BlockCypher blocked.
-  `check-providers.mjs ltc` runs only the Litecoin section.
+- Litecoin's backups are backupOnly (ProviderApi.backupOnly), Bitcore first,
+  then BlockCypher: used only while litecoinspace.org has failed or is
+  cooling down, never raced at startup, never remembered, never used for a
+  mere rate limit. BlockCypher requests from every chain share one 500 ms
+  queue (one per-IP budget, ~100/hr). A full LTC scan through it costs ~70
+  requests for the test wallet, so browser-test a failover with Dogecoin's
+  BlockCypher blocked. `check-providers.mjs ltc` runs only the Litecoin
+  section; `check-providers.mjs bitcore` only Bitcore's (no BlockCypher).
+- Bitcore (bitcore.ts, BitPay's api.bitcore.io, keyless, 2026-10-27) is
+  Dogecoin's second regular provider and Litecoin's first backup. It has no
+  raw-tx endpoint: Dogecoin's legacy funding txs still come from BlockCypher
+  through rawtxcache.ts, kept only when they hash to their txid (one request
+  per tx per session); never weaken that check, it is what stops a lying
+  provider from inflating a coin's value into a huge fee. Balances come from
+  its unspent coins, never /balance (which counts a coin a pending send
+  spends). Its input order isn't the tx's; Speed up uses the verified raw
+  bytes, never provider input order. check-bitcore proves all of it offline.
+- The provider layer (api.ts, esplora, BlockCypher, Bitcore) loads with
+  App.tsx: Shell.tsx clears the provider preference through providerpref.ts,
+  never by importing api.ts (that import put every provider in the
+  first-load chunk until 2026-10-27).
 - Networks shown (src/lib/netprefs.ts, kailah.sec.netprefs): hidden networks
   are never scanned or polled — every scan/poll/refresh loop in App.tsx goes
   through shownIn() (check-netprefs E1 enforces it) — and an engine chunk

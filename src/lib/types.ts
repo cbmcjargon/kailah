@@ -84,7 +84,7 @@ export interface ChainConfig {
 /** One backend for a chain. `kind` selects the ProviderApi implementation. */
 export interface ProviderSpec {
   name: string
-  kind: 'esplora' | 'blockcypher'
+  kind: 'esplora' | 'blockcypher' | 'bitcore'
   base: string
   /** esplora only: first /txs page size (mempool.space=50, blockstream=25) */
   pageSize?: number

@@ -1,0 +1,235 @@
+{
+ "recorded": "2026-10-27, api.bitcore.io (BitPay Bitcore); dogeRawHex from api.blockchair.com, test data only",
+ "dogeTip": {
+  "height": 6432631,
+  "hash": "460583a39ae8531f4618ea76524f57b848b3742a4ebad577a007370ecab2b56f",
+  "time": "2026-10-27T11:54:36.000Z"
+ },
+ "dogeCoins": [
+  {
+   "chain": "DOGE",
+   "network": "mainnet",
+   "coinbase": false,
+   "mintIndex": 0,
+   "spentTxid": "8a9fad9305b739ee3353dfab8d6312478643b5089d204e4a575d6a6e3bea6cc5",
+   "mintTxid": "d1e3b968a736cf5289af27fe510ea3b5ba086b52dbeba9f927fd0f8658b399ca",
+   "mintHeight": 6116929,
+   "spentHeight": 6116929,
+   "address": "DBus3bamQjgJULBJtYXpEzDWQRwF5iwxgC",
+   "script": "76a9144a483568665dcdfa68dd58a1f62893448a64333988ac",
+   "value": 214674000000,
+   "confirmations": -1,
+   "sequenceNumber": 4294967295
+  },
+  {
+   "chain": "DOGE",
+   "network": "mainnet",
+   "coinbase": false,
+   "mintIndex": 0,
+   "spentTxid": "9f1eb9ad9b0898f979416e71e415814e666b68a0e11a70836284233f505d9c8c",
+   "mintTxid": "3c09000f87c28c190a9694d4d3958112502b3ab935fbb277f98ea0131e2dc096",
+   "mintHeight": 5864041,
+   "spentHeight": 5864041,
+   "address": "DBus3bamQjgJULBJtYXpEzDWQRwF5iwxgC",
+   "script": "76a9144a483568665dcdfa68dd58a1f62893448a64333988ac",
+   "value": 1500000000,
+   "confirmations": -1,
+   "sequenceNumber": 4294967295
+  },
+  {
+   "chain": "DOGE",
+   "network": "mainnet",
+   "coinbase": false,
+   "mintIndex": 0,
+   "spentTxid": "c67261f27da715ce871b8c54e493cc586fbd4d65d802a6418277fd851b7e7c47",
+   "mintTxid": "a2ca1f5ad612c53e7db5efd126c0d1ac979f2ab1a17c3323ccab2ff732e45cb7",
+   "mintHeight": 5373534,
+   "spentHeight": 5373537,
+   "address": "DBus3bamQjgJULBJtYXpEzDWQRwF5iwxgC",
+   "script": "76a9144a483568665dcdfa68dd58a1f62893448a64333988ac",
+   "value": 100000000,
+   "confirmations": -1,
+   "sequenceNumber": 4294967295
+  }
+ ],
+ "dogePopulated": {
+  "txid": "d1e3b968a736cf5289af27fe510ea3b5ba086b52dbeba9f927fd0f8658b399ca",
+  "network": "mainnet",
+  "chain": "DOGE",
+  "blockHeight": 6116929,
+  "blockHash": "3953d9d7fb7b7ce309b6a49feeb9a3057085d99c70bfd6eda51941cce6f941a5",
+  "blockTime": "2026-03-09T19:54:16.000Z",
+  "blockTimeNormalized": "2026-03-09T19:54:16.000Z",
+  "coinbase": false,
+  "locktime": -1,
+  "inputCount": 3,
+  "outputCount": 2,
+  "size": 520,
+  "fee": 5220000,
+  "value": 982677466179,
+  "confirmations": 315699,
+  "coins": {
+   "inputs": [
+    {
+     "chain": "DOGE",
+     "network": "mainnet",
+     "coinbase": false,
+     "mintIndex": 1,
+     "spentTxid": "d1e3b968a736cf5289af27fe510ea3b5ba086b52dbeba9f927fd0f8658b399ca",
+     "mintTxid": "2d1ff6cd7b38f79aa725fa76b143b47f37aa803768db0bcf87070a3eca8c17db",
+     "mintHeight": 6116404,
+     "spentHeight": 6116929,
+     "address": "D8uQyPPsiQ3tKRaCDiu2ucPKdvaFHdvzgD",
+     "script": "76a914294a112515081b221a1f9d7213d20436929d93cc88ac",
+     "value": 778414392643,
+     "confirmations": 315699,
+     "sequenceNumber": 4294967294
+    },
+    {
+     "chain": "DOGE",
+     "network": "mainnet",
+     "coinbase": false,
+     "mintIndex": 0,
+     "spentTxid": "d1e3b968a736cf5289af27fe510ea3b5ba086b52dbeba9f927fd0f8658b399ca",
+     "mintTxid": "fc6701b51802b4254d3821bd13e8f9a09ec39e16f3657af0e27cea17475acac8",
+     "mintHeight": 6116519,
+     "spentHeight": 6116929,
+     "address": "D8uQyPPsiQ3tKRaCDiu2ucPKdvaFHdvzgD",
+     "script": "76a914294a112515081b221a1f9d7213d20436929d93cc88ac",
+     "value": 200000000000,
+     "confirmations": 315699,
+     "sequenceNumber": 4294967294
+    },
+    {
+     "chain": "DOGE",
+     "network": "mainnet",
+     "coinbase": false,
+     "mintIndex": 0,
+     "spentTxid": "d1e3b968a736cf5289af27fe510ea3b5ba086b52dbeba9f927fd0f8658b399ca",
+     "mintTxid": "cefe7d96d4b392181879de0a4840e001fbd4389d7634ea28655a711f3d266b2f",
+     "mintHeight": 6116687,
+     "spentHeight": 6116929,
+     "address": "D8uQyPPsiQ3tKRaCDiu2ucPKdvaFHdvzgD",
+     "script": "76a914294a112515081b221a1f9d7213d20436929d93cc88ac",
+     "value": 4268293536,
+     "confirmations": 315699,
+     "sequenceNumber": 4294967294
+    }
+   ],
+   "outputs": [
+    {
+     "chain": "DOGE",
+     "network": "mainnet",
+     "coinbase": false,
+     "mintIndex": 0,
+     "spentTxid": "8a9fad9305b739ee3353dfab8d6312478643b5089d204e4a575d6a6e3bea6cc5",
+     "mintTxid": "d1e3b968a736cf5289af27fe510ea3b5ba086b52dbeba9f927fd0f8658b399ca",
+     "mintHeight": 6116929,
+     "spentHeight": 6116929,
+     "address": "DBus3bamQjgJULBJtYXpEzDWQRwF5iwxgC",
+     "script": "76a9144a483568665dcdfa68dd58a1f62893448a64333988ac",
+     "value": 214674000000,
+     "confirmations": 315699,
+     "sequenceNumber": 4294967295
+    },
+    {
+     "chain": "DOGE",
+     "network": "mainnet",
+     "coinbase": false,
+     "mintIndex": 1,
+     "spentTxid": "ed251c34c14d519c30e61fca4db68e78be56572ed4430823d52e377401c8daf8",
+     "mintTxid": "d1e3b968a736cf5289af27fe510ea3b5ba086b52dbeba9f927fd0f8658b399ca",
+     "mintHeight": 6116929,
+     "spentHeight": 6117763,
+     "address": "D8uQyPPsiQ3tKRaCDiu2ucPKdvaFHdvzgD",
+     "script": "76a914294a112515081b221a1f9d7213d20436929d93cc88ac",
+     "value": 768003466179,
+     "confirmations": 315699,
+     "sequenceNumber": 4294967294
+    }
+   ]
+  }
+ },
+ "ltcPopulated": {
+  "txid": "eb9a59f369092fb5e17c506c80eaff801a882fb2368e71d8fab7abfe23c8e962",
+  "network": "mainnet",
+  "chain": "LTC",
+  "blockHeight": 3202546,
+  "blockHash": "c4aa779d5dadc759f0031ac5d688709001998677cad4fff9ef6398d6f309cd6b",
+  "blockTime": "2026-10-27T11:53:39.000Z",
+  "blockTimeNormalized": "2026-10-27T11:53:39.000Z",
+  "coinbase": false,
+  "locktime": -1,
+  "inputCount": 1,
+  "outputCount": 2,
+  "size": 225,
+  "fee": 1130,
+  "value": 27118231,
+  "confirmations": 4,
+  "coins": {
+   "inputs": [
+    {
+     "chain": "LTC",
+     "network": "mainnet",
+     "coinbase": false,
+     "mintIndex": 0,
+     "spentTxid": "eb9a59f369092fb5e17c506c80eaff801a882fb2368e71d8fab7abfe23c8e962",
+     "mintTxid": "ff25f4dc4332f3db607f41e5a56b351a3dac3f01149a62ee5a26767c1058edaf",
+     "mintHeight": 3202543,
+     "spentHeight": 3202546,
+     "address": "LSLYdGfPSrvxVN6KZEhzx1ksXqqYP74qrC",
+     "script": "76a9144e080fa443a1cad0c3190f5df9fd15621ce065b488ac",
+     "value": 27119361,
+     "confirmations": 4,
+     "sequenceNumber": 4294967295
+    }
+   ],
+   "outputs": [
+    {
+     "chain": "LTC",
+     "network": "mainnet",
+     "coinbase": false,
+     "mintIndex": 0,
+     "spentTxid": "",
+     "mintTxid": "eb9a59f369092fb5e17c506c80eaff801a882fb2368e71d8fab7abfe23c8e962",
+     "mintHeight": 3202546,
+     "spentHeight": -2,
+     "address": "LPu4FP6b1FrWpjVviTUNmJvGvZhWxXceAP",
+     "script": "76a9143345b8e405d1676c49e724120a14c35b1a2c12ce88ac",
+     "value": 5438066,
+     "confirmations": 4
+    },
+    {
+     "chain": "LTC",
+     "network": "mainnet",
+     "coinbase": false,
+     "mintIndex": 1,
+     "spentTxid": "",
+     "mintTxid": "eb9a59f369092fb5e17c506c80eaff801a882fb2368e71d8fab7abfe23c8e962",
+     "mintHeight": 3202546,
+     "spentHeight": -2,
+     "address": "LSLYdGfPSrvxVN6KZEhzx1ksXqqYP74qrC",
+     "script": "76a9144e080fa443a1cad0c3190f5df9fd15621ce065b488ac",
+     "value": 21680165,
+     "confirmations": 4
+    }
+   ]
+  }
+ },
+ "ltcFee2": {
+  "feerate": 0.00001,
+  "blocks": 2
+ },
+ "notFound": {
+  "status": 404,
+  "text": "The requested txid abababababababababababababababababababababababababababababababab could not be found."
+ },
+ "sendInvalid": {
+  "status": 500,
+  "text": "TX decode failed"
+ },
+ "dogeRawHex": {
+  "txid": "d1e3b968a736cf5289af27fe510ea3b5ba086b52dbeba9f927fd0f8658b399ca",
+  "hex": "01000000032f6b263d1f715a6528ea34769d38d4fb01e040480ade79181892b3d4967dfece000000006b48304502210095f1c5d5881f23881e41f2399174743c6da173b08fcd4ae16ab9d97c85019534022033d7a5686b75b9c69663d91799cb722c1a9505c30d682ac07d28c82f2f57b2f901210394239de02bca7d5476c708a3bd4aa527819e860e4fe2985d5f3f1a8387ba6eb6feffffffc8ca5a4717ea7ce2f07a65f3169ec39ea0f9e813bd21384d25b40218b50167fc000000006a47304402206085951b8796a336eb9b9eef81a767b35de68b0c4d201692074cb0835b987be40220454b66c8568e21baedc501ea79df04cfdaa7c5636c1ef31979b433be72c932bc01210394239de02bca7d5476c708a3bd4aa527819e860e4fe2985d5f3f1a8387ba6eb6feffffffdb178cca3e0a0787cf0bdb683780aa377fb443b176fa25a79af7387bcdf61f2d010000006a47304402206928ebdc07cb1653cd507c323c4f5acceca8e48a6379717bcba05ec0169bc81a02201cdce7beedf56741280565f06f5bd872eb268dab2a0e6c84a4560082e3d5e0e601210394239de02bca7d5476c708a3bd4aa527819e860e4fe2985d5f3f1a8387ba6eb6feffffff02804891fb310000001976a9144a483568665dcdfa68dd58a1f62893448a64333988acc3e392d0b20000001976a914294a112515081b221a1f9d7213d20436929d93cc88ac00000000"
+ }
+}
