@@ -10,7 +10,8 @@
 // executed from a real USDC holder's account (sigVerify off — nothing is
 // signed or spent); the real prepareSwap() pipeline against mainnet on Jupiter
 // Swap V2 /build, including the wallet's own assembly and simulation gate;
-// the 0.5% Kailah fee paid to the fee account; and adversarial tamper tests
+// the 0.5% Kailah fee paid to the fee account; a route made to fail inside
+// one exchange, re-routed around it by Jupiter; and adversarial tamper tests
 // proving the gate refuses a promise the route doesn't make, a live route
 // whose slippage was raised, and one whose fee was redirected.
 // NOTHING here broadcasts to mainnet; no mainnet key material is used.
@@ -31,7 +32,7 @@ import {
   solRpc,
   solUsdcAta,
 } from '../src/lib/sol.ts'
-import { getSwapQuote, prepareSwap, SWAP_FEE_ACCOUNT, SWAP_FEE_WALLET } from '../src/lib/solswap.ts'
+import { getSwapQuote, prepareSwap, routeLabels, SWAP_FEE_ACCOUNT, SWAP_FEE_WALLET } from '../src/lib/solswap.ts'
 
 const VECTOR_MNEMONIC =
   'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about'
@@ -311,6 +312,72 @@ if (quote !== null) {
     }
   } catch (e) {
     check('first-time-holder swap regression', false, e.message)
+  }
+
+  // --- 7b. Re-route around a failing exchange (live, simulation only) -------
+  // A live swap failed inside an exchange on its route (custom program error
+  // 0xffff, 2026-10-27). Here the FIRST simulation is made to fail the same
+  // way inside the route's first exchange; prepareSwap must name it from
+  // Jupiter's own program list, and Jupiter must build a fresh route without
+  // it that passes every gate. Nothing is signed.
+  try {
+    const realFetch = globalThis.fetch
+    const names = await (await realFetch('https://api.jup.ag/swap/v2/program-id-to-label')).json()
+    const q2 = await getSwapQuote(MAINNET, 'sol-to-usdc', 100_000_000n, BINANCE_HOT)
+    const label = routeLabels(q2.build)[0]
+    const program = q2.build.swapInstruction.accounts.map((a) => a.pubkey).find((k) => names[k] === label)
+    if (label === undefined || program === undefined) {
+      skip('live re-route around a failing exchange', `no program for ${label} in the route`)
+    } else {
+      let failed = false
+      let freshLabels = null
+      let freshUrl = ''
+      let freshStatus = 0
+      globalThis.fetch = async (url, init) => {
+        const u = String(url)
+        if (!failed && typeof init?.body === 'string' && JSON.parse(init.body).method === 'simulateTransaction') {
+          failed = true
+          const logs = [
+            'Program JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4 invoke [1]',
+            `Program ${program} invoke [2]`,
+            `Program ${program} failed: custom program error: 0xffff`,
+            'Program JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4 consumed 143814 of 1372870 compute units',
+            'Program JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4 failed: custom program error: 0xffff',
+          ]
+          const result = { context: { slot: 0 }, value: { err: { InstructionError: [5, { Custom: 65535 }] }, logs } }
+          return new Response(JSON.stringify({ jsonrpc: '2.0', id: 1, result }), { status: 200 })
+        }
+        const res = await realFetch(url, init)
+        if (u.includes('/build?') && u.includes('excludeDexes=')) {
+          freshUrl = u
+          freshStatus = res.status
+          if (res.ok) freshLabels = routeLabels(await res.clone().json())
+        }
+        return res
+      }
+      let p
+      try {
+        p = await prepareSwap(MAINNET, BINANCE_HOT, q2)
+      } catch (e) {
+        // the keyless limit refusing the fresh build is the swap service, not
+        // the wallet (which then shows the first failure and says try again)
+        if (freshStatus === 429) p = null
+        else throw e
+      } finally {
+        globalThis.fetch = realFetch
+      }
+      if (p === null) skip('live re-route around a failing exchange', `the fresh build was rate-limited (429) after naming ${label}`)
+      else check(
+        `live re-route: ${label} failing → named, and a fresh route without it passes every gate`,
+        p.reroutedAround === `the exchange ${label}` &&
+          freshUrl.includes(`excludeDexes=${encodeURIComponent(label)}`) &&
+          Array.isArray(freshLabels) && freshLabels.length > 0 && !freshLabels.includes(label) &&
+          p.simulatedUsdcDelta >= p.minOutAmount && p.swapFee > 0n,
+        JSON.stringify({ named: p.reroutedAround, fresh: freshLabels }),
+      )
+    }
+  } catch (e) {
+    check('live re-route around a failing exchange', false, e.message)
   }
 
   // --- 8. ADVERSARIAL: the gate must refuse what the live build didn't say ---

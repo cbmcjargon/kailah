@@ -1,8 +1,15 @@
 import { useEffect, useRef, useState } from 'react'
 import type { SolChainConfig, SolKey, SolUiState } from '../lib/sol'
 import { formatSol, formatSolUsdc, rebroadcastSol, SolBroadcastError, SolExpiredError, solTxSeen } from '../lib/sol'
-import type { PreparedSwap, SwapDirection, SwapQuote } from '../lib/solswap'
-import { broadcastSwap, getSwapQuote, prepareSwap, SWAP_SLIPPAGE_BPS } from '../lib/solswap'
+import type { MarketGap, PreparedSwap, SwapDirection, SwapQuote } from '../lib/solswap'
+import {
+  broadcastSwap,
+  getSwapQuote,
+  MARKET_GAP_WARN_PCT,
+  prepareSwap,
+  swapMarketGap,
+  SWAP_SLIPPAGE_BPS,
+} from '../lib/solswap'
 import { evmToUsd } from '../lib/units'
 import { formatUsd } from '../lib/format'
 import Modal from './Modal'
@@ -48,6 +55,9 @@ export default function SolSwapModal({
   const [quoteError, setQuoteError] = useState<string | null>(null)
   const [quoteLoading, setQuoteLoading] = useState(false)
   const quoteSeqRef = useRef(0)
+  // bumped to fetch a fresh route: after a failed test run, the same quote
+  // would rebuild the same failing route for up to 30 s
+  const [requote, setRequote] = useState(0)
 
   const aliveRef = useRef(true)
   useEffect(() => {
@@ -119,7 +129,7 @@ export default function SolSwapModal({
     // parsedAmount is derived from amountStr; comparing the string avoids
     // re-running on unrelated renders while still tracking every edit.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [amountStr, direction, chain])
+  }, [amountStr, direction, chain, requote])
 
   const usdHint =
     parsedAmount !== null && (solToUsdc ? price : usdcPrice) !== undefined
@@ -128,16 +138,56 @@ export default function SolSwapModal({
   // The quote against the wallet's OWN price feed. The gate proves the route
   // does what the quote says; nothing else says whether the quote itself is
   // fair, and a swap service quoting well under market would otherwise look
-  // honest all the way to the review screen (audit 2026-10-26, M8).
-  const outDecimals = solToUsdc ? chain.usdc.decimals : 9
+  // honest all the way to the review screen (audit 2026-10-26, M8). The
+  // review checks again: a stale quote is rebuilt, and a failed route is
+  // re-routed, after the form's check, so the route prepared can differ.
+  const gapOf = (inAmount: bigint, outAmount: bigint) => {
+    const gap = swapMarketGap(direction, inAmount, outAmount, price, usdcPrice, chain.usdc.decimals)
+    return gap !== null && gap.pct > MARKET_GAP_WARN_PCT ? gap : null
+  }
+  const ackKey = (inAmount: bigint, outAmount: bigint) => `${direction}:${inAmount}:${outAmount}`
   const outPrice = solToUsdc ? usdcPrice : price
   const outUsd =
-    quote !== null && outPrice !== undefined ? evmToUsd(quote.outAmount, outDecimals, outPrice) : null
-  const rateGapPct =
-    usdHint !== null && outUsd !== null && usdHint > 0 ? (1 - outUsd / usdHint) * 100 : null
-  const badRate = rateGapPct !== null && rateGapPct > 3
-  const [rateAckFor, setRateAckFor] = useState<string | null>(null)
-  const rateAcked = quote !== null && rateAckFor === `${quote.inAmount}:${quote.outAmount}`
+    quote !== null && outPrice !== undefined
+      ? evmToUsd(quote.outAmount, solToUsdc ? chain.usdc.decimals : 9, outPrice)
+      : null
+  // one acknowledgement per quote shown, so going back from the review keeps
+  // the form's (each route's amounts are their own key)
+  const [rateAcks, setRateAcks] = useState<ReadonlySet<string>>(() => new Set())
+  const setRateAck = (key: string, on: boolean) =>
+    setRateAcks((prev) => {
+      const next = new Set(prev)
+      if (on) next.add(key)
+      else next.delete(key)
+      return next
+    })
+  const badRate = quote !== null ? gapOf(quote.inAmount, quote.outAmount) : null
+  const rateAcked = quote !== null && rateAcks.has(ackKey(quote.inAmount, quote.outAmount))
+  const reviewGap = step.kind === 'review' ? gapOf(step.prepared.inAmount, step.prepared.outAmount) : null
+  const reviewAcked =
+    step.kind === 'review' && rateAcks.has(ackKey(step.prepared.inAmount, step.prepared.outAmount))
+  const rateWarning = (gap: MarketGap, acked: boolean, key: string) => (
+    <div className="warning-box" role="alert">
+      <IconWarning size={20} />
+      <div>
+        <strong>This quote is {gap.pct.toFixed(1)}% below the market price</strong>
+        <p>
+          You would get about {formatUsd(gap.outUsd)} of {outSymbol} for {formatUsd(gap.inUsd)} of{' '}
+          {inSymbol}, by the wallet&rsquo;s own price feed. A route can lag the market for a
+          moment, but a gap this size usually means the quote is wrong. Try again in a minute
+          before accepting it.
+        </p>
+        <label className="lookalike-ack">
+          <input
+            type="checkbox"
+            checked={acked}
+            onChange={(e) => setRateAck(key, e.target.checked)}
+          />
+          <span>I understand I&rsquo;d be swapping below the market price</span>
+        </label>
+      </div>
+    </div>
+  )
 
   const handleMax = () => {
     if (inBalance === null) return
@@ -357,33 +407,14 @@ export default function SolSwapModal({
             </div>
           )}
 
-          {badRate && quote !== null && usdHint !== null && outUsd !== null && (
-            <div className="warning-box" role="alert">
-              <IconWarning size={20} />
-              <div>
-                <strong>This quote is {rateGapPct!.toFixed(1)}% below the market price</strong>
-                <p>
-                  You would get about {formatUsd(outUsd)} of {outSymbol} for {formatUsd(usdHint)} of{' '}
-                  {inSymbol}, by the wallet&rsquo;s own price feed. A route can lag the market for a
-                  moment, but a gap this size usually means the quote is wrong. Try again in a minute
-                  before accepting it.
-                </p>
-                <label className="lookalike-ack">
-                  <input
-                    type="checkbox"
-                    checked={rateAcked}
-                    onChange={(e) => setRateAckFor(e.target.checked ? `${quote.inAmount}:${quote.outAmount}` : null)}
-                  />
-                  <span>I understand I&rsquo;d be swapping below the market price</span>
-                </label>
-              </div>
-            </div>
-          )}
+          {badRate !== null &&
+            quote !== null &&
+            rateWarning(badRate, rateAcked, ackKey(quote.inAmount, quote.outAmount))}
 
           <button
             type="submit"
             className="btn btn-primary"
-            disabled={quote === null || quoteLoading || amountError !== null || (badRate && !rateAcked)}
+            disabled={quote === null || quoteLoading || amountError !== null || (badRate !== null && !rateAcked)}
           >
             Continue
           </button>
@@ -410,7 +441,14 @@ export default function SolSwapModal({
               <p>{step.message}</p>
             </div>
           </div>
-          <button type="button" className="btn btn-secondary" onClick={() => setStep({ kind: 'form' })}>
+          <button
+            type="button"
+            className="btn btn-secondary"
+            onClick={() => {
+              setStep({ kind: 'form' })
+              setRequote((n) => n + 1)
+            }}
+          >
             <IconBack size={16} />
             Back
           </button>
@@ -469,6 +507,14 @@ export default function SolSwapModal({
             Rates move with the market; if the price shifts beyond the slippage limit before the
             transaction lands, it fails safely and nothing is exchanged.
           </p>
+          {step.prepared.reroutedAround !== null && (
+            <p className="text-tertiary">
+              Jupiter&rsquo;s first route failed its test run at {step.prepared.reroutedAround}, so
+              this is a fresh route around it. The amounts above are for the fresh route.
+            </p>
+          )}
+          {reviewGap !== null &&
+            rateWarning(reviewGap, reviewAcked, ackKey(step.prepared.inAmount, step.prepared.outAmount))}
           <div className="btn-row">
             <button type="button" className="btn btn-ghost" onClick={() => setStep({ kind: 'form' })}>
               <IconBack size={16} />
@@ -477,6 +523,7 @@ export default function SolSwapModal({
             <button
               type="button"
               className="btn btn-primary"
+              disabled={reviewGap !== null && !reviewAcked}
               onClick={() => handleBroadcast(step.prepared)}
             >
               Confirm swap

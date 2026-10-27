@@ -29,6 +29,11 @@
 //      anyone but us, token accounts opened only for us, the older `route`
 //      forms refused, the swap's source/destination/mints pinned to our own
 //      accounts, and the input side must move by exactly the input.
+//   K. a route that fails its test run in one exchange (a live 0xffff,
+//      2026-10-27): the failing exchange is named from the innermost log
+//      line, ONE fresh route is built around it and passes the whole gate
+//      again (a tampered fresh route is still refused), plumbing failures
+//      are not re-routed, and the market-price check behind the review.
 const store = new Map()
 globalThis.localStorage = {
   getItem: (k) => (store.has(k) ? store.get(k) : null),
@@ -42,7 +47,7 @@ const { base58, base64 } = await import('@scure/base')
 const { unlockSecureStore } = await import('../src/lib/securestore.ts')
 const { SOL_CHAINS, solUsdcAta } = await import('../src/lib/sol.ts')
 const { stakeAccountAddress } = await import('../src/lib/solstake.ts')
-const { getSwapQuote, prepareSwap, swapFeeBpsFor, SWAP_SLIPPAGE_BPS, SWAP_FEE_BPS, SWAP_FEE_ACCOUNT, SWAP_FEE_WALLET } = await import('../src/lib/solswap.ts')
+const { getSwapQuote, prepareSwap, swapFeeBpsFor, SWAP_SLIPPAGE_BPS, SWAP_FEE_BPS, SWAP_FEE_ACCOUNT, SWAP_FEE_WALLET, innermostFailure, routeLabels, swapMarketGap, MARKET_GAP_WARN_PCT } = await import('../src/lib/solswap.ts')
 
 let failures = 0
 const check = (name, cond, detail = '') => {
@@ -100,6 +105,14 @@ function resetWorld(direction, fixtures = FIX) {
     // the route spent this much LESS of the input than it said (0 = honest)
     solSpendShort: 0n,
     usdcSpendShort: 0n,
+    // simulations that fail, in order ({ err, logs }); later ones pass
+    simFailures: [],
+    // Jupiter's program → exchange-name list, and how often it was asked
+    labelMap: {},
+    labelStatus: 200,
+    labelAsks: 0,
+    // applied to the build Jupiter returns for a re-route (excludeDexes)
+    onReroute: null,
   }
 }
 const WSOL_MINT = 'So11111111111111111111111111111111111111112'
@@ -112,7 +125,16 @@ const tokenAccountB64 = (amount) => {
 const rpcOk = (result) => new Response(JSON.stringify({ jsonrpc: '2.0', id: 1, result }), { status: 200 })
 globalThis.fetch = async (url, init) => {
   const u = String(url)
+  if (u === 'https://api.jup.ag/swap/v2/program-id-to-label') {
+    world.labelAsks++
+    if (world.labelStatus === 429) return new Response('{"error":"Rate limit exceeded"}', { status: 429 })
+    return new Response(JSON.stringify(world.labelMap), { status: 200 })
+  }
   if (u.startsWith('https://api.jup.ag/')) {
+    if (u.includes('excludeDexes=') && world.onReroute) {
+      world.onReroute(world)
+      world.onReroute = null
+    }
     world.builds++
     world.jupUrls.push(u)
     if (world.jupStatus === 429) return new Response('{"error":"Rate limit exceeded"}', { status: 429 })
@@ -143,6 +165,10 @@ globalThis.fetch = async (url, init) => {
       return rpcOk({ value: params[0].map(() => null) })
     case 'simulateTransaction': {
       world.simulations.push(params[0])
+      if (world.simFailures.length > 0) {
+        const f = world.simFailures.shift()
+        return rpcOk({ value: { err: f.err, logs: f.logs, unitsConsumed: 171_000 } })
+      }
       if (world.simErr) return rpcOk({ value: { err: world.simErr, logs: ['Program log: slippage exceeded'] } })
       const rent = strandedRent(params[0])
       if (rent === null) return rpcOk({ value: { err: { InstructionError: [9, { Custom: 11 }] }, logs: ['Program log: Error: Non-native account can only be closed if its balance is zero'] } })
@@ -612,6 +638,147 @@ console.log('--- J. the audit of 2026-10-26 ---')
     check('J sol-to-usdc: the route spending less SOL than the input → refused', refused(r2), r2.err?.message?.slice(0, 50) ?? 'accepted!')
     const r3 = await run('sol-to-usdc', (w) => { w.wsolLamports = 3_000_000n })
     check('J sol-to-usdc: a wSOL account we already had, returned by the unwrap, is not mistaken for a shortfall', r3.err === null, r3.err?.message?.slice(0, 60))
+  }
+}
+
+console.log('--- K. a route that fails in one exchange is named and re-routed once ---')
+{
+  const BISON = 'BiSoNHVpsVZW2F7rx2eQ59yQwKxzU5NvBcmKshCSUypi'
+  const TOKEN = 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA'
+  // what the RPC returned for the failure seen live, with the exchange's own lines kept
+  const exchangeFails = (program = BISON, code = '0xffff') => ({
+    err: { InstructionError: [5, { Custom: parseInt(code, 16) }] },
+    logs: [
+      `Program ${JUP6} invoke [1]`,
+      'Program log: Instruction: RouteV2',
+      `Program ${program} invoke [2]`,
+      `Program ${program} consumed 12000 of 1300000 compute units`,
+      `Program ${program} failed: custom program error: ${code}`,
+      `Program ${JUP6} consumed 143814 of 1372870 compute units`,
+      `Program ${JUP6} failed: custom program error: ${code}`,
+    ],
+  })
+  // the same, with the exchange's lines cut from the logs (only Jupiter's remain)
+  const truncated = (code = '0xffff') => ({
+    err: { InstructionError: [5, { Custom: parseInt(code, 16) }] },
+    logs: ['Log truncated', `Program ${JUP6} consumed 143814 of 1372870 compute units`, `Program ${JUP6} failed: custom program error: ${code}`],
+  })
+  const excluded = (w) => w.jupUrls.filter((u) => u.includes('excludeDexes=')).map((u) => decodeURIComponent(u.split('excludeDexes=')[1].split('&')[0]))
+
+  const f = innermostFailure(exchangeFails().logs)
+  check('K the innermost failing program is the exchange, not Jupiter repeating it', f?.program === BISON && f?.reason === 'custom program error: 0xffff', JSON.stringify(f))
+  check('K no "failed" line → no culprit', innermostFailure(['Program log: slippage exceeded']) === null)
+  check('K the route plan names its exchanges in order, each once',
+    routeLabels(FIX['sol-to-usdc'].build).join() === 'BisonFi' &&
+      routeLabels(NOFEE['sol-to-usdc'].build).join() === '1DEX,Whirlpool,Manifest,Meteora DLMM' &&
+      routeLabels({ routePlan: [{ swapInfo: { label: 'A,B' } }, { swapInfo: { label: 7 } }, null] }).length === 0)
+
+  for (const direction of ['sol-to-usdc', 'usdc-to-sol']) {
+    // the exchange program each recorded route calls (BisonFi; TesseraV)
+    const prog = direction === 'sol-to-usdc' ? BISON : 'TessVdML9pBGgG9yGks7o4HewRaXVAMuoVj4x83GLQH'
+    const label = routeLabels(FIX[direction].build)[0]
+    const r = await run(direction, (w) => {
+      w.simFailures = [exchangeFails(prog)]
+      w.labelMap = { [prog]: label }
+    })
+    check(`K ${direction}: an exchange failing the test run → one fresh route around it, which passes the whole gate`,
+      r.err === null && r.prepared?.reroutedAround === `the exchange ${label}` && r.prepared.swapFee > 0n && world.builds === 2 && excluded(world).join() === label && world.labelAsks === 1,
+      r.err?.message?.slice(0, 80) ?? `${r.prepared?.reroutedAround} builds=${world.builds} excl=${excluded(world)}`)
+  }
+  {
+    const r = await run('sol-to-usdc')
+    check('K a route that passes first time is not re-routed and asks nothing more', r.err === null && r.prepared.reroutedAround === null && world.builds === 1 && world.labelAsks === 0)
+  }
+  {
+    // the fresh route is dishonest: its simulated outcome falls 1% below its own floor
+    const r = await run('sol-to-usdc', (w) => {
+      w.simFailures = [exchangeFails()]
+      w.labelMap = { [BISON]: 'BisonFi' }
+      w.onReroute = (w2) => { w2.shortfall = BigInt(w2.build.outAmount) / 100n }
+    })
+    check('K a fresh route that does not honor the quote is refused like any other', refused(r) && world.builds === 2, r.err?.message?.slice(0, 60) ?? 'accepted!')
+    const r2 = await run('sol-to-usdc', (w) => {
+      w.simFailures = [exchangeFails()]
+      w.labelMap = { [BISON]: 'BisonFi' }
+      w.onReroute = (w2) => { const d = ixData(w2); patchU16(d, 24, 300); setIxData(w2, d) }
+    })
+    check('K a fresh route with its slippage raised is refused before it is simulated', refused(r2) && world.simulations.length === 1, r2.err?.message?.slice(0, 60) ?? 'accepted!')
+  }
+  {
+    const r = await run('sol-to-usdc', (w) => {
+      w.simFailures = [exchangeFails(), exchangeFails(BISON, '0x1')]
+      w.labelMap = { [BISON]: 'BisonFi' }
+    })
+    const m = r.err?.message ?? ''
+    check('K both routes failing → refused once, naming both, and no third try',
+      r.prepared === null && /not signed or sent/.test(m) && /The exchange BisonFi rejected the first route, and the exchange BisonFi rejected a fresh one \(custom program error: 0x1\)/.test(m) && /try again in a minute/.test(m) && world.builds === 2,
+      m.slice(0, 160))
+  }
+  {
+    const r = await run('sol-to-usdc', (w) => {
+      w.simFailures = [{ err: { InstructionError: [3, { Custom: 1 }] }, logs: [`Program ${TOKEN} invoke [1]`, 'Program log: Error: insufficient funds', `Program ${TOKEN} failed: custom program error: 0x1`] }]
+    })
+    check('K a failure in the transaction\'s own plumbing is not re-routed, and says where',
+      r.prepared === null && world.builds === 1 && /\(the Token program failed: custom program error: 0x1\)$/.test(r.err?.message ?? ''), r.err?.message?.slice(0, 120))
+    const r2 = await run('sol-to-usdc', (w) => { w.simFailures = [{ err: 'InsufficientFundsForFee', logs: [] }] })
+    check('K a failure with no logs is not re-routed', r2.prepared === null && world.builds === 1 && /fails in simulation.*InsufficientFundsForFee/.test(r2.err?.message ?? ''), r2.err?.message?.slice(0, 120))
+    const r3 = await run('sol-to-usdc', (w) => { w.simErr = { InstructionError: [3, { Custom: 6001 }] } })
+    check('K the older failing-simulation shape still stops the swap, with no re-route', r3.prepared === null && world.builds === 1 && /fails in simulation/.test(r3.err?.message ?? ''))
+  }
+  {
+    const slip = { err: { InstructionError: [5, { Custom: 6001 }] }, logs: [`Program ${JUP6} invoke [1]`, 'Program log: Error: SlippageToleranceExceeded', `Program ${JUP6} failed: custom program error: 0x1771`] }
+    const r = await run('sol-to-usdc', (w) => { w.simFailures = [slip] })
+    check('K Jupiter\'s own failure (the price moved) → a fresh quote, excluding no exchange',
+      r.err === null && r.prepared.reroutedAround === "Jupiter's router" && world.builds === 2 && excluded(world).length === 0 && world.labelAsks === 0,
+      r.err?.message?.slice(0, 80) ?? `${world.builds} builds`)
+    const r2 = await run('sol-to-usdc', (w) => { w.simFailures = [slip, slip] })
+    check('K …and says so in plain words when the fresh one fails too', /a fresh one \(the price moved past the 0\.5% slippage limit\)/.test(r2.err?.message ?? ''), r2.err?.message?.slice(0, 160))
+  }
+  {
+    const r = await run('sol-to-usdc', (w) => { w.simFailures = [truncated()] })
+    check('K exchange lines cut from the logs: a one-exchange route still names it',
+      r.err === null && r.prepared.reroutedAround === 'the exchange BisonFi' && excluded(world).join() === 'BisonFi' && world.labelAsks === 0,
+      r.err?.message?.slice(0, 80) ?? r.prepared?.reroutedAround)
+    const r2 = await run('sol-to-usdc', (w) => {
+      w.build.routePlan = [...w.build.routePlan, { swapInfo: { label: 'Meteora DLMM' } }]
+      w.simFailures = [truncated()]
+    })
+    check('K …and a route through several exchanges routes around all of them, naming none',
+      r2.err === null && r2.prepared.reroutedAround === 'an exchange on the route' && excluded(world).join() === 'BisonFi,Meteora DLMM',
+      r2.err?.message?.slice(0, 80) ?? `${r2.prepared?.reroutedAround} excl=${excluded(world)}`)
+    check('K exchange names with spaces are URL-encoded', world.jupUrls.some((u) => u.includes('excludeDexes=BisonFi,Meteora%20DLMM')))
+    const r3 = await run('sol-to-usdc', (w) => {
+      w.build.routePlan = [...w.build.routePlan, { swapInfo: { label: 'Kipseli' } }]
+      w.simFailures = [exchangeFails()]
+      w.labelStatus = 429
+    })
+    check('K Jupiter\'s name list unavailable → route around every exchange on the failed route',
+      r3.err === null && r3.prepared.reroutedAround === 'an exchange on the route' && excluded(world).join() === 'BisonFi,Kipseli',
+      r3.err?.message?.slice(0, 80) ?? excluded(world).join())
+    const r4 = await run('sol-to-usdc', (w) => {
+      w.simFailures = [exchangeFails()]
+      w.labelMap = { [BISON]: 'BisonFi&excludeDexes=,x' }
+    })
+    check('K a name from Jupiter\'s list that is not a plain name is ignored',
+      r4.err === null && r4.prepared.reroutedAround === 'the exchange BisonFi' && excluded(world).join() === 'BisonFi',
+      r4.err?.message?.slice(0, 80) ?? r4.prepared?.reroutedAround)
+  }
+  {
+    resetWorld('sol-to-usdc')
+    const bad = await rejects(() => getSwapQuote(MAINNET, 'sol-to-usdc', 1_000_000n, OWNER, ['Orca,Raydium']))
+    check('K an exclusion that is not a plain name is refused before any request', /does not match its quote/.test(bad?.message ?? '') && world.builds === 0)
+  }
+  {
+    // the market check behind the form AND the review (display only)
+    const g0 = swapMarketGap('sol-to-usdc', 1_000_000_000n, 100_000_000n, 100, 1, 6)
+    const g5 = swapMarketGap('sol-to-usdc', 1_000_000_000n, 95_000_000n, 100, 1, 6)
+    const gUp = swapMarketGap('usdc-to-sol', 100_000_000n, 1_010_000_000n, 100, 1, 6)
+    const g4 = swapMarketGap('usdc-to-sol', 100_000_000n, 960_000_000n, 100, 1, 6)
+    check('K market gap: a fair quote is ~0%, 5% under is flagged, buying SOL is priced the other way round',
+      Math.abs(g0.pct) < 1e-9 && g5.pct > MARKET_GAP_WARN_PCT && Math.abs(g5.pct - 5) < 1e-9 && gUp.pct < 0 && Math.abs(g4.pct - 4) < 1e-9 && MARKET_GAP_WARN_PCT === 3,
+      JSON.stringify([g0?.pct, g5?.pct, gUp?.pct, g4?.pct]))
+    check('K market gap: no price, no verdict',
+      swapMarketGap('sol-to-usdc', 1n, 1n, undefined, 1, 6) === null && swapMarketGap('usdc-to-sol', 1n, 1n, 100, undefined, 6) === null && swapMarketGap('sol-to-usdc', 1n, 1n, 0, 1, 6) === null)
   }
 }
 

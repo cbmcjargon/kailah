@@ -1,6 +1,6 @@
 # Kailah Wallet — maintenance notes
 
-Self-custody browser wallet, v2.7.1: four engines — UTXO (BTC/DOGE/LTC),
+Self-custody browser wallet, v2.7.2: four engines — UTXO (BTC/DOGE/LTC),
 EVM (USDC+ETH on Base/Ethereum/Arbitrum + BNB on BSC, no explorer API there),
 Solana (SOL + SPL USDC + Jupiter swaps + native staking via hand-built
 stake-program instructions in solstake.ts), TRON (TRX + USDT-TRC20 + Stake 2.0 via tron.ts/tronstake.ts — the node builds raw txs and the wallet DECODES the protobuf bytes
@@ -144,6 +144,14 @@ not feature building, unless the user asks for something new.
   and mints to the owner's ATAs, accepts v2 routes only, allows no top-level
   token transfer, and lets helper instructions move value only between the
   owner's own accounts; the input side must move by exactly the input.
+  A route whose simulation fails inside an exchange is named from the
+  FIRST "Program … failed" log line (Jupiter repeats an exchange's error
+  under its own name, 2026-10-27's 0xffff) via api.jup.ag's
+  program-id-to-label, and rebuilt ONCE with excludeDexes; the fresh route
+  goes through the whole gate again. Plumbing failures (system, token,
+  ATA, compute budget) are never re-routed. The market-rate warning runs on
+  the form AND the review, since the route prepared can differ from the
+  form's quote (30 s rebuild, re-route).
 - The lookalike check trusts only the wallet's own send log (lib/sentlog.ts),
   never history rows.
 - Test wallet for dev flows: the public BIP39 vector phrase (abandon ×11 +

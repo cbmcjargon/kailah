@@ -29,6 +29,9 @@
 //      fee account's simulated post-balances, and refuses unless the fee
 //      account gains exactly 0.5% and the SOL/USDC deltas honor that minimum
 //      within fee + rent bounds.
+// A route whose simulation fails in one of its exchanges is rebuilt ONCE
+// around that exchange (Jupiter's excludeDexes), and the new route goes
+// through all five steps again; nothing is signed in between.
 // Signing is byte-exact (verified: the message bytes are untouched by
 // signTx), so the transaction that was simulated is the one broadcast.
 // A failed broadcast is re-quoted from scratch — never blind-retried.
@@ -107,6 +110,8 @@ interface JupBuildResponse {
   tipInstruction?: JupIx | null
   addressesByLookupTableAddress?: Record<string, unknown>
   transactionVersion?: number | string
+  /** the exchanges the route goes through; read only to name and avoid them */
+  routePlan?: unknown
   error?: string
 }
 
@@ -184,16 +189,20 @@ export async function getSwapQuote(
   direction: SwapDirection,
   amount: bigint,
   taker: string,
+  /** Jupiter's names of exchanges to route around (prepareSwap's one re-route) */
+  excludeDexes: readonly string[] = [],
 ): Promise<SwapQuote> {
   if (!chain.mainnet) throw new Error('Swapping is only available on Solana mainnet.')
   if (amount <= 0n) throw new Error('Enter an amount to swap.')
+  if (!excludeDexes.every((l) => DEX_LABEL.test(l))) throw new Error(MISMATCH)
   const inputMint = direction === 'sol-to-usdc' ? SOL_WRAPPED_MINT : chain.usdc.mint
   const outputMint = direction === 'sol-to-usdc' ? chain.usdc.mint : SOL_WRAPPED_MINT
   const feeBps = swapFeeBpsFor(chain, taker)
   const b = (await jupFetch(
     `${JUP_BASE}/build?inputMint=${inputMint}&outputMint=${outputMint}` +
       `&amount=${amount}&taker=${taker}&slippageBps=${SWAP_SLIPPAGE_BPS}` +
-      (feeBps > 0 ? `&platformFeeBps=${feeBps}&feeAccount=${SWAP_FEE_ACCOUNT}` : ''),
+      (feeBps > 0 ? `&platformFeeBps=${feeBps}&feeAccount=${SWAP_FEE_ACCOUNT}` : '') +
+      (excludeDexes.length > 0 ? `&excludeDexes=${excludeDexes.map(encodeURIComponent).join(',')}` : ''),
   )) as JupBuildResponse
   if (!b.inAmount || !b.outAmount || !b.otherAmountThreshold || !b.swapInstruction) {
     throw new Error('The swap service returned an incomplete quote — try again.')
@@ -240,6 +249,47 @@ export interface PreparedSwap {
   txBase64: string
   /** the blockhash's last valid block height: when this attempt can no longer land */
   lastValidBlockHeight: number
+  /**
+   * Where Jupiter's first route failed its test run ("the exchange Kipseli"),
+   * when this is the one fresh route prepareSwap built around it; null when
+   * the first route passed.
+   */
+  reroutedAround: string | null
+}
+
+/** A swap quote against the wallet's own price feed (the review and the form both show it). */
+export interface MarketGap {
+  /** how far below market the output is, in percent (negative: above market) */
+  pct: number
+  inUsd: number
+  outUsd: number
+}
+
+/** A gap above this asks the user to confirm before continuing (audit 2026-10-26, M8). */
+export const MARKET_GAP_WARN_PCT = 3
+
+/**
+ * The quote's output against its input, both priced by the wallet's own
+ * feed; null when either price is missing. Display only: it decides a
+ * warning, never an amount (money math stays in bigint).
+ */
+export function swapMarketGap(
+  direction: SwapDirection,
+  inAmount: bigint,
+  outAmount: bigint,
+  solPrice: number | undefined,
+  usdcPrice: number | undefined,
+  usdcDecimals: number,
+): MarketGap | null {
+  const [inPrice, inDecimals, outPrice, outDecimals] =
+    direction === 'sol-to-usdc'
+      ? [solPrice, 9, usdcPrice, usdcDecimals]
+      : [usdcPrice, usdcDecimals, solPrice, 9]
+  if (inPrice === undefined || outPrice === undefined || !(inPrice > 0) || !(outPrice > 0)) return null
+  const inUsd = (Number(inAmount) / 10 ** inDecimals) * inPrice
+  const outUsd = (Number(outAmount) / 10 ** outDecimals) * outPrice
+  if (!(inUsd > 0)) return null
+  return { pct: (1 - outUsd / inUsd) * 100, inUsd, outUsd }
 }
 
 /** An instruction in micro-sol-signer's encoder form. */
@@ -780,6 +830,137 @@ async function intermediateCloses(chain: SolChainConfig, owner: string, setup: T
     }))
 }
 
+// ---------------------------------------------------------------------------
+// A route that fails its test run.
+//
+// Jupiter calls each exchange on the route; when one fails, its error is
+// reported again under Jupiter's name, so the LAST log lines always blame
+// Jupiter (a live 0xffff, 2026-10-27, hid the exchange that way). The
+// exchanges change from quote to quote, so prepareSwap names the one that
+// failed and builds ONE fresh route around it. Nothing is signed before
+// either route passes the whole gate.
+
+const SIM_FAILED = 'The swap fails in simulation, so it was not signed or sent.'
+
+/** A failed simulation; prepareSwap decides whether a fresh route can help. */
+class SwapSimulationError extends Error {
+  readonly err: unknown
+  readonly logs: string[]
+  constructor(err: unknown, logs: string[]) {
+    super(SIM_FAILED)
+    this.err = err
+    this.logs = logs
+  }
+}
+
+/** Jupiter's exchange names: letters, digits, spaces and a little punctuation, never a comma (the list separator). */
+const DEX_LABEL = /^[A-Za-z0-9][A-Za-z0-9 .+\-()&'_]{0,47}$/
+
+/** The transaction's own plumbing: a different route can't fix these failing. */
+const PLUMBING_NAMES = new Map<string, string>([
+  [solLib.SYS_PROGRAM, 'the System program'],
+  [solLib.TOKEN_PROGRAM, 'the Token program'],
+  [solLib.TOKEN_PROGRAM2022, 'the Token-2022 program'],
+  [solLib.ASSOCIATED_TOKEN_PROGRAM, 'the Associated Token program'],
+  [COMPUTE_BUDGET_PROGRAM, 'the Compute Budget program'],
+])
+
+/**
+ * The innermost program that reported the failure: a called program logs
+ * its failure before its caller repeats it, so the first "failed" line is
+ * the one at fault.
+ */
+export function innermostFailure(logs: readonly string[]): { program: string; reason: string } | null {
+  for (const line of logs) {
+    const m = /^Program ([1-9A-HJ-NP-Za-km-z]{32,44}) failed: (.+)$/.exec(line)
+    if (m) return { program: m[1]!, reason: m[2]!.slice(0, 120) }
+  }
+  return null
+}
+
+/** Jupiter's own error codes are 6000+ (its IDL lists 6000–6027); anything else it only passes on. */
+function isJupiterOwnError(reason: string): boolean {
+  const m = /custom program error: 0x([0-9a-f]+)$/i.exec(reason)
+  if (!m) return true
+  const code = parseInt(m[1]!, 16)
+  return code >= 6000 && code < 6100
+}
+
+/** Jupiter's names for the exchanges in a build's route, in route order. */
+export function routeLabels(b: { routePlan?: unknown }): string[] {
+  const out: string[] = []
+  for (const step of Array.isArray(b.routePlan) ? (b.routePlan as unknown[]) : []) {
+    const label = (step as { swapInfo?: { label?: unknown } } | null)?.swapInfo?.label
+    if (typeof label === 'string' && DEX_LABEL.test(label) && !out.includes(label)) out.push(label)
+  }
+  return out
+}
+
+/** Jupiter's name for an exchange program, asked only after a failure; undefined if unknown. */
+async function exchangeLabel(program: string): Promise<string | undefined> {
+  try {
+    const map = (await jupFetch(`${JUP_BASE}/program-id-to-label`)) as Record<string, unknown>
+    const label = Object.hasOwn(map, program) ? map[program] : undefined
+    return typeof label === 'string' && DEX_LABEL.test(label) ? label : undefined
+  } catch {
+    return undefined
+  }
+}
+
+interface RouteFailure {
+  /** whether a different route could help */
+  reroute: boolean
+  /** who failed, in words: "the exchange Kipseli", "Jupiter's router" */
+  where: string
+  /** the program's own reason, e.g. "custom program error: 0xffff" */
+  reason: string
+  /** Jupiter's names of the exchanges to route around */
+  exclude: string[]
+  /** the plain detail shown when no re-route is tried */
+  detail: string
+}
+
+async function describeFailure(e: SwapSimulationError, b: JupBuildResponse): Promise<RouteFailure> {
+  const failed = innermostFailure(e.logs)
+  if (failed === null || PLUMBING_NAMES.has(failed.program)) {
+    const detail = failed
+      ? `${PLUMBING_NAMES.get(failed.program)} failed: ${failed.reason}`
+      : e.logs.slice(-2).join(' · ') || JSON.stringify(e.err ?? null).slice(0, 120)
+    return { reroute: false, where: '', reason: '', exclude: [], detail }
+  }
+  if (failed.program === JUPITER_V6_PROGRAM && isJupiterOwnError(failed.reason)) {
+    const reason = /: 0x1771$/i.test(failed.reason)
+      ? `the price moved past the ${SWAP_SLIPPAGE_BPS / 100}% slippage limit`
+      : failed.reason
+    return { reroute: true, where: "Jupiter's router", reason, exclude: [], detail: reason }
+  }
+  // An exchange the route called. Jupiter's own line carrying an exchange's
+  // code means the exchange's line was cut from the logs: then only a
+  // one-exchange route says which it was.
+  const labels = routeLabels(b)
+  const label = failed.program === JUPITER_V6_PROGRAM ? undefined : await exchangeLabel(failed.program)
+  const name = label ?? (labels.length === 1 ? labels[0] : undefined)
+  return {
+    reroute: true,
+    where: name !== undefined ? `the exchange ${name}` : 'an exchange on the route',
+    reason: failed.reason,
+    exclude: name !== undefined ? [name] : labels,
+    detail: failed.reason,
+  }
+}
+
+function failureMessage(first: RouteFailure, second?: RouteFailure): string {
+  if (!first.reroute) return `${SIM_FAILED} (${first.detail})`
+  const cap = (s: string) => s.charAt(0).toUpperCase() + s.slice(1)
+  const what =
+    second === undefined
+      ? `${cap(first.where)} rejected the route (${first.reason}).`
+      : second.reroute
+        ? `${cap(first.where)} rejected the first route, and ${second.where} rejected a fresh one (${second.reason}).`
+        : `${cap(first.where)} rejected the first route, and a fresh one failed too (${second.detail}).`
+  return `${SIM_FAILED} ${what} Your coins are safe; try again in a minute.`
+}
+
 /** Simulate (sigVerify off); a failing simulation stops the swap before signing. */
 async function simulateSwap(
   chain: SolChainConfig,
@@ -797,10 +978,8 @@ async function simulateSwap(
     },
   ])
   if (sim.value.err != null) {
-    const tail = (sim.value.logs ?? []).slice(-2).join(' · ')
-    throw new Error(
-      `The swap fails in simulation, so it was not signed or sent.${tail ? ` (${tail})` : ''}`,
-    )
+    const logs = Array.isArray(sim.value.logs) ? sim.value.logs.filter((l) => typeof l === 'string') : []
+    throw new SwapSimulationError(sim.value.err, logs)
   }
   return sim
 }
@@ -821,6 +1000,40 @@ export async function prepareSwap(
     Date.now() - quote.builtAt > BUILD_MAX_AGE_MS
       ? await getSwapQuote(chain, quote.direction, quote.inAmount, owner)
       : quote
+
+  let first: RouteFailure
+  try {
+    return await prepareRoute(chain, owner, q, feeBps)
+  } catch (e) {
+    if (!(e instanceof SwapSimulationError)) throw e
+    first = await describeFailure(e, q.build)
+  }
+  if (!first.reroute) throw new Error(failureMessage(first))
+  // ONE fresh route around what failed. Nothing has been signed, and the new
+  // route goes through every check below from the start; the review screen
+  // shows its amounts and checks them against the market again.
+  let fresh: SwapQuote
+  try {
+    fresh = await getSwapQuote(chain, q.direction, q.inAmount, owner, first.exclude)
+  } catch (e) {
+    if (e instanceof Error && e.message === MISMATCH) throw e
+    throw new Error(failureMessage(first))
+  }
+  try {
+    return { ...(await prepareRoute(chain, owner, fresh, feeBps)), reroutedAround: first.where }
+  } catch (e) {
+    if (!(e instanceof SwapSimulationError)) throw e
+    throw new Error(failureMessage(first, await describeFailure(e, fresh.build)))
+  }
+}
+
+/** Steps 1–8 for one route; a failed simulation surfaces as SwapSimulationError. */
+async function prepareRoute(
+  chain: SolChainConfig,
+  owner: string,
+  q: SwapQuote,
+  feeBps: number,
+): Promise<PreparedSwap> {
   const b = q.build
 
   // 1. The build's shape: v0, no "other" or tip instructions, no foreign signer.
@@ -1008,6 +1221,7 @@ export async function prepareSwap(
     swapFeeBps: feeBps,
     txBase64,
     lastValidBlockHeight,
+    reroutedAround: null,
   }
 }
 
