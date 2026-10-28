@@ -373,6 +373,18 @@ console.log('--- I. what a store reviewer meets (review 2026-10-28) ---')
   check('I3 the store description discloses the referral links: which, what a new account gets, that the developer is rewarded',
     /REFERRAL LINKS/.test(listing) && ['Strike', 'Kraken', 'Gemini'].every((n) => listing.includes(n)) && /developer receives a referral reward/.test(listing) && /sign-up offer/.test(listing))
   check('I4 the listing promises biometric unlock only where the device supports it', /Face ID or fingerprint unlock with a passkey, where your device supports it/.test(listing))
+  // Yellow Argon (keyword spam), the store's 2026-10-28 rejection: the
+  // summary listed eight tickers, and the description said "wallet" 15 times
+  const manifestSrc = await src('extension/manifest.ts')
+  const summary = /description:\s*'([^']*)'/.exec(manifestSrc)?.[1] ?? ''
+  const tickerList = /\b[A-Z]{2,5}\b(?:,\s*(?:and\s+)?[A-Z]{2,5}\b|\s+and\s+[A-Z]{2,5}\b){2,}/
+  check('I6 the store summary lists no tickers (it was rejected as keyword spam for "BTC, DOGE, LTC, USDC, ETH, BNB, SOL and TRX")',
+    summary.length > 0 && summary.length <= 132 && !tickerList.test(summary) && tickerList.test('BTC, DOGE, LTC and SOL') && /lists tickers/.test(manifestSrc), summary)
+  const prose = listing.replace(/https?:\/\/\S+/g, '').replace(/[a-z0-9.-]+\.(?:app|org)\b/g, '')
+  const counts = Object.fromEntries(['wallet', 'kailah', 'crypto', 'bitcoin', 'ethereum', 'solana', 'tron', 'usdc', 'usdt', 'swap', 'swaps', 'extension', 'networks', 'coins', 'app']
+    .map((w) => [w, (prose.match(new RegExp(`\\b${w}\\b`, 'gi')) ?? []).length]))
+  check('I7 ...and the description repeats no keyword more than five times, nor lists tickers (the store\'s keyword-spam rule)',
+    Object.values(counts).every((n) => n <= 5) && !tickerList.test(prose), JSON.stringify(Object.fromEntries(Object.entries(counts).filter(([, n]) => n > 3))))
   const welcome = await src('src/components/Welcome.tsx')
   check('I5 the welcome screen names more than Bitcoin, Dogecoin and Litecoin', /Ethereum, Solana, TRON/.test(welcome) && !/Dogecoin &amp; Litecoin/.test(welcome))
 }

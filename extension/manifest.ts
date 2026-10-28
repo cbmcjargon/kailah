@@ -119,8 +119,11 @@ export function buildManifest(version: string, extensionCsp: string): Manifest {
     name: 'Kailah Wallet',
     short_name: 'Kailah',
     version,
+    // The store's summary line. No ticker list: "BTC, DOGE, LTC, USDC, ETH,
+    // BNB, SOL and TRX" here got the listing rejected as keyword spam
+    // (Yellow Argon, 2026-10-28); the build refuses one now.
     description:
-      'Self-custody wallet for BTC, DOGE, LTC, USDC, ETH, BNB, SOL and TRX. Keys are made and encrypted on this device and never leave it.',
+      'A self-custody crypto wallet. Your keys are created and encrypted on this device and never leave it.',
     // 116: chrome.runtime.getContexts (background.ts). Trusted Types (83) and
     // the manifest COOP key (93) are older.
     minimum_chrome_version: '116',
@@ -156,6 +159,9 @@ export function assertPrivilegeSurface(manifest: Manifest): void {
   const desc = manifest.description
   if (typeof desc !== 'string' || desc.length > 132) {
     throw new Error('manifest: description must be a string of at most 132 characters (Chrome Web Store limit)')
+  }
+  if (/\b[A-Z]{2,5}\b(?:,\s*(?:and\s+)?[A-Z]{2,5}\b|\s+and\s+[A-Z]{2,5}\b){2,}/.test(desc)) {
+    throw new Error('manifest: description lists tickers; the Chrome Web Store rejects that as keyword spam (Yellow Argon)')
   }
   if (!/^\d+(\.\d+){0,3}$/.test(String(manifest.version))) {
     throw new Error(`manifest: version "${String(manifest.version)}" is not 1-4 dot-separated integers`)

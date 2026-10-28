@@ -284,8 +284,13 @@ prompt, a click on an OS notification, and the store's own install flow.
   with its sign-up offer in the blurb (`src/lib/onramp.ts`). Keep the two in
   step when an offer or link changes.
 - **Description.** Paste-ready plain text in
-  `extension/store/description.txt` (about 2,600 characters; the store allows
+  `extension/store/description.txt` (about 3,500 characters; the store allows
   16,000). The short summary is the manifest `description`.
+  - **No keyword lists.** The store rejected 2.7.6 as keyword spam ("Yellow
+    Argon") for the summary's ticker list, "BTC, DOGE, LTC, USDC, ETH, BNB,
+    SOL and TRX". Its rule also counts long lists of brands and any keyword
+    repeated more than five times. The build refuses a ticker list in the
+    summary, and check-netprefs I6/I7 check both texts.
 
 ## Firefox (not packaged; what would differ)
 
