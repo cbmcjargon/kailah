@@ -25,6 +25,8 @@ interface SolStakeModalProps {
   price: number | undefined
   onClose: () => void
   onChanged: () => void
+  /** what a withdrawal may credit, said before it goes out */
+  onOwnCredit: (asset: string, amount: bigint) => void
 }
 
 type Step =
@@ -58,6 +60,7 @@ export default function SolStakeModal({
   price,
   onClose,
   onChanged,
+  onOwnCredit,
 }: SolStakeModalProps) {
   const [step, setStep] = useState<Step>({ kind: 'list' })
   const [validators, setValidators] = useState<ValidatorOption[] | null>(null)
@@ -126,6 +129,7 @@ export default function SolStakeModal({
 
   const handleBroadcast = (prepared: PreparedStakeAction) => {
     setStep({ kind: 'broadcasting' })
+    if (prepared.kind === 'withdraw') onOwnCredit('SOL', prepared.amount)
     broadcastStakeAction(solKey, prepared)
       .then((signature) => {
         onChanged()

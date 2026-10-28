@@ -9,7 +9,7 @@ globalThis.localStorage = {
 const { webcrypto } = await import('node:crypto')
 if (!globalThis.crypto) globalThis.crypto = webcrypto
 const { base64 } = await import('@scure/base')
-const { saveVault, unlockVault, vaultKdf } = await import('../src/lib/vault.ts')
+const { saveVault, createVault, unlockVault, vaultKdf } = await import('../src/lib/vault.ts')
 const { passwordProblem, passwordStrength } = await import('../src/components/PasswordForm.tsx')
 
 const M = 'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about'
@@ -39,6 +39,15 @@ check('legacy record is v1', rec().v === 1 && vaultKdf() === 'pbkdf2')
 check('v1 unlock returns the mnemonic', (await unlockVault('legacy pass 123')) === M)
 check('…and the record is now v2 argon2id', rec().v === 2 && rec().kdf === 'argon2id')
 check('v2 unlock with the same password still works after upgrade', (await unlockVault('legacy pass 123')) === M)
+await writeV1(M, 'legacy pass 123')
+{
+  // erase while the upgrade's slow derivation runs: the erased vault must not come back (review 2026-10-28)
+  const pending = unlockVault('legacy pass 123')
+  await new Promise((r) => setTimeout(r, 0))
+  localStorage.removeItem('kailah.vault.v1')
+  const got = await pending
+  check('v1 unlock erased mid-upgrade: the upgrade writes nothing back (the erase holds)', got === M && localStorage.getItem('kailah.vault.v1') === null)
+}
 await writeV1(M, 'legacy pass 123')
 { let msg = ''; try { await unlockVault('nope nope nope') } catch (e) { msg = e.message }; check('v1 wrong password -> Wrong password, no upgrade', msg === 'Wrong password' && rec().v === 1, msg) }
 { const r = rec(); r.iter = 2000000000; localStorage.setItem('kailah.vault.v1', JSON.stringify(r)); let msg = ''; try { await unlockVault('legacy pass 123') } catch (e) { msg = e.message }; check('v1 absurd iter still refused as damaged', /damaged/.test(msg), msg) }
@@ -104,6 +113,26 @@ await writeV1(M, 'legacy pass 123')
   delete globalThis.location
 }
 
+// --- a new wallet never replaces one another window set up (review 2026-10-28) --
+{
+  localStorage.removeItem('kailah.vault.v1')
+  await saveVault(M, 'their password 1')
+  const theirs = localStorage.getItem('kailah.vault.v1')
+  let msg = ''
+  try { await createVault(M, 'my password 123') } catch (e) { msg = e.message }
+  check('Create/Restore refuses when a wallet already exists, and leaves it as it was', /another window/.test(msg) && localStorage.getItem('kailah.vault.v1') === theirs, msg)
+  localStorage.removeItem('kailah.vault.v1')
+  const mine = createVault(M, 'my password 123')
+  await new Promise((r) => setTimeout(r, 0))
+  localStorage.setItem('kailah.vault.v1', theirs) // the other window finished first, during this one's derivation
+  msg = ''
+  try { await mine } catch (e) { msg = e.message }
+  check('...also when the other window saved its wallet while this one was still encrypting', /another window/.test(msg) && localStorage.getItem('kailah.vault.v1') === theirs, msg)
+  localStorage.removeItem('kailah.vault.v1')
+  await createVault(M, 'my password 123')
+  check('...while with none there, it saves', (await unlockVault('my password 123')) === M)
+}
+
 // --- the shell and the wallet (BL40, BL41), read from the source -------------
 {
   const { readFileSync } = await import('node:fs')
@@ -115,6 +144,19 @@ await writeV1(M, 'legacy pass 123')
   const app = read('App.tsx')
   check('the wallet zeroes its keys whenever it unmounts — a render error included — but not on StrictMode\'s rehearsal (BL41)',
     /if \(!mountedRef\.current\) wipeRef\.current\(\)/.test(app) && /mountedRef\.current = true/.test(app))
+  // a render that throws before the first mount runs no unmount wipe: every
+  // key is recorded with the shell as it is derived (review 2026-10-28)
+  const derives = app.match(/\.derive(?:EvmKey|SolKey|TronKey)\(mnemonic|deriveAccount\(mnemonic/g) ?? []
+  check('every key the wallet derives is recorded with the shell as it is derived (6 derivations, all registered)',
+    derives.length === 6 && /derivedKeys\.add\(\(out\[chain\.id\] = deriveAccount\(mnemonic, chain\)\)\)/.test(app) &&
+      /const key = evm\.lib\.deriveEvmKey\(mnemonic\)\n    derivedKeys\.add\(key\)/.test(app) &&
+      (app.match(/derivedKeys\.add\(keys\.real\)\.add\(keys\.practice\)/g) ?? []).length === 2, `${derives.length} derivations`)
+  check('the welcome screen follows a wallet another window sets up (shows its lock screen), and Create/Restore save through createVault',
+    /else if \(e\.key === VAULT_STORAGE_KEY && e\.oldValue === null && mnemonicRef\.current === null\) \{\n\s*setVaultState\('locked'\)/.test(shell) &&
+      /await createVault\(mnemonic, password\)/.test(read('components/CreateFlow.tsx')) && /await createVault\(normalized, password\)/.test(read('components/RestoreFlow.tsx')))
+  check('...and the shell zeroes them on lock, on erase, when another window erased, and when the wallet throws while rendering',
+    (shell.match(/sessionRef\.current\?\.wipe\(\)\n\s*zeroDerived\(\)/g) ?? []).length === 3 && /onError=\{zeroDerived\}/.test(shell) &&
+      /componentDidCatch\(\): void \{\n    this\.props\.onError\?\.\(\)/.test(read('components/ChunkBoundary.tsx')))
 }
 
 // --- password policy ------------------------------------------------------

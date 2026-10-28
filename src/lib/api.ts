@@ -395,6 +395,13 @@ class FailoverClientImpl implements FailoverClient {
         }
         // An HTTP response came back (even a rejection). Surface it; do NOT
         // fail over — the tx may already be in the first node's mempool.
+        // After an earlier provider's network error it proves nothing about
+        // that provider, which may have taken the bytes before its answer
+        // was lost: say so, and broadcastUtxo keeps the record (review
+        // 2026-10-28; a 429 here used to read as "nothing was sent").
+        if (lastNetworkErr !== undefined && err instanceof Error) {
+          throw Object.assign(err, { afterNetworkError: true })
+        }
         throw err
       }
     }

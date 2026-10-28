@@ -1,6 +1,6 @@
 # Kailah Wallet — maintenance notes
 
-Self-custody browser wallet, v2.7.4: four engines — UTXO (BTC/DOGE/LTC),
+Self-custody browser wallet, v2.7.5: four engines — UTXO (BTC/DOGE/LTC),
 EVM (USDC+ETH on Base/Ethereum/Arbitrum + BNB on BSC, no explorer API there),
 Solana (SOL + SPL USDC + Jupiter swaps + native staking via hand-built
 stake-program instructions in solstake.ts), TRON (TRX + USDT-TRC20 + Stake 2.0 via tron.ts/tronstake.ts — the node builds raw txs and the wallet DECODES the protobuf bytes
@@ -85,9 +85,12 @@ not feature building, unless the user asks for something new.
   the unsafe one). broadcastEvmSend asks each RPC itself (submitEvmTx) and
   drops the record only when every RPC asked refused (allow-listed reasons);
   never let viem's fallback pick the error (bug audit 2026-10-27, BM1). The
-  same-nonce retry ends once that nonce is used: an attempt on record mined
-  or reverted, the chain's mined count is past it, or every node said
-  "nonce too low" (BM14) — then the form takes a fresh nonce.
+  same-nonce retry ends only in prepareEvmSend, once that nonce is used: an
+  attempt on record mined or reverted, or the chain's mined count is past
+  it (EvmNonceSettled; BM14) — then the form takes a fresh nonce. Never
+  clear the retry nonce on a broadcast failure, "nonce too low" included:
+  a refused "Replace it" usually means the send it replaced just mined,
+  and only the same-nonce retry finds that out (review 2026-10-28).
 - Swaps carry a 0.5% fee (SWAP_FEE_BPS) into SWAP_FEE_ACCOUNT (solswap.ts),
   disclosed on the form, the review screen, README, PRIVACY.md and the store
   description. Changing the rate or the account is a deliberate edit to all
@@ -112,7 +115,9 @@ not feature building, unless the user asks for something new.
   Private keys are zeroed on lock/erase; erase must clear every kailah.* key.
 - DOGE scans are sequential and cache-seeded on purpose (BlockCypher budget).
   Background polls MUST stay quick-mode (scanAccount quickCheckAgainst) at the
-  600s cadence; tip heights come from the kailah.tipcache.v1 fallback. Full
+  600s cadence; tip heights come from the kailah.tipcache.v1 fallback (a
+  quick poll asks for a live tip only while a payment still shows its
+  confirmation count, under 6; review 2026-10-28). Full
   gap scans on every poll previously burned the ~100/hr budget and produced
   CORS-less 429s that browsers report as "Load failed".
 - Rate limits are handled in ONE place, the FailoverClient (api.ts). A
@@ -171,14 +176,22 @@ not feature building, unless the user asks for something new.
   a same-nonce retry outbids by 10 %, "unknown" blocks for 10 min; Solana:
   held until the RPC's block height passes the blockhash's last valid
   height, and a failed broadcast is retried with the SAME bytes; TRON: until
-  the tx's own window ends on THIS device's clock (holdUntil), bounded to
-  10 min, and "Send again" re-posts the same signed body; UTXO: 30 min,
+  the tx's own window ends on THIS device's clock (holdUntil: the later of
+  expiration − timestamp from now and the expiration itself, since nothing
+  checks the timestamp), bounded to 10 min, and "Send again" re-posts the
+  same signed body; java-tron's "already have it" is DUP_TRANSACTION_ERROR;
+  UTXO: 30 min,
   provider txSeen — esplora must ask /tx/:txid, never /tx/:txid/status, which
   answers 200 for any txid). An attempt whose broadcast got no definite
   answer is marked `failed`; if the network later shows it, the next send
   throws EarlierSendLanded ("went through after all") until the user
   dismisses it — never drop it silently (bug audit 2026-10-27, BH1). A node's
-  explicit refusal drops the record. Solana's height comes from
+  explicit refusal of a FIRST broadcast drops the record; a refused resend
+  (or retry) keeps it failed — the refusal is about the resend, and the
+  first try may be its reason — and a refusal from a later provider after
+  one went quiet (api.ts afterNetworkError) proves nothing either. A resend
+  that goes out cleanly clears `failed` (markPendingSent; review
+  2026-10-28). Solana's height comes from
   getEpochInfo (publicnode's getBlockHeight returns the slot). Every check
   re-reads the ledger from storage (refreshSecure): other windows write it.
   Speed up first proves the pending tx carries OUR signatures

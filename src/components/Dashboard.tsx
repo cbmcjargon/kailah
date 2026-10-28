@@ -1,6 +1,7 @@
 import { lazy, Suspense, useEffect, useState } from 'react'
 import type {
   AccountKeys,
+  AccountAddressInfo,
   ChainConfig,
   ChainId,
   HardwareAccountKeys,
@@ -62,9 +63,10 @@ interface DashboardProps {
   onRefreshHw: (account: HardwareAccountKeys) => void
   onAddHardware: () => void
   onRefreshEvm: (chain: EvmChainConfig) => void
-  /** ownAction: the wallet's own swap, stake withdrawal or claim, whose credit is not a payment alert */
-  onRefreshSol: (chain: SolChainConfig, opts?: { ownAction?: boolean }) => void
-  onRefreshTron: (chain: TronChainConfig, opts?: { ownAction?: boolean }) => void
+  onRefreshSol: (chain: SolChainConfig) => void
+  onRefreshTron: (chain: TronChainConfig) => void
+  /** the wallet's own swap, stake withdrawal or claim may credit about `amount` of `asset`: not a payment to alert */
+  onOwnCredit: (chainId: string, asset: string, amount: bigint) => void
   onRefreshAll: () => void
   /** this mode's networks hidden by Settings › Networks shown */
   hiddenCount: number
@@ -88,10 +90,12 @@ interface Slot {
 }
 
 type ActiveModal =
-  | { kind: 'receive' | 'send'; slot: string }
+  | { kind: 'send'; slot: string }
+  // `pinned`: the address to show and check on the device (Buy's own)
+  | { kind: 'receive'; slot: string; pinned?: AccountAddressInfo }
   // the delivery address is fixed when the modal opens: a scan finishing
   // meanwhile moved it under the user (bug audit 2026-10-27, BL43)
-  | { kind: 'buy'; slot: string; address: string }
+  | { kind: 'buy'; slot: string; receive: AccountAddressInfo }
   | { kind: 'txdetail'; slot: string; txid: string }
   // Carries the tx snapshot: a successful bump makes the original txid vanish
   // from the next scan, and the modal must stay open on its success screen.
@@ -129,6 +133,7 @@ export default function Dashboard({
   onRefreshEvm,
   onRefreshSol,
   onRefreshTron,
+  onOwnCredit,
   onRefreshAll,
   hiddenCount,
   onShowHidden,
@@ -241,8 +246,8 @@ export default function Dashboard({
     active?.kind === 'txdetail' && activeAccountState !== null
       ? (activeAccountState.txs.find((t) => t.txid === active.txid) ?? null)
       : null
-  const receiveAddressFor = (s: Slot): string =>
-    chainStates[s.key]?.account?.nextReceive.address ?? s.account.address(0, 0).address
+  const receiveFor = (s: Slot): AccountAddressInfo =>
+    chainStates[s.key]?.account?.nextReceive ?? { address: s.account.address(0, 0).address, branch: 0, index: 0, used: false }
 
   return (
     <div className="app-shell">
@@ -328,7 +333,7 @@ export default function Dashboard({
             onRefresh={() => refreshSlot(s)}
             onReceive={() => setActive({ kind: 'receive', slot: s.key })}
             onSend={() => setActive({ kind: 'send', slot: s.key })}
-            onBuy={() => setActive({ kind: 'buy', slot: s.key, address: receiveAddressFor(s) })}
+            onBuy={() => setActive({ kind: 'buy', slot: s.key, receive: receiveFor(s) })}
             onSelectTx={(tx) => setActive({ kind: 'txdetail', slot: s.key, txid: tx.txid })}
           />
         ))}
@@ -446,6 +451,7 @@ export default function Dashboard({
               chain={activeSlot.chain}
               account={activeSlot.account}
               accountState={activeAccountState}
+              {...(active.pinned !== undefined && { pinned: active.pinned })}
               onClose={() => setActive(null)}
             />
           )}
@@ -453,10 +459,14 @@ export default function Dashboard({
           {active?.kind === 'buy' && activeSlot !== undefined && (
             <BuyModal
               chain={activeSlot.chain}
-              address={active.address}
+              address={active.receive.address}
               onClose={() => setActive(null)}
-              // a Ledger address is checked on the device before anyone pays to it
-              {...(activeSlot.hw !== null && { onVerifyOnDevice: () => setActive({ kind: 'receive', slot: activeSlot.key }) })}
+              // a Ledger address is checked on the device before anyone pays
+              // to it: THIS address, not whichever Receive would pick now
+              // (review 2026-10-28)
+              {...(activeSlot.hw !== null && {
+                onVerifyOnDevice: () => setActive({ kind: 'receive', slot: activeSlot.key, pinned: active.receive }),
+              })}
             />
           )}
 
@@ -567,7 +577,8 @@ export default function Dashboard({
               price={prices[activeSolChain.priceSymbol]}
               usdcPrice={prices[activeSolChain.usdc.priceSymbol]}
               onClose={() => setActive(null)}
-              onSwapped={() => onRefreshSol(activeSolChain, { ownAction: true })}
+              onSwapped={() => onRefreshSol(activeSolChain)}
+              onOwnCredit={(asset, amount) => onOwnCredit(activeSolChain.id, asset, amount)}
             />
           )}
 
@@ -587,7 +598,8 @@ export default function Dashboard({
               }
               price={prices[activeSolChain.priceSymbol]}
               onClose={() => setActive(null)}
-              onChanged={() => onRefreshSol(activeSolChain, { ownAction: true })}
+              onChanged={() => onRefreshSol(activeSolChain)}
+              onOwnCredit={(asset, amount) => onOwnCredit(activeSolChain.id, asset, amount)}
             />
           )}
 
@@ -633,7 +645,8 @@ export default function Dashboard({
               tronKey={tronKey}
               price={prices[activeTronChain.priceSymbol]}
               onClose={() => setActive(null)}
-              onChanged={() => onRefreshTron(activeTronChain, { ownAction: true })}
+              onChanged={() => onRefreshTron(activeTronChain)}
+              onOwnCredit={(asset, amount) => onOwnCredit(activeTronChain.id, asset, amount)}
             />
           )}
 

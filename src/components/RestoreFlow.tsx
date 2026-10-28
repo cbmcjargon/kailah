@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { isValidMnemonic } from '../lib/keys'
-import { saveVault } from '../lib/vault'
+import { createVault } from '../lib/vault'
 import { IconBack } from './Icons'
 import PasswordForm from './PasswordForm'
 import { normalizeMnemonic } from './ui'
@@ -84,7 +84,7 @@ export default function RestoreFlow({ onComplete, onBack }: RestoreFlowProps) {
             submitLabel="Restore wallet"
             busyLabel="Encrypting…"
             onSubmit={async (password) => {
-              await saveVault(normalized, password)
+              await createVault(normalized, password)
               onComplete(normalized)
             }}
           />

@@ -31,8 +31,10 @@ import {
   dismissLanded,
   EarlierSendLanded,
   markPendingFailed,
+  markPendingSent,
   pendingSol,
   recordPending,
+  SOL_TTL_HARD_MS,
   solInFlightBlock,
   type PendingSol,
 } from './pending'
@@ -778,18 +780,21 @@ function solRefusalText(msg: string): string {
   if (/insufficient (funds|lamports)|insufficientfundsforfee|custom program error: 0x1\b/i.test(msg)) {
     return "there isn't enough SOL for this plus the network fee."
   }
-  return `${msg.slice(0, 140)}.`
+  return `${msg.slice(0, 140).replace(/[.\s]+$/, '')}.`
 }
 
 /**
  * Hand signed bytes to the network: the one path for sends, swaps, stake
  * actions and resends (bug audit 2026-10-27, BH1). "Already processed" means
- * an earlier try landed: success. A preflight refusal took nothing: the
- * record goes and a plain error says so. An expired blockhash can't land now
- * — but an earlier try may have landed before it expired, so the chain is
- * asked before the wallet says "did not go through". No answer, or one the
- * wallet doesn't recognise: the record stays, marked failed, and the same
- * bytes can be sent again (SolBroadcastError).
+ * an earlier try landed: success. A preflight refusal of a first broadcast
+ * took nothing: the record goes and a plain error says so. A refused RESEND
+ * keeps it: its test run can fail because the first try already landed (a
+ * swap's slippage, a spent balance) or on a node that lags, and says nothing
+ * about the first try (review 2026-10-28). An expired blockhash can't land
+ * now — but an earlier try may have landed before it expired, so the chain
+ * is asked before the wallet says "did not go through". No answer, or one
+ * the wallet doesn't recognise: the record stays, marked failed, and the
+ * same bytes can be sent again (SolBroadcastError).
  */
 export async function submitSolTx(
   chain: SolChainConfig,
@@ -797,9 +802,14 @@ export async function submitSolTx(
   signed: string,
   entry?: PendingSol,
 ): Promise<string> {
+  const resend = entry?.failed === true
+  const sent = (): string => {
+    if (resend) markPendingSent(entry)
+    return signature
+  }
   try {
     await rpc<string>(chain, 'sendTransaction', [signed, { encoding: 'base64', preflightCommitment: 'confirmed' }])
-    return signature
+    return sent()
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e)
     const outcome = solSubmitOutcome(e)
@@ -810,7 +820,7 @@ export async function submitSolTx(
         if (entry !== undefined) dropPending(entry)
         throw new Error(SOL_LANDED_FAILED)
       }
-      return signature
+      return sent()
     }
     if (outcome === 'landed') return landedAs()
     if (outcome === 'expired') {
@@ -818,12 +828,16 @@ export async function submitSolTx(
       if (seen === true) return landedAs()
       // "Blockhash not found" from one RPC is expired only once the chain's
       // height has passed the blockhash's last valid height: a lagging node
-      // says it too (bug audit 2026-10-27, BM17)
+      // says it too (bug audit 2026-10-27, BM17). With no height on record,
+      // only the ledger's hard limit says so; "passed" on no evidence let a
+      // lagging node end the hold on a resend (review 2026-10-28).
       const lvbh = entry?.lastValidBlockHeight
       const passed =
-        lvbh === undefined || lvbh === Number.MAX_SAFE_INTEGER
+        entry === undefined
           ? true
-          : await solBlockHeight(chain).then((h) => h > lvbh, () => false)
+          : lvbh === undefined || lvbh === Number.MAX_SAFE_INTEGER
+            ? Date.now() - entry.ts >= SOL_TTL_HARD_MS
+            : await solBlockHeight(chain).then((h) => h > lvbh, () => false)
       if (seen === false && passed) {
         if (entry !== undefined) dropPending(entry)
         throw new SolExpiredError()
@@ -838,6 +852,13 @@ export async function submitSolTx(
       )
     }
     if (outcome === 'refused') {
+      if (resend) {
+        throw new SolBroadcastError(
+          `The network refused this second try in its test run: ${solRefusalText(msg)} The first try may still go through, so new sends on ${chain.networkName} wait until its window closes.`,
+          signature,
+          signed,
+        )
+      }
       if (entry !== undefined) dropPending(entry)
       throw new Error(`The network refused this transaction: ${solRefusalText(msg)} Nothing was sent.`)
     }
@@ -891,6 +912,20 @@ export async function solTxStatus(chain: SolChainConfig, signature: string): Pro
   const st = r.value?.[0] ?? null
   if (st === null) return 'unseen'
   return st.err != null ? 'failed' : 'ok'
+}
+
+/**
+ * Back from a failed broadcast: where the attempt stands, as solTxStatus.
+ * Once the form shows the answer (it went through, or it failed on chain),
+ * the record has done its job; kept, the next send repeated the news as "it
+ * went through after all" or a one-off refusal (review 2026-10-28).
+ */
+export async function settleSolAttempt(chain: SolChainConfig, signature: string): Promise<'ok' | 'failed' | 'unseen'> {
+  const status = await solTxStatus(chain, signature)
+  if (status !== 'unseen') {
+    for (const p of pendingSol(chain.id)) if (p.signature === signature) dropPending(p)
+  }
+  return status
 }
 
 /** The message for an attempt that landed but failed on chain. */

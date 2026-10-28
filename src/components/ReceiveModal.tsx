@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import * as QRCode from 'qrcode'
-import type { AccountKeys, AccountState, ChainConfig, HardwareAccountKeys } from '../lib/types'
+import type { AccountAddressInfo, AccountKeys, AccountState, ChainConfig, HardwareAccountKeys } from '../lib/types'
 import { shortAddress } from '../lib/format'
 import { isHardwareAccount } from '../lib/hwaccount'
 import { browserTransport, verifyAddressOnLedger } from '../lib/ledger'
@@ -13,15 +13,17 @@ interface ReceiveModalProps {
   chain: ChainConfig
   account: AccountKeys | HardwareAccountKeys
   accountState: AccountState | null
+  /** show (and check on the device) this address rather than the next fresh one: Buy's delivery address */
+  pinned?: AccountAddressInfo
   onClose: () => void
 }
 
-export default function ReceiveModal({ chain, account, accountState, onClose }: ReceiveModalProps) {
+export default function ReceiveModal({ chain, account, accountState, pinned, onClose }: ReceiveModalProps) {
   // Freeze the fresh receive address once the first scan provides it. Later
   // background scans (or a payment landing on this very address) would advance
   // nextReceive; swapping the displayed address/QR mid-share is jarring and can
   // send a payer to a different address than the one they were reading.
-  const [frozen, setFrozen] = useState(accountState?.nextReceive ?? null)
+  const [frozen, setFrozen] = useState(pinned ?? accountState?.nextReceive ?? null)
   useEffect(() => {
     if (frozen === null && accountState?.nextReceive) setFrozen(accountState.nextReceive)
   }, [accountState, frozen])

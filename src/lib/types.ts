@@ -12,6 +12,7 @@
 // vault.ts
 //   hasVault(): boolean
 //   saveVault(mnemonic: string, password: string): Promise<void>
+//   createVault(mnemonic: string, password: string): Promise<void> — a NEW wallet (Create, Restore): refuses when a vault exists by the time it would be written
 //   unlockVault(password: string, onProgress?): Promise<string> — resolves mnemonic, throws on wrong password; legacy PBKDF2 vaults are re-saved as Argon2id
 //   clearVault(): void
 //

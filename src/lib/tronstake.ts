@@ -20,38 +20,23 @@ import {
   assertTronEnvelope,
   decodeTronRawTx,
   hexAddrToBase58,
+  tronCall,
   type PreparedTronSend,
   type TronChainConfig,
   type TronKey,
 } from './tron'
 
-// tronCall is module-private in tron.ts; a tiny local twin keeps the modules
-// decoupled while reusing the same conventions (timeout, friendly errors).
+// Through tron.ts's tronCall, paced with every other TRON request: a local
+// fetch here skipped the pacing that keeps TronGrid's keyless limit from
+// suspending the wallet (bug audit 2026-10-27, BM22; review 2026-10-28).
 async function stakeCall<T>(chain: TronChainConfig, path: string, body: unknown): Promise<T> {
-  let res: Response
   try {
-    res = await fetch(chain.api + path, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-      signal:
-        typeof AbortSignal !== 'undefined' && 'timeout' in AbortSignal
-          ? AbortSignal.timeout(15_000)
-          : undefined,
-    })
-  } catch {
-    throw new Error(
-      `Couldn't reach the ${chain.networkName} network right now. Your coins are safe; try again in a few minutes.`,
-    )
-  }
-  const json = (await res.json()) as T & { Error?: string; error?: string }
-  const err = json.Error ?? json.error
-  if (!res.ok || err) {
+    return await tronCall<T>(chain, path, body)
+  } catch (e) {
     // Node validation errors are long Java class names + reason — keep the reason.
-    const reason = (err ?? `${chain.name} API error`).replace(/^class [^:]+:\s*/, '')
-    throw new Error(reason)
+    if (e instanceof Error && /^class [^:]+:/.test(e.message)) throw new Error(e.message.replace(/^class [^:]+:\s*/, ''))
+    throw e
   }
-  return json
 }
 
 // ---------------------------------------------------------------------------

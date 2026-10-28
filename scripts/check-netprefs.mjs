@@ -336,9 +336,11 @@ console.log('--- H. lookups that failed, staked TRX, the portfolio (bug audit 20
   check('H8 a modal whose network was hidden (the automatic pick) closes for good instead of coming back when it shows again (BL42)',
     /if \(activeGone\) setActive\(null\)/.test(dash) && /'evmId' in active && activeEvmChain === undefined/.test(dash))
   const buy = await readFile(new URL('../src/components/BuyModal.tsx', import.meta.url), 'utf8')
-  check('H9 the Buy modal\'s delivery address is fixed when it opens, and a Ledger account is sent to verify it on the device (BL43)',
-    /onBuy=\{\(\) => setActive\(\{ kind: 'buy', slot: s\.key, address: receiveAddressFor\(s\) \}\)\}/.test(dash) && /address=\{active\.address\}/.test(dash) &&
-      /onVerifyOnDevice: \(\) => setActive\(\{ kind: 'receive', slot: activeSlot\.key \}\)/.test(dash) && /Verify on Ledger/.test(buy))
+  const receive = await readFile(new URL('../src/components/ReceiveModal.tsx', import.meta.url), 'utf8')
+  check('H9 the Buy modal\'s delivery address is fixed when it opens, and a Ledger account is sent to verify THAT address on the device (BL43; review 2026-10-28)',
+    /onBuy=\{\(\) => setActive\(\{ kind: 'buy', slot: s\.key, receive: receiveFor\(s\) \}\)\}/.test(dash) && /address=\{active\.receive\.address\}/.test(dash) &&
+      /onVerifyOnDevice: \(\) => setActive\(\{ kind: 'receive', slot: activeSlot\.key, pinned: active\.receive \}\)/.test(dash) &&
+      /pinned: active\.pinned/.test(dash) && /useState\(pinned \?\? accountState\?\.nextReceive \?\? null\)/.test(receive) && /Verify on Ledger/.test(buy))
 }
 
 console.log(failures === 0 ? '\nAll networks-shown checks passed.' : `\n${failures} CHECK(S) FAILED.`)

@@ -71,7 +71,7 @@ const evmFetch = async (_url, init) => {
     case 'eth_maxPriorityFeePerGas': return ok('0x989680')
     case 'eth_getTransactionCount': return ok('0x3')
     case 'eth_getCode': return net.codeErr ? err('mock: getCode down') : ok(net.code)
-    case 'eth_estimateGas': return net.estimateErr ? err('execution reverted') : ok('0x' + net.estimate.toString(16))
+    case 'eth_estimateGas': return net.estimateErr === 'revert' ? err('execution reverted') : net.estimateErr ? err('header not found') : ok('0x' + net.estimate.toString(16))
     case 'eth_chainId': return ok('0x1')
     default: return err(`mock: no ${method}`)
   }
@@ -96,6 +96,11 @@ console.log('--- A. EVM fees ---')
   check("A3 Arbitrum, estimate unavailable: refused in plain words (21 000 can't work there)", /Couldn't work out the network fee/.test(ea?.message ?? ''), ea?.message?.slice(0, 60))
   const ee = await send(ethereum).catch((e) => e)
   check('A3b ...while an L1 chain falls back to 21 000 for an ordinary recipient', ee.request?.gas === 21000n)
+  net.estimateErr = 'revert'
+  const er = await rejects(() => send(ethereum))
+  const ra = await rejects(() => send(arbitrum))
+  check('A3c a test run the recipient reverts says the contract refused ETH, on any chain (it read "try again in a moment"; review 2026-10-28)',
+    /refused ETH in a test run/.test(er?.message ?? '') && /refused ETH in a test run/.test(ra?.message ?? ''), er?.message?.slice(0, 60))
   net.estimateErr = false
 
   net.estimate = 21000n
@@ -300,6 +305,19 @@ console.log('--- B. TRON balances and fees ---')
   const p5 = await usdt().catch((e) => e)
   check('B5 if governance raised energy back to 420 sun, the cap grows with the estimate (82.0796 TRX), so the send cannot run out of energy',
     p5?.feeLimitSun === 82_079_550n && p5?.estimatedFeeSun === 54_719_700n + 350_000n, `${p5?.feeLimitSun} / ${p5?.estimatedFeeSun ?? p5?.message}`)
+  // partly staked at that price: 100 000 energy spare, 30 285 burned. The cap
+  // covers ALL the energy (java-tron counts staked energy against it too);
+  // sized from the burn (12.7 TRX → the 30 TRX floor = 71 428 energy) it ran out
+  tn.resources[ME] = { EnergyLimit: 100_000, EnergyUsed: 0 }
+  const p5b = await usdt().catch((e) => e)
+  check('B5b ...and a partly staked account\'s cap still covers all 130 285 energy, not just the part it burns (review 2026-10-28)',
+    p5b?.feeLimitSun === 82_079_550n && p5b?.estimatedFeeSun === 30_285n * 420n + 350_000n, `${p5b?.feeLimitSun} / ${p5b?.estimatedFeeSun ?? p5b?.message}`)
+  tn.resources[ME] = { EnergyLimit: 200_000, EnergyUsed: 0 }
+  tn.energyFee = 1200
+  tron.clearTronPriceCache()
+  const r5c = await rejects(() => usdt())
+  check('B5c a staker whose energy at the price would need a cap above 150 TRX is told energy is too expensive, not signed to fail', /unusually expensive/.test(r5c?.message ?? ''), r5c?.message?.slice(0, 70))
+  tn.resources[ME] = {}
   tn.energyFee = 2000
   tron.clearTronPriceCache()
   const r6 = await rejects(() => usdt())
@@ -323,6 +341,9 @@ console.log('--- B. TRON balances and fees ---')
   tn.resources[ME] = { freeNetLimit: 600, freeNetUsed: 600 }
   const t3 = await trx(TO).catch((e) => e)
   check('B8c ...and with none spare, 270 bytes at the chain price (0.27 TRX)', t3?.estimatedFeeSun === 270_000n)
+  tn.resources[ME] = { freeNetLimit: 600, freeNetUsed: 400, NetLimit: 1000, NetUsed: 800 }
+  const t3b = await trx(TO).catch((e) => e)
+  check('B8d 200 free + 200 staked bytes spare don\'t cover 270: a transaction draws on one pool, never both (review 2026-10-28)', t3b?.estimatedFeeSun === 270_000n, String(t3b?.estimatedFeeSun ?? t3b?.message))
   tn.resources[ME] = {}
 
   // BM23: where nothing comes back
@@ -409,6 +430,15 @@ console.log('--- B. TRON balances and fees ---')
   check('B12 TronGrid\'s /v1 history endpoints are paced apart (one a second in the app), other calls don\'t wait for them',
     v1.length === 2 && gaps.every((g) => g >= 190) && other !== undefined && other.at - v1[0].at < 150, `${gaps.join(', ')} ms; other after ${other?.at - v1[0]?.at} ms`)
   tron.tronTuning.v1GapMs = 0
+  // the stake view's requests go through the same pacing (they skipped it)
+  const tronstake = await import('../src/lib/tronstake.ts')
+  tron.tronTuning.gapMs = 150
+  tn.bodies.length = 0
+  await tronstake.fetchTronStake(CH, ME).catch(() => null)
+  const st = tn.bodies.filter((b) => b.path === '/wallet/getaccount' || b.path === '/wallet/getReward')
+  check('B12b TRON stake requests are paced with every other TRON request (review 2026-10-28; they went out together)',
+    st.length === 2 && st[1].at - st[0].at >= 140, `${st.length} requests, ${st[1]?.at - st[0]?.at} ms apart`)
+  tron.tronTuning.gapMs = 0
   check('B11d the dashboard hands the previous rows to the refresh, and the TRON review warns about a contract recipient',
     /fetchTronHistory\(chain, key\.address, prev\.txs\)/.test(app) && /step\.prepared\.recipientIsContract === true/.test(modal))
   key.zero()
@@ -471,6 +501,7 @@ console.log('--- C. typed amounts ---')
 console.log('--- D. EVM: errors, history, display, alerts ---')
 {
   const base = evm.EVM_CHAINS.base
+  const OTHER_ADDR = '0x1111111111111111111111111111111111111111'
   const viemLike = Object.assign(new Error('HTTP request failed.\n\nStatus: 0\nURL: https://mainnet.base.org\nRequest body: {"method":"eth_sendRawTransaction","params":["0x02f8' + 'ab'.repeat(120) + '"]}\n\nVersion: viem@2.21.0'), { shortMessage: 'HTTP request failed.', name: 'HttpRequestError' })
   const t1 = evm.evmErrorText(viemLike, base)
   check('D1 a viem error reads as plain words: no URL, no request body, no signed bytes, no version (BL13)', /Couldn't reach the Base network/.test(t1) && !/https?:|0x02f8|viem@|Request body/.test(t1), t1)
@@ -478,6 +509,14 @@ console.log('--- D. EVM: errors, history, display, alerts ---')
   const t2 = evm.evmErrorText(new Error('Something odd: 0x' + 'cd'.repeat(60) + ' at https://rpc.example/key'))
   check('D1c anything else keeps its first line, without a long hex blob or a URL', !/https?:/.test(t2) && !/cdcdcdcd/.test(t2) && /Something odd/.test(t2), t2)
   check('D1d our own one-line messages pass through unchanged', evm.evmErrorText(new Error('That is the zero address. Anything sent there is lost for good.')) === 'That is the zero address. Anything sent there is lost for good.')
+  {
+    const lost = new evm.EvmBroadcastError("The network didn't confirm it received this send (request timed out). It may still go through.", false)
+    const ledger = await import('../src/lib/pending.ts')
+    const waiting = new evm.EvmSendWaiting({ kind: 'evm', chainId: 8453, nonce: 3, hash: '0x' + '1'.repeat(64), to: OTHER_ADDR, ts: Date.now() }, `Your send from 3 minutes ago (to ${OTHER_ADDR.slice(0, 8)}…) on Arbitrum One`)
+    const landed = new ledger.EarlierSendLanded({ kind: 'evm', chainId: 8453, nonce: 3, hash: '0x' + '1'.repeat(64), to: OTHER_ADDR, ts: Date.now() }, `Your send from 3 minutes ago (to ${OTHER_ADDR.slice(0, 8)}…) on Arbitrum One`)
+    check('D1e the wallet\'s own warnings pass whole: a lost broadcast mentioning a timeout is not "your coins are safe", and "still waiting" / "went through" aren\'t cut (review 2026-10-28)',
+      evm.evmErrorText(lost, base) === lost.message && evm.evmErrorText(waiting, base) === waiting.message && waiting.message.length > 200 && evm.evmErrorText(landed, base) === landed.message)
+  }
 
   // BL15: a reverted send is not a completed one
   const ME = '0x9858EfFD232B4033E47d90003D41EC34EcaEda94'
@@ -508,9 +547,40 @@ console.log('--- D. EVM: errors, history, display, alerts ---')
   const app = read('App.tsx')
   check('D4 an EVM history is read again for a few polls after its balance changed (the explorer can lag; BL17)',
     /if \(changed\) evmHistoryDueRef\.current\[chain\.id\] = 3/.test(app) && /prev\.txs\.length === 0 \|\| due > 0\)/.test(app))
-  check('D5 payment alerts: the gas coin too, measured from the last alert, quiet after the wallet\'s own actions, practice marked (BL18)',
-    /alertGrowth\(chain, chain\.gas\.symbol, prev\.gas, b\.gas/.test(app) && /alertedRef\.current\[key\] \?\? shown/.test(app) && /OWN_ACTION_QUIET_MS\) return/.test(app) && /chain\.mainnet \? '' : ' \(practice\)'/.test(app) &&
-      /onSwapped=\{\(\) => onRefreshSol\(activeSolChain, \{ ownAction: true \}\)\}/.test(read('components/Dashboard.tsx')))
+  check('D5 payment alerts: the gas coin too, through lib/alerts.ts, practice marked (BL18)',
+    /alertGrowth\(chain, chain\.gas\.symbol, prev\.gas, b\.gas/.test(app) && /receivedAmount\(alertBookRef\.current, `\$\{chain\.id\}:\$\{asset\}`, shown, now, Date\.now\(\)\)/.test(app) && /chain\.mainnet \? '' : ' \(practice\)'/.test(app))
+  {
+    // the rules themselves (review 2026-10-28: a blanket quiet window per
+    // chain swallowed a real payment that came in beside a swap, for good)
+    const { newAlertBook, expectCredit, receivedAmount, OWN_CREDIT_MS } = await import('../src/lib/alerts.ts')
+    const K = 'sol:USDC'
+    let book = newAlertBook()
+    const t0 = 1_000_000
+    check('D5a a balance that grew alerts the growth, once (a second refresh with the same balance says nothing)',
+      receivedAmount(book, K, 5_000_000n, 7_000_000n, t0) === 2_000_000n && receivedAmount(book, K, 5_000_000n, 7_000_000n, t0) === null)
+    book = newAlertBook()
+    expectCredit(book, K, 10_000_000n, t0)
+    check('D5b the wallet\'s own swap credit (said before it went out) is silent, a little above its quote included',
+      receivedAmount(book, K, 0n, 10_200_000n, t0 + 5_000) === null)
+    book = newAlertBook()
+    expectCredit(book, K, 10_000_000n, t0)
+    check('D5c ...but a real payment that lands beside it still alerts, less only what the swap may have credited',
+      receivedAmount(book, K, 0n, 110_000_000n, t0 + 5_000) === 110_000_000n - 10_500_000n)
+    book = newAlertBook()
+    expectCredit(book, K, 10_000_000n, t0)
+    receivedAmount(book, K, 0n, 10_000_000n, t0 + 5_000)
+    check('D5d ...and once the swap\'s credit is used up, a later payment in the window alerts (less the bit of headroom left)',
+      receivedAmount(book, K, 0n, 30_000_000n, t0 + 20_000) === 20_000_000n - 500_000n)
+    book = newAlertBook()
+    expectCredit(book, K, 10_000_000n, t0)
+    check('D5e a credit nobody saw arrive expires: a payment after the window alerts in full',
+      receivedAmount(book, K, 0n, 10_000_000n, t0 + OWN_CREDIT_MS + 1) === 10_000_000n)
+    check('D5f a swap, a SOL stake withdrawal and a TRON claim / withdrawal / unstake each say what they may credit BEFORE they broadcast',
+      /onOwnCredit\(prepared\.direction === 'sol-to-usdc' \? chain\.usdc\.symbol : 'SOL', prepared\.outAmount\)\n    broadcastSwap\(/.test(read('components/SolSwapModal.tsx')) &&
+        /if \(prepared\.kind === 'withdraw'\) onOwnCredit\('SOL', prepared\.amount\)\n    broadcastStakeAction\(/.test(read('components/SolStakeModal.tsx')) &&
+        /onOwnCredit\('TRX', stake\.unclaimedReward \+ ready\)\n    \}\n    settle\(broadcastTronSend/.test(read('components/TronStakeModal.tsx')) &&
+        !/ownAction/.test(app + read('components/Dashboard.tsx')))
+  }
   const card = read('components/EvmCard.tsx')
   check('D6 the BNB card names BNB, rows have unique keys, and a refresh the user asked for shows its error even when a poll superseded it (BL23)',
     /chain\.gasPrimary === true \? chain\.gas\.symbol : chain\.token\.symbol/.test(card) && /\$\{t\.direction\}-\$\{i\}/.test(card) && (app.match(/const manualFailed = manualWaitingRef\.current\[chain\.id\] === true/g) ?? []).length === 3)

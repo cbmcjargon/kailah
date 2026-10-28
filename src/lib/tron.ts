@@ -32,9 +32,11 @@ import type { NetMode } from './types'
 import { recordSentTo } from './sentlog'
 import {
   agoText,
+  dismissLanded,
   dropPending,
   EarlierSendLanded,
   markPendingFailed,
+  markPendingSent,
   pendingTron,
   recordPending,
   tronInFlightBlock,
@@ -190,7 +192,8 @@ function tronTurn(lane: string, gapMs: number): Promise<void> {
   return turn
 }
 
-async function tronCall<T>(chain: TronChainConfig, path: string, body?: unknown): Promise<T> {
+/** One request to the chain's node API, paced (tronTurn) with every other TRON request; tronstake.ts sends through it too. */
+export async function tronCall<T>(chain: TronChainConfig, path: string, body?: unknown): Promise<T> {
   if (path.startsWith('/v1/')) await tronTurn(`${chain.api} /v1`, tronTuning.v1GapMs)
   await tronTurn(chain.api, tronTuning.gapMs)
   let res: Response
@@ -345,7 +348,13 @@ async function tronPrices(chain: TronChainConfig): Promise<TronPrices> {
   return p
 }
 
-/** The account's spare bandwidth (free + staked) and energy right now. */
+/**
+ * The account's spare bandwidth and energy right now. A transaction takes
+ * its bandwidth from ONE pool, staked first, else the daily free allowance,
+ * else it burns TRX for all of it: the pools are never combined, so the
+ * larger one is what a send can count on (adding them read 200 + 200 spare
+ * as covering a 270-byte send; review 2026-10-28).
+ */
 async function tronFreeResources(chain: TronChainConfig, address: string): Promise<{ bandwidth: bigint; energy: bigint }> {
   const r = await tronCall<{
     freeNetLimit?: number
@@ -361,7 +370,11 @@ async function tronFreeResources(chain: TronChainConfig, address: string): Promi
     return d > 0n ? d : 0n
   }
   return {
-    bandwidth: spare(r.freeNetLimit, r.freeNetUsed) + spare(r.NetLimit, r.NetUsed),
+    bandwidth: (() => {
+      const free = spare(r.freeNetLimit, r.freeNetUsed)
+      const staked = spare(r.NetLimit, r.NetUsed)
+      return free > staked ? free : staked
+    })(),
     energy: spare(r.EnergyLimit, r.EnergyUsed),
   }
 }
@@ -704,6 +717,27 @@ export async function tronTxSeen(chain: TronChainConfig, txid: string): Promise<
 }
 
 /**
+ * Where a transaction stands: known and not failed ('ok': a TRX transfer
+ * carries no contract result), in a block but failed there ('failed': a
+ * USDT send out of energy spent its fee and moved nothing), or unknown to
+ * the node. "Seen" alone read a failed USDT send as "went through" (review
+ * 2026-10-28). A failed lookup throws.
+ */
+export async function tronTxStatus(chain: TronChainConfig, txid: string): Promise<'ok' | 'failed' | 'unseen'> {
+  const r = await tronCall<{ txID?: unknown; ret?: { contractRet?: unknown }[] }>(chain, '/wallet/gettransactionbyid', {
+    value: txid,
+    visible: true,
+  })
+  if (typeof r.txID !== 'string') return 'unseen'
+  const ret = r.ret?.[0]?.contractRet
+  return typeof ret === 'string' && ret !== 'SUCCESS' ? 'failed' : 'ok'
+}
+
+/** The message for an attempt that reached a block but failed there. */
+const TRON_LANDED_FAILED =
+  'reached the network but failed there, so nothing was paid (its network fee was spent). You can go ahead now.'
+
+/**
  * Refuse a new TRON send or stake while a recent attempt on this chain is
  * neither seen by the node nor past its own expiration: TRON has no nonce,
  * so a rebuilt transaction would land beside the first if the first's
@@ -713,6 +747,11 @@ export async function assertNoTronInFlight(chain: TronChainConfig): Promise<void
   const block = await tronInFlightBlock(chain.id, (txid) => tronTxSeen(chain, txid))
   if (block === null) return
   if (block.reason === 'landed') {
+    // in a block, but failed there: nothing was paid, so say that instead
+    if ((await tronTxStatus(chain, block.entry.txid).catch(() => null)) === 'failed') {
+      dismissLanded(block.entry)
+      throw new Error(`Your transaction from ${agoText(block.entry.ts)} on ${chain.networkName} ${TRON_LANDED_FAILED}`)
+    }
     throw new EarlierSendLanded(
       block.entry,
       `Your transaction from ${agoText(block.entry.ts)} (to ${block.entry.to.slice(0, 8)}…) on ${chain.networkName}`,
@@ -894,15 +933,27 @@ export async function prepareTronSend(
   const energyBurn = energyShort * prices.energySun
   const bandwidthBurn = free.bandwidth >= USDT_TRANSFER_BYTES ? 0n : USDT_TRANSFER_BYTES * prices.bandwidthSun
   const estimatedFeeSun = energyBurn + bandwidthBurn
-  // fee_limit caps the TRX burned for energy: half again the estimate, never
-  // below 30 TRX; past the ceiling the network is abnormally expensive
-  const sized = (energyBurn * 3n + 1n) / 2n
-  if (sized > USDT_FEE_LIMIT_MAX_SUN) {
+  // Past the ceiling the network is abnormally expensive.
+  if ((energyBurn * 3n + 1n) / 2n > USDT_FEE_LIMIT_MAX_SUN) {
     throw new Error(
       `Sending ${chain.usdt.symbol} would cost about ${formatTron(estimatedFeeSun)} TRX in network fees right now, which is unusually high. Try again later.`,
     )
   }
-  const feeLimitSun = sized > USDT_FEE_LIMIT_MIN_SUN ? sized : USDT_FEE_LIMIT_MIN_SUN
+  // fee_limit caps ALL the energy the call may use, staked energy included
+  // (java-tron: the smaller of what the account has and fee_limit / price),
+  // so it is sized from all of it at the chain's price, half again, never
+  // below 30 TRX nor above the ceiling. Sized from the burned part alone, a
+  // partly staked account ran out of energy at a higher price (review
+  // 2026-10-28).
+  const energyCostSun = energy * prices.energySun
+  if (energyCostSun > USDT_FEE_LIMIT_MAX_SUN) {
+    throw new Error(
+      `Energy on ${chain.networkName} is unusually expensive right now, so this ${chain.usdt.symbol} send could run out of it and fail. Try again later.`,
+    )
+  }
+  const sized = (energyCostSun * 3n + 1n) / 2n
+  const feeLimitSun =
+    sized > USDT_FEE_LIMIT_MAX_SUN ? USDT_FEE_LIMIT_MAX_SUN : sized > USDT_FEE_LIMIT_MIN_SUN ? sized : USDT_FEE_LIMIT_MIN_SUN
   if (balance < estimatedFeeSun) {
     throw new Error(
       `Sending ${chain.usdt.symbol} burns about ${formatTron(estimatedFeeSun)} TRX in network fees now. ` +
@@ -1008,17 +1059,21 @@ function nodeMessage(r: { message?: string; code?: string }): string {
 
 /**
  * Post a signed TRON transaction: the one path for a first broadcast and a
- * resend (bug audit 2026-10-27, BH1). Accepted, or DUP_TRANSACTION (the node
- * already holds it — a lost answer to an earlier try), is success. An expiry
- * error asks the chain whether it landed before calling it dead. Any other
- * answer is a refusal: nothing was taken, the record goes. No answer at all:
- * the record stays, marked failed, and the error carries the body to resend.
+ * resend (bug audit 2026-10-27, BH1). Accepted, or DUP_TRANSACTION_ERROR
+ * (the node already holds it — a lost answer to an earlier try), is
+ * success. An expiry error asks the chain whether it landed before calling
+ * it dead. Any other answer to a first broadcast is a refusal: nothing was
+ * taken, the record goes. A refused RESEND keeps it: the refusal is about
+ * the resend, and the first try may be its very reason (the balance it
+ * spent). No answer at all: the record stays, marked failed, and the error
+ * carries the body to resend.
  */
 async function postTronBroadcast(
   chain: TronChainConfig,
   body: TronBroadcastBody,
   entry: PendingTron | undefined,
 ): Promise<string> {
+  const resend = entry?.failed === true
   let r: { result?: boolean; code?: string; message?: string }
   try {
     r = await tronCall<{ result?: boolean; code?: string; message?: string }>(chain, '/wallet/broadcasttransaction', body)
@@ -1029,12 +1084,23 @@ async function postTronBroadcast(
       body,
     )
   }
-  if (r.result === true || r.code === 'DUP_TRANSACTION') return body.txID
+  const sent = (): string => {
+    if (resend) markPendingSent(entry)
+    return body.txID
+  }
+  // java-tron's code is DUP_TRANSACTION_ERROR (api.proto Return.response_code);
+  // checking for DUP_TRANSACTION read "I already have it" as a refusal and
+  // dropped the record of a send that was on its way (review 2026-10-28)
+  if (r.result === true || r.code === 'DUP_TRANSACTION_ERROR' || r.code === 'DUP_TRANSACTION') return sent()
   const detail = nodeMessage(r)
   if (r.code === 'TRANSACTION_EXPIRATION_ERROR' || /expired/i.test(detail)) {
-    const seen = await tronTxSeen(chain, body.txID).catch(() => null)
-    if (seen === true) return body.txID
-    if (seen === false) {
+    const status = await tronTxStatus(chain, body.txID).catch(() => null)
+    if (status === 'ok') return sent()
+    if (status === 'failed') {
+      if (entry !== undefined) dropPending(entry)
+      throw new Error(`The transaction ${TRON_LANDED_FAILED}`)
+    }
+    if (status === 'unseen') {
       if (entry !== undefined) dropPending(entry)
       throw new TronExpiredError()
     }
@@ -1044,8 +1110,14 @@ async function postTronBroadcast(
       body,
     )
   }
-  // The node answered with a rejection, so nothing was taken: the record
-  // would only block the user for nothing.
+  if (resend) {
+    throw new TronBroadcastError(
+      `The network refused this second try (${detail}). The first try may still go through, so new sends on ${chain.networkName} wait until the wallet can tell.`,
+      body,
+    )
+  }
+  // The node answered a first broadcast with a rejection, so nothing was
+  // taken: the record would only block the user for nothing.
   if (entry !== undefined) dropPending(entry)
   throw new Error(`The network refused this transaction: ${detail}. Nothing was sent.`)
 }
@@ -1059,12 +1131,19 @@ export async function broadcastTronSend(
   // The hold runs on THIS device's clock: the transaction's own window
   // (expiration − timestamp, both the node's clock) from now, plus a margin
   // (bug audit 2026-10-27, BM3: comparing the node's expiration with a clock
-  // running fast dropped the record the moment it was written).
+  // running fast dropped the record the moment it was written). Nothing
+  // checks the timestamp, though, and a node that set it just short of the
+  // expiration shrank the hold to the margin while the transaction stayed
+  // valid for minutes: the hold also lasts to the expiration itself, on
+  // this clock, whichever ends later (review 2026-10-28).
+  const now = Date.now()
   const windowMs =
     prepared.timestamp !== undefined && prepared.timestamp > 0
-      ? Math.min(Math.max(prepared.expiration - prepared.timestamp, 0), TRON_MAX_EXPIRATION_MS)
+      ? Math.min(
+          Math.max(prepared.expiration - prepared.timestamp, prepared.expiration - now, 0),
+          TRON_MAX_EXPIRATION_MS,
+        )
       : TRON_MAX_EXPIRATION_MS
-  const now = Date.now()
   const entry: PendingTron = {
     kind: 'tron',
     chainId: prepared.chain.id,

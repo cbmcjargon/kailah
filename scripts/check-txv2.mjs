@@ -828,6 +828,12 @@ console.log('--- Case D7: Speed up — fresh coins, the floor, the rate rule, th
   answer(`sendrawtransaction RPC error: {"code":-26,"message":"insufficient fee, rejecting replacement ${T('b')}; less fees than conflicting txs; 0.00000564 < 0.00001046"}`)
   const m1 = await refusal()
   check('D7f the node\'s floor survives the provider\'s bound (the full body is 216 characters)', replacementFloorFrom(m1, 8) === 1046n, m1)
+  // what Speed up's failed step actually reads: broadcastUtxo's sentence
+  // around it (check-pending K carries it end to end). Testing the bare
+  // provider message alone hid that a closing period defeated the parser
+  check('D7f ...and inside the sentence the broadcast wraps it in, ending with a period (review 2026-10-28)',
+    replacementFloorFrom(`The network refused this transaction: ${m1}. Nothing was sent.`, 8) === 1046n &&
+    replacementFloorFrom('less fees than conflicting txs; 0.1 < 0.00001046.5', 8) === null)
   check('D7f ...in a short, attributed message', m1.length < 140 && m1.startsWith('mock: '), `${m1.length} chars`)
   answer('x'.repeat(5000))
   const m2 = await refusal()
@@ -843,6 +849,8 @@ console.log('--- Case D7: Speed up — fresh coins, the floor, the rate rule, th
   const bm = readFileSync(new URL('../src/components/BumpModal.tsx', import.meta.url), 'utf8')
   check('D7j Speed up builds from a fresh scan, after the unseen-attempt check, with the fresh coins (no mount-time snapshot)',
     /utxoUnseenBlock\(chain\.id/.test(bm) && /snap = await scanAccount\(account, client\)/.test(bm) && /bumpExtraUtxos\(snap, original\.txid\)/.test(bm) && !/snapRef|accountState/.test(bm))
+  check('D7k a transaction missing from one history read is called replaced only when the network says it doesn\'t know it (review 2026-10-28)',
+    /const seen = await client\.txSeen\(tx\.txid\)\.catch\(\(\) => null\)/.test(bm) && /seen === false\s*\?\s*"This transaction isn't on the network any more/.test(bm))
 }
 
 // ===========================================================================

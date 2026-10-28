@@ -13,7 +13,7 @@ import {
   SOL_REVIEW_FRESH_MS,
   solPayUnits,
   SOL_LANDED_FAILED,
-  solTxStatus,
+  settleSolAttempt,
 } from '../lib/sol'
 import { evmToUsd } from '../lib/units'
 import { formatCoin, formatTypedAmount, formatUsd, readTypedAmount } from '../lib/format'
@@ -179,7 +179,7 @@ export default function SolSendModal({
     }
     const signature = failed.signature
     setRetryChecking(true)
-    solTxStatus(chain, signature)
+    settleSolAttempt(chain, signature)
       .then((status) => {
         if (!aliveRef.current) return
         if (status === 'ok') {

@@ -5,7 +5,11 @@
 //   - the attempt is recorded BEFORE it goes out;
 //   - a node's explicit refusal (it validated the bytes and said no) drops
 //     the record: nothing was taken, and holding the user back 30 minutes
-//     helped nobody;
+//     helped nobody. Not so for a Retry of an attempt whose answer was lost
+//     (same bytes): "inputs missing or spent" is exactly what a node says
+//     once the first try went through, so that record stays failed. Nor
+//     for a refusal that followed another provider's network error, which
+//     may have taken the bytes (review 2026-10-28);
 //   - "already in the mempool / chain" is the network saying it HAS it:
 //     that is a success;
 //   - anything else (a timeout, a lost connection, a 5xx) leaves the record
@@ -15,7 +19,7 @@
 //     forgets the evicted original.
 
 import type { ChainConfig, FailoverClient } from './types'
-import { dropPending, markPendingFailed, pendingUtxo, recordPending, type PendingUtxo } from './pending'
+import { dropPending, markPendingFailed, markPendingSent, pendingUtxo, recordPending, type PendingUtxo } from './pending'
 import { recordSentTo } from './sentlog'
 
 export type UtxoBroadcastOutcome = 'known' | 'rejected' | 'ambiguous'
@@ -32,6 +36,8 @@ export function utxoBroadcastOutcome(err: unknown): UtxoBroadcastOutcome {
   const msg = err instanceof Error ? err.message : String(err)
   if (NO_ANSWER.test(msg)) return 'ambiguous'
   if (KNOWN.test(msg)) return 'known'
+  // a refusal from a later provider says nothing of the one that went quiet
+  if ((err as { afterNetworkError?: unknown } | null)?.afterNetworkError === true) return 'ambiguous'
   if (REJECTED.test(msg)) return 'rejected'
   return 'ambiguous'
 }
@@ -49,10 +55,13 @@ export class UtxoBroadcastError extends Error {
 /**
  * The total fee a node's BIP125 refusal says a replacement must beat ("…less
  * fees than conflicting txs; 0.00000564 < 0.00001046"), in smallest units;
- * null when the message isn't one. Exact decimal-string math.
+ * null when the message isn't one. Exact decimal-string math. The number
+ * may end a sentence: broadcastUtxo's own wording adds ". Nothing was
+ * sent.", and refusing a trailing period hid the floor from Speed up
+ * (review 2026-10-28); a longer number ("1.2.3", 13+ digits) still isn't one.
  */
 export function replacementFloorFrom(message: string, decimals: number): bigint | null {
-  const m = /less fees than conflicting txs;\s*[\d.]+\s*<\s*(\d{1,12})(?:\.(\d{1,12}))?(?![\d.])/i.exec(message)
+  const m = /less fees than conflicting txs;\s*[\d.]+\s*<\s*(\d{1,12})(?:\.(\d{1,12}))?(?!\d|\.\d)/i.exec(message)
   if (!m) return null
   const frac = (m[2] ?? '').padEnd(decimals, '0').slice(0, decimals)
   return BigInt(m[1]!) * 10n ** BigInt(decimals) + BigInt(frac === '' ? '0' : frac)
@@ -64,6 +73,9 @@ export async function broadcastUtxo(
   built: { txid: string; hex: string; toAddress: string },
   opts?: { replaces?: string; account?: string },
 ): Promise<string> {
+  // a Retry of an attempt whose answer was lost: it stays failed until a
+  // try goes out cleanly (re-recording it used to clear the flag)
+  const retry = pendingUtxo(chain.id).some((p) => p.txid === built.txid && p.failed === true)
   const entry: PendingUtxo = {
     kind: 'utxo',
     chainId: chain.id,
@@ -71,6 +83,7 @@ export async function broadcastUtxo(
     to: built.toAddress,
     ts: Date.now(),
     ...(opts?.account !== undefined && { account: opts.account }),
+    ...(retry && { failed: true as const }),
   }
   recordPending(entry)
   // the send log trusts an address paid, or maybe paid: never one the node
@@ -84,6 +97,7 @@ export async function broadcastUtxo(
     const txid = await client.broadcast(built.hex)
     trust()
     supersede()
+    if (retry) markPendingSent(entry)
     return txid
   } catch (e) {
     const detail = e instanceof Error ? e.message : String(e)
@@ -91,7 +105,14 @@ export async function broadcastUtxo(
     if (outcome === 'known') {
       trust()
       supersede()
+      if (retry) markPendingSent(entry)
       return built.txid
+    }
+    if (outcome === 'rejected' && retry) {
+      throw new UtxoBroadcastError(
+        `The network refused this try: ${detail}. The first try may still have gone through, so new sends on ${chain.name} wait until the wallet can tell.`,
+        false,
+      )
     }
     if (outcome === 'rejected') {
       dropPending(entry)

@@ -79,6 +79,14 @@ export default function Shell() {
   // The unlocked wallet's handle on its own secrets: wipe() zeroes every key
   // it derived. Null while its chunk loads (no keys exist yet) and once locked.
   const sessionRef = useRef<WalletSession | null>(null)
+  // Every key the wallet derives, recorded as it is derived (App): zeroed on
+  // lock, erase, and a render error, even one before the wallet first mounted
+  // (whose unmount wipe never runs; review 2026-10-28).
+  const derivedKeysRef = useRef(new Set<{ zero: () => void }>())
+  const zeroDerived = useCallback(() => {
+    for (const k of derivedKeysRef.current) k.zero()
+    derivedKeysRef.current = new Set()
+  }, [])
   // Erase starts a new epoch; an unlock that began before it opens nothing
   // (the erased wallet reopened when its slow unlock finished after the
   // erase; bug audit 2026-10-27, BL40).
@@ -88,6 +96,7 @@ export default function Shell() {
   // ---- lock / erase --------------------------------------------------------
   const lock = useCallback(() => {
     sessionRef.current?.wipe()
+    zeroDerived()
     void closeLedgerSession()
     lockSecureStore()
     setMnemonic(null)
@@ -108,6 +117,7 @@ export default function Shell() {
     clearSecureStore()
     setNotifyPref(false)
     sessionRef.current?.wipe()
+    zeroDerived()
     // Hardware accounts: their records went with clearSecureStore(); drop the
     // device handle and this origin's permission to every granted Ledger.
     void closeLedgerSession().then(() => forgetLedgerDevices())
@@ -123,12 +133,18 @@ export default function Shell() {
   // Several windows share one storage. If another erases the wallet, this
   // one must not keep its keys and go on writing the erased wallet's caches
   // back; if the vault was replaced, this window's keys belong to the old
-  // one. Lock (bug audit 2026-10-27, BM11).
+  // one. Lock (bug audit 2026-10-27, BM11). If another sets one up while
+  // this window has none open, this one shows its lock screen: its welcome
+  // screen's Create or Restore would have saved over it (review 2026-10-28;
+  // createVault refuses that too).
+  const mnemonicRef = useRef(mnemonic)
+  mnemonicRef.current = mnemonic
   useEffect(() => {
     const onStorage = (e: StorageEvent) => {
       if (e.key !== null && e.key !== VAULT_STORAGE_KEY) return
       if (!hasVault()) {
         sessionRef.current?.wipe()
+        zeroDerived()
         void closeLedgerSession()
         lockSecureStore()
         setMnemonic(null)
@@ -137,6 +153,9 @@ export default function Shell() {
         return
       }
       if (e.key === VAULT_STORAGE_KEY && e.oldValue !== null && e.newValue !== e.oldValue) lock()
+      else if (e.key === VAULT_STORAGE_KEY && e.oldValue === null && mnemonicRef.current === null) {
+        setVaultState('locked')
+      }
     }
     window.addEventListener('storage', onStorage)
     return () => window.removeEventListener('storage', onStorage)
@@ -267,9 +286,9 @@ export default function Shell() {
     </button>
   )
   return (
-    <ChunkBoundary fallback={<ChunkScreen failed action={lockButton} />}>
+    <ChunkBoundary fallback={<ChunkScreen failed action={lockButton} />} onError={zeroDerived}>
       <Suspense fallback={<ChunkScreen failed={false} action={lockButton} />}>
-        <App mnemonic={mnemonic} sessionRef={sessionRef} onLock={lock} onErase={erase} />
+        <App mnemonic={mnemonic} sessionRef={sessionRef} derivedKeys={derivedKeysRef.current} onLock={lock} onErase={erase} />
       </Suspense>
     </ChunkBoundary>
   )

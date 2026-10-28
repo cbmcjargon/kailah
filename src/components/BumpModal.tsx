@@ -138,14 +138,23 @@ export default function BumpModal({
       }
       if (cancelled) return
       const scanned = snap.rawTxs.find((r) => r.txid === tx.txid)
-      if (scanned === undefined || scanned.height !== null) {
+      if (scanned === undefined) {
+        // A history read can miss a transaction for a moment (a page that
+        // failed, a provider behind the others): only the network's own
+        // answer says it's gone (review 2026-10-28).
+        const seen = await client.txSeen(tx.txid).catch(() => null)
+        if (cancelled) return
         setStep({
           kind: 'error',
           message:
-            scanned === undefined
-              ? "This transaction isn't in the wallet's history any more — it may have been replaced. Close this and check your history."
-              : 'This payment has confirmed — there’s nothing left to speed up.',
+            seen === false
+              ? "This transaction isn't on the network any more — it may have been replaced. Close this and check your history."
+              : "Couldn't find this transaction in the wallet's history just now. Try again in a moment.",
         })
+        return
+      }
+      if (scanned.height !== null) {
+        setStep({ kind: 'error', message: 'This payment has confirmed — there’s nothing left to speed up.' })
         return
       }
 

@@ -9,6 +9,8 @@ import { Spinner } from './Icons'
 interface ChunkBoundaryProps {
   /** shown instead of the children once anything below has thrown */
   fallback: ReactNode
+  /** called once anything below has thrown (the shell zeroes the wallet's keys) */
+  onError?: () => void
   children: ReactNode
 }
 
@@ -18,6 +20,10 @@ export default class ChunkBoundary extends Component<ChunkBoundaryProps, { faile
 
   static getDerivedStateFromError(): { failed: boolean } {
     return { failed: true }
+  }
+
+  componentDidCatch(): void {
+    this.props.onError?.()
   }
 
   render() {

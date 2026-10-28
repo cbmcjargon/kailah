@@ -1,6 +1,6 @@
 import { useState, type FormEvent } from 'react'
 import { generateMnemonic } from '../lib/keys'
-import { saveVault } from '../lib/vault'
+import { createVault } from '../lib/vault'
 import { IconBack, IconWarning } from './Icons'
 import PasswordForm from './PasswordForm'
 import WordGrid from './WordGrid'
@@ -146,7 +146,7 @@ export default function CreateFlow({ onComplete, onBack }: CreateFlowProps) {
             submitLabel="Create wallet"
             busyLabel="Encrypting…"
             onSubmit={async (password) => {
-              await saveVault(mnemonic, password)
+              await createVault(mnemonic, password)
               onComplete(mnemonic)
             }}
           />

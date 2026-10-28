@@ -25,6 +25,8 @@ interface TronStakeModalProps {
   price: number | undefined
   onClose: () => void
   onChanged: () => void
+  /** what a claim, withdrawal or unstake may credit, said before it goes out */
+  onOwnCredit: (asset: string, amount: bigint) => void
 }
 
 type Step =
@@ -60,6 +62,7 @@ export default function TronStakeModal({
   price,
   onClose,
   onChanged,
+  onOwnCredit,
 }: TronStakeModalProps) {
   const [step, setStep] = useState<Step>({ kind: 'loading' })
   const sentRef = useRef<PreparedTronStake | null>(null)
@@ -134,6 +137,12 @@ export default function TronStakeModal({
   }
   const handleBroadcast = (prepared: PreparedTronStake) => {
     sentRef.current = prepared
+    // a claim pays the reward; a withdrawal, and an unstake (which takes
+    // any unstake that has finished its wait along), pay out unstaked TRX
+    if (stake !== null && (prepared.action === 'claim' || prepared.action === 'withdraw' || prepared.action === 'unfreeze')) {
+      const ready = stake.pendingUnfreezes.filter((u) => u.withdrawable).reduce((s, u) => s + u.amount, 0n)
+      onOwnCredit('TRX', stake.unclaimedReward + ready)
+    }
     settle(broadcastTronSend(tronKey, prepared), prepared)
   }
   // the SAME signed transaction again — never a rebuilt one, which could act twice

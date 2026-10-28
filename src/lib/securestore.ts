@@ -118,7 +118,16 @@ export function lockSecureStore(): void {
   listen(false)
   aesKey = null
   mem.clear()
+  unsaved.clear()
 }
+
+/**
+ * Names whose newest write never reached storage (quota full, storage
+ * refusing writes): the mirror is newer than the disk, so a refresh keeps
+ * it. Re-read from the disk, it was wiped, and the double-pay ledger forgot
+ * every attempt for the rest of the session (review 2026-10-28).
+ */
+const unsaved = new Set<SecureName>()
 
 function isKnownName(name: string): name is SecureName {
   return (KNOWN_NAMES as readonly string[]).includes(name)
@@ -135,7 +144,7 @@ export async function refreshSecure(name: SecureName): Promise<void> {
   const store = storage()
   if (key === null || store === null) return
   await (writes.get(name) ?? Promise.resolve()).catch(() => undefined)
-  if (aesKey !== key) return
+  if (aesKey !== key || unsaved.has(name)) return
   let blob: string | null
   try {
     blob = store.getItem(PREFIX + name)
@@ -188,16 +197,20 @@ export function secureSet(name: SecureName, value: unknown): void {
     .then(() => encryptBlob(key, value))
     .then((blob) => {
       // the key may have been dropped (lock) while encrypting — never write then
-      if (aesKey === key) store.setItem(PREFIX + name, blob)
+      if (aesKey !== key) return
+      store.setItem(PREFIX + name, blob)
+      unsaved.delete(name)
     })
     .catch(() => {
-      // quota / storage disabled — the cache is best-effort
+      // quota / storage disabled — the cache is best-effort, the mirror stays
+      if (aesKey === key) unsaved.add(name)
     })
   writes.set(name, next)
 }
 
 export function secureRemove(name: SecureName): void {
   mem.delete(name)
+  unsaved.delete(name)
   try {
     storage()?.removeItem(PREFIX + name)
   } catch {

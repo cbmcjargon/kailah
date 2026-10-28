@@ -70,6 +70,18 @@ export function clearTipCache(): void {
   }
 }
 
+/** The last tip seen on `chain`, however old (null if none). */
+function cachedTip(chain: string): number | null {
+  const cached = readTipCache()[chain]
+  return cached && typeof cached.h === 'number' ? cached.h : null
+}
+
+/**
+ * Confirmations below this show on the history list (TxRow's badge); past
+ * it a quick poll has nothing to update that would need a live tip.
+ */
+const SHALLOW_CONFIRMATIONS = 6
+
 async function resolveTipHeight(chain: string, client: FailoverClient, session: number): Promise<number> {
   const cached = readTipCache()[chain]
   if (cached && typeof cached.h === 'number' && Date.now() - cached.at < TIP_FRESH_MS) {
@@ -333,8 +345,13 @@ export async function scanAccount(
     // Nothing moved, but blocks did: advance the confirmations from the tip
     // (cached for 10 minutes), or a payment that just confirmed showed
     // "1 conf" until the balance next changed (bug audit 2026-10-27, BM10).
+    // Only while a payment still shows its count goes the tip out live: the
+    // cache ages out at the 600 s poll cadence, so asking every time cost
+    // Dogecoin one BlockCypher request per poll (review 2026-10-28).
+    const shallow = prev.txs.some((t) => t.height !== null && t.confirmations < SHALLOW_CONFIRMATIONS)
     try {
-      return atTip(prev, await resolveTipHeight(account.chain, client, session))
+      const tip = shallow ? await resolveTipHeight(account.chain, client, session) : cachedTip(account.chain)
+      return tip === null ? prev : atTip(prev, tip)
     } catch {
       return prev
     }

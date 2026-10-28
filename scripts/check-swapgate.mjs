@@ -47,7 +47,7 @@ const { base58, base64 } = await import('@scure/base')
 const { unlockSecureStore } = await import('../src/lib/securestore.ts')
 const { SOL_CHAINS, solUsdcAta } = await import('../src/lib/sol.ts')
 const { stakeAccountAddress } = await import('../src/lib/solstake.ts')
-const { getSwapQuote, prepareSwap, swapFeeBpsFor, SWAP_SLIPPAGE_BPS, SWAP_FEE_BPS, SWAP_FEE_ACCOUNT, SWAP_FEE_WALLET, innermostFailure, routeLabels, swapMarketGap, MARKET_GAP_WARN_PCT } = await import('../src/lib/solswap.ts')
+const { getSwapQuote, prepareSwap, swapFeeBpsFor, swapSolShort, SWAP_SOL_FLOOR, SWAP_SLIPPAGE_BPS, SWAP_FEE_BPS, SWAP_FEE_ACCOUNT, SWAP_FEE_WALLET, innermostFailure, routeLabels, swapMarketGap, MARKET_GAP_WARN_PCT } = await import('../src/lib/solswap.ts')
 
 let failures = 0
 const check = (name, cond, detail = '') => {
@@ -505,6 +505,13 @@ console.log('--- G. the fee wallet swaps for itself ---')
     w.feeBps = 0
   }
   check('G the fee wallet pays no fee; every other wallet pays 0.5%', swapFeeBpsFor(MAINNET, SWAP_FEE_WALLET) === 0 && swapFeeBpsFor(MAINNET, OWNER) === SWAP_FEE_BPS)
+  // the form holds a typed amount only to what a swap surely needs: the base
+  // fee and the temporary wrapped-SOL deposit (0.002044 SOL); it refused at
+  // 0.005 / 0.003 SOL, turning away swaps that went through (review 2026-10-28)
+  check('G2 a swap is held back only when it surely can\'t fit: base fee + the returned temporary deposit, not a fixed 0.005 / 0.003 SOL',
+    SWAP_SOL_FLOOR === 2_044_280n &&
+      !swapSolShort('sol-to-usdc', 10_000_000n, 12_500_000n) && swapSolShort('sol-to-usdc', 10_000_000n, 12_000_000n) &&
+      !swapSolShort('usdc-to-sol', 1_000_000n, 2_500_000n) && swapSolShort('usdc-to-sol', 1_000_000n, 2_000_000n))
   for (const direction of ['sol-to-usdc', 'usdc-to-sol']) {
     const r = await run(direction, asFeeWallet, SWAP_FEE_WALLET, NOFEE)
     check(`G ${direction}: the fee wallet's swap passes, with no fee`, r.err === null && r.prepared?.swapFee === 0n && r.prepared?.swapFeeBps === 0, r.err?.message?.slice(0, 60))
@@ -809,8 +816,8 @@ console.log('--- L. the 2026-10-27 audit: shortfalls in plain words, the form\'s
     /quote\.direction !== direction \|\| quote\.inAmount !== parsedAmount\) return/.test(swapForm))
   check('L5c the review and success screens label the swap by its own direction, not the toggle (BM20)',
     /step\.prepared\.direction : direction/.test(swapForm) && /rs\.fmtIn\(step\.prepared\.inAmount\)\} \{rs\.inSymbol\}/.test(swapForm) && !/\{fmtIn\(step\.prepared/.test(swapForm))
-  check('L6 the form checks the SOL the swap needs (fee, deposits, rent) before quoting (BM21)',
-    /parsedAmount \+ MAX_SWAP_SOL_RESERVE > state\.balance/.test(swapForm) && /state\.balance < USDC_SWAP_SOL_NEEDED/.test(swapForm))
+  check('L6 the form checks the SOL the swap surely needs before quoting (BM21; the floor itself is G2)',
+    /swapSolShort\(direction, parsedAmount, state\.balance\)/.test(swapForm) && /\|\| solShort\)/.test(swapForm))
   const sendForm = readFileSync(new URL('../src/components/SolSendModal.tsx', import.meta.url), 'utf8')
   const stakeForm = readFileSync(new URL('../src/components/SolStakeModal.tsx', import.meta.url), 'utf8')
   const sol = await import('../src/lib/sol.ts')

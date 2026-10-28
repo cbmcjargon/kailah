@@ -39,7 +39,11 @@
 // a retry hours later is still caught; outside its window a failed attempt
 // the network never saw is forgotten (it isn't coming). An attempt that went
 // out cleanly is dropped silently once seen. A definite rejection (the node
-// validated it and refused) drops the entry at once.
+// validated it and refused) drops the entry at once — but not a rejection of
+// a resend: it is about the resend, not the first try, which may be the very
+// reason ("already spent", "balance too low"). That record stays failed; a
+// resend that goes out cleanly clears the flag (markPendingSent; review
+// 2026-10-28).
 //
 // Every check re-reads the ledger from storage first: another unlocked
 // window of the wallet may have written to it (bug audit 2026-10-27, BM11).
@@ -175,6 +179,22 @@ export function markPendingFailed(p: Pending): void {
     found
       ? all.map((q) => (samePending(q, p) ? ({ ...q, failed: true } as Pending) : q))
       : [...all, { ...p, failed: true } as Pending],
+  )
+}
+
+/**
+ * A resend of `p` went out cleanly, or the network shows it: the person has
+ * been told it was sent, so it is an ordinary attempt again (seen → dropped
+ * without a word). Left `failed`, the next send said it "went through after
+ * all" (review 2026-10-28).
+ */
+export function markPendingSent(p: Pending): void {
+  writeAll(
+    readAll().map((q) => {
+      if (!samePending(q, p) || q.failed !== true) return q
+      const { failed: _failed, ...rest } = q
+      return rest as Pending
+    }),
   )
 }
 

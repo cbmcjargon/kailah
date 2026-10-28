@@ -872,7 +872,17 @@ export async function prepareEvmSend(args: EvmSendArgs): Promise<PreparedEvmSend
   }
   let gasLimit = 21_000n
   if (balances.gas > 0n) {
-    const est = await client.estimateGas({ account: key.address, to, value: 1n }).catch(() => null)
+    const est = await client.estimateGas({ account: key.address, to, value: 1n }).catch((e: unknown) => {
+      // a revert is the recipient contract's answer, not a network hiccup:
+      // "try again in a moment" sent people round in circles (review 2026-10-28)
+      const said = [(e as { shortMessage?: unknown } | null)?.shortMessage, e instanceof Error ? e.message : String(e)].join(' ')
+      if (/execution reverted/i.test(said)) {
+        throw new Error(
+          `That address is a contract that refused ${chain.gas.symbol} in a test run, so the send would fail on the network. Nothing was sent.`,
+        )
+      }
+      return null
+    })
     if (est === null) {
       if (recipientHasCode || chain.l2 === 'arbitrum') {
         throw new Error(`Couldn't work out the network fee for this send on ${chain.networkName} right now. Try again in a moment.`)
@@ -982,13 +992,10 @@ export class EvmSendWaiting extends Error {
 /** A broadcast that did not go out cleanly. `definite`: every node asked refused it, so nothing at all was taken. */
 export class EvmBroadcastError extends Error {
   readonly definite: boolean
-  /** refused as "nonce too low": the nonce is used, so a retry needs a fresh one */
-  readonly nonceUsed: boolean
-  constructor(message: string, definite: boolean, nonceUsed = false) {
+  constructor(message: string, definite: boolean) {
     super(message)
     this.name = 'EvmBroadcastError'
     this.definite = definite
-    this.nonceUsed = nonceUsed
   }
 }
 
@@ -1054,6 +1061,18 @@ async function submitEvmTx(chain: EvmChainConfig, signed: Hex): Promise<EvmSubmi
  * it is a common one, and never a URL or a long hex blob.
  */
 export function evmErrorText(e: unknown, chain?: EvmChainConfig): string {
+  // The wallet's own warnings are whole as written: a lost broadcast whose
+  // reason mentioned a timeout read "Your coins are safe; try again", and
+  // the 200-character cap cut "still waiting" and "went through after all"
+  // mid-sentence (review 2026-10-28).
+  if (
+    e instanceof EvmBroadcastError ||
+    e instanceof EvmSendWaiting ||
+    e instanceof EvmNonceSettled ||
+    e instanceof EarlierSendLanded
+  ) {
+    return e.message
+  }
   const short = (e as { shortMessage?: unknown } | null)?.shortMessage
   const raw = typeof short === 'string' && short !== '' ? short : e instanceof Error ? e.message : String(e)
   const head = (raw.split('\n')[0] ?? '').trim()
@@ -1111,7 +1130,7 @@ export async function broadcastEvmSend(key: EvmKey, prepared: PreparedEvmSend): 
   if (outcome.kind === 'refused') {
     // every node asked validated it and said no: nothing was taken
     dropPending(entry)
-    throw new EvmBroadcastError(evmRefusalText(outcome.reason, prepared.chain), true, /nonce too low/i.test(outcome.reason))
+    throw new EvmBroadcastError(evmRefusalText(outcome.reason, prepared.chain), true)
   }
   markPendingFailed(entry)
   throw new EvmBroadcastError(

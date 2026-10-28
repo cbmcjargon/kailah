@@ -159,14 +159,13 @@ export default function EvmSendModal({
           // An unclear failure may hide a transaction that actually reached
           // the mempool (e.g. a timeout after acceptance), so any retry must
           // reuse this nonce rather than take a fresh one. A refusal by every
-          // node took nothing, so it changes nothing about the nonce, unless
-          // it was "nonce too low": that nonce is used, and a retry at it
-          // could only be refused again (bug audit 2026-10-27, BM14).
+          // node took nothing, so it changes nothing about the nonce, not
+          // even "nonce too low": when a replacement is refused that way, the
+          // send it replaced has usually just mined, and only a retry at the
+          // same nonce finds that out and says so. prepareEvmSend ends the
+          // retry once the nonce is used (EvmNonceSettled); clearing it here
+          // let the next try pay a second time (review 2026-10-28).
           if (!definite) setRetryNonce(prepared.request.nonce)
-          else if (e.nonceUsed) {
-            setRetryNonce(null)
-            setReplacing(null)
-          }
           setStep({ kind: 'failed', prepared, message: evmErrorText(e, chain), definite })
         }
       })

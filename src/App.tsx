@@ -26,6 +26,7 @@ import type {
 } from './lib/types'
 import { CHAINS, chainsForMode } from './lib/networks'
 import { deriveAccount } from './lib/keys'
+import { expectCredit, newAlertBook, receivedAmount } from './lib/alerts'
 import { scanAccount } from './lib/scanner'
 import {
   forgetStateSnapshot,
@@ -94,8 +95,8 @@ const HardwareImportModal = lazy(() => import('./components/HardwareImportModal'
 /** A slot never scanned yet (a just-added hardware account has no initial entry). */
 const EMPTY_SLOT = { account: null, loading: false, error: null }
 const PRICE_REFRESH_MS = 60 * 1000
-/** After the wallet's own swap, stake withdrawal or claim, that chain's credits raise no payment alert for this long. */
-const OWN_ACTION_QUIET_MS = 2 * 60_000
+/** A scan that missed some coins is scanned in full again this often, not on every poll. */
+const PARTIAL_RESCAN_MS = 10 * 60 * 1000
 const PRICE_SYMBOLS = [
   ...Object.values(CHAINS).flatMap((c) => (c.priceSymbol !== undefined ? [c.priceSymbol] : [])),
   'USDC',
@@ -161,11 +162,18 @@ export interface WalletSession {
 interface AppProps {
   mnemonic: string
   sessionRef: Ref<WalletSession>
+  /**
+   * The shell's record of every key this session derives, added to as each
+   * is derived: a render that throws before the wallet first mounts never
+   * runs the unmount wipe, and its keys were left unzeroed (review
+   * 2026-10-28). The shell zeroes them on lock, erase and a render error.
+   */
+  derivedKeys: Set<{ zero: () => void }>
   onLock: () => void
   onErase: () => void
 }
 
-export default function App({ mnemonic, sessionRef, onLock, onErase }: AppProps) {
+export default function App({ mnemonic, sessionRef, derivedKeys, onLock, onErase }: AppProps) {
   const [mode, setMode] = useState<NetMode>(readStoredMode)
   const [chainStates, setChainStates] = useState<ChainStates>(initialChainStates)
   const [prices, setPrices] = useState<Record<string, number>>({})
@@ -203,15 +211,15 @@ export default function App({ mnemonic, sessionRef, onLock, onErase }: AppProps)
   notifyEnabledRef.current = notifyEnabled
 
   // ---- payment alerts (EVM, Solana, TRON) -----------------------------------
-  // One rule for the account-model engines (bug audit 2026-10-27, BL18): an
-  // alert for each asset that grew — the gas coin too (ETH/BNB had none) —
-  // measured from the last balance alerted or shown, so two refreshes in
-  // flight can't both announce one payment; none for what the wallet's own
-  // swap, stake withdrawal or claim credits (its refresh says ownAction, and
-  // the chain stays quiet for OWN_ACTION_QUIET_MS); and a practice network's
-  // notification says so.
-  const alertedRef = useRef<Partial<Record<string, bigint>>>({})
-  const ownActionAtRef = useRef<Partial<Record<string, number>>>({})
+  // One rule for the account-model engines (lib/alerts.ts): an alert for
+  // each asset that grew — the gas coin too — measured from the last balance
+  // alerted or shown; none for what the wallet's own swap, stake withdrawal
+  // or claim said it would credit (expectOwnCredit); and a practice
+  // network's notification says so.
+  const alertBookRef = useRef(newAlertBook())
+  const expectOwnCredit = useCallback((chainId: string, asset: string, amount: bigint) => {
+    expectCredit(alertBookRef.current, `${chainId}:${asset}`, amount, Date.now())
+  }, [])
   const alertGrowth = useCallback(
     (
       chain: { id: string; name: string; mainnet: boolean },
@@ -220,13 +228,9 @@ export default function App({ mnemonic, sessionRef, onLock, onErase }: AppProps)
       now: bigint | null,
       fmt: (v: bigint) => string,
     ) => {
-      if (now === null) return
-      const key = `${chain.id}:${asset}`
-      const from = alertedRef.current[key] ?? shown
-      alertedRef.current[key] = now
-      if (from === null || now <= from) return
-      if (Date.now() - (ownActionAtRef.current[chain.id] ?? 0) < OWN_ACTION_QUIET_MS) return
-      pushToast(chain.name, `Received ${fmt(now - from)} ${asset}`)
+      const got = receivedAmount(alertBookRef.current, `${chain.id}:${asset}`, shown, now, Date.now())
+      if (got === null) return
+      pushToast(chain.name, `Received ${fmt(got)} ${asset}`)
       if (notifyEnabledRef.current) {
         void showSystemNotification('Kailah Wallet', `You received ${asset}${chain.mainnet ? '' : ' (practice)'} — open the app to view`)
       }
@@ -246,9 +250,9 @@ export default function App({ mnemonic, sessionRef, onLock, onErase }: AppProps)
   // shell's mnemonic state — never in storage.
   const accounts = useMemo<Record<ChainId, AccountKeys>>(() => {
     const out = {} as Record<ChainId, AccountKeys>
-    for (const chain of Object.values(CHAINS)) out[chain.id] = deriveAccount(mnemonic, chain)
+    for (const chain of Object.values(CHAINS)) derivedKeys.add((out[chain.id] = deriveAccount(mnemonic, chain)))
     return out
-  }, [mnemonic])
+  }, [mnemonic, derivedKeys])
 
   const accountsRef = useRef(accounts)
   accountsRef.current = accounts
@@ -314,10 +318,12 @@ export default function App({ mnemonic, sessionRef, onLock, onErase }: AppProps)
   tronRef.current = tron.lib
 
   // One Ethereum-style key per seed for the USDC-on-Base engine.
-  const evmKey = useMemo<EvmKey | null>(
-    () => (evm.lib === null ? null : evm.lib.deriveEvmKey(mnemonic)),
-    [evm.lib, mnemonic],
-  )
+  const evmKey = useMemo<EvmKey | null>(() => {
+    if (evm.lib === null) return null
+    const key = evm.lib.deriveEvmKey(mnemonic)
+    derivedKeys.add(key)
+    return key
+  }, [evm.lib, mnemonic, derivedKeys])
   const evmKeyRef = useRef(evmKey)
   evmKeyRef.current = evmKey
 
@@ -328,13 +334,12 @@ export default function App({ mnemonic, sessionRef, onLock, onErase }: AppProps)
   // One ed25519 key per seed for the Solana engine (Phantom-standard path),
   // and a separate one for the practice cluster (coin type 1, like Bitcoin's
   // testnet): nothing signed in practice mode can ever spend real coins.
-  const solKeys = useMemo<{ real: SolKey; practice: SolKey } | null>(
-    () =>
-      sol.lib === null
-        ? null
-        : { real: sol.lib.deriveSolKey(mnemonic), practice: sol.lib.deriveSolKey(mnemonic, 0, true) },
-    [sol.lib, mnemonic],
-  )
+  const solKeys = useMemo<{ real: SolKey; practice: SolKey } | null>(() => {
+    if (sol.lib === null) return null
+    const keys = { real: sol.lib.deriveSolKey(mnemonic), practice: sol.lib.deriveSolKey(mnemonic, 0, true) }
+    derivedKeys.add(keys.real).add(keys.practice)
+    return keys
+  }, [sol.lib, mnemonic, derivedKeys])
   const solKey = solKeys === null ? null : mode === 'practice' ? solKeys.practice : solKeys.real
   const solKeysRef = useRef(solKeys)
   solKeysRef.current = solKeys
@@ -345,13 +350,12 @@ export default function App({ mnemonic, sessionRef, onLock, onErase }: AppProps)
 
   // One secp256k1 key per seed for the TRON engine (TronLink-standard path),
   // and a separate one for Nile, for the same reason as Solana's.
-  const tronKeys = useMemo<{ real: TronKey; practice: TronKey } | null>(
-    () =>
-      tron.lib === null
-        ? null
-        : { real: tron.lib.deriveTronKey(mnemonic), practice: tron.lib.deriveTronKey(mnemonic, true) },
-    [tron.lib, mnemonic],
-  )
+  const tronKeys = useMemo<{ real: TronKey; practice: TronKey } | null>(() => {
+    if (tron.lib === null) return null
+    const keys = { real: tron.lib.deriveTronKey(mnemonic), practice: tron.lib.deriveTronKey(mnemonic, true) }
+    derivedKeys.add(keys.real).add(keys.practice)
+    return keys
+  }, [tron.lib, mnemonic, derivedKeys])
   const tronKey = tronKeys === null ? null : mode === 'practice' ? tronKeys.practice : tronKeys.real
   const tronKeysRef = useRef(tronKeys)
   tronKeysRef.current = tronKeys
@@ -382,6 +386,8 @@ export default function App({ mnemonic, sessionRef, onLock, onErase }: AppProps)
   const refreshSlotRef = useRef<((key: string, opts?: { silent?: boolean; quick?: boolean }) => void) | null>(null)
   // scanning is heavier than a balance call — never overlap scans per chain
   const scanInFlightRef = useRef<Partial<Record<string, boolean>>>({})
+  // when each slot last had a full scan: a partial one heals on a slow cadence
+  const fullScanAtRef = useRef<Partial<Record<string, number>>>({})
   // Set when a manual refresh piggybacks on an in-flight silent scan, so that
   // scan's failure is surfaced instead of staying quiet.
   const escalatedRef = useRef<Partial<Record<string, boolean>>>({})
@@ -475,13 +481,22 @@ export default function App({ mnemonic, sessionRef, onLock, onErase }: AppProps)
       // has no RBF, so nothing bumpable is ever lost.
       const baseline = chainStatesRef.current[key]?.account ?? undefined
       // the snapshot's own flag: a real scan that missed some coins isn't one,
-      // and treating it as one made every poll a full scan (bug audit BL10)
+      // and treating it as one made every poll a full scan (bug audit BL10).
+      // But a quick pass that finds the balance unchanged keeps that partial
+      // scan until the balance moves, missing coins and all: it gets a full
+      // scan again every PARTIAL_RESCAN_MS, not every poll (review
+      // 2026-10-28; DOGE stays quick, for BlockCypher's budget).
       const snapshotOnly = baseline?.snapshot === true
       const budgetChain = chain.providers[0]?.kind === 'blockcypher'
+      const partialDue =
+        baseline?.incomplete?.utxos === true &&
+        baseline.snapshot !== true &&
+        Date.now() - (fullScanAtRef.current[key] ?? 0) >= PARTIAL_RESCAN_MS
       const prevAccount =
-        opts?.quick === true && baseline !== undefined && (!snapshotOnly || budgetChain)
+        opts?.quick === true && baseline !== undefined && (budgetChain || (!snapshotOnly && !partialDue))
           ? baseline
           : undefined
+      if (prevAccount === undefined) fullScanAtRef.current[key] = Date.now()
       // a slot removed meanwhile (a Ledger account) keeps no address map (BM29)
       scanAccount(account, getClient(chain), {
         ...(prevAccount !== undefined && { quickCheckAgainst: prevAccount }),
@@ -647,9 +662,8 @@ export default function App({ mnemonic, sessionRef, onLock, onErase }: AppProps)
 
   // ---- Solana refresh ------------------------------------------------------
   const refreshSol = useCallback(
-    (chain: SolChainConfig, opts?: { silent?: boolean; quick?: boolean; ownAction?: boolean }) => {
+    (chain: SolChainConfig, opts?: { silent?: boolean; quick?: boolean }) => {
       const lib = solRef.current
-      if (opts?.ownAction === true) ownActionAtRef.current[chain.id] = Date.now()
       // the key for THIS chain's mode, whatever mode the UI shows right now
       const key = chain.mainnet ? solKeysRef.current?.real : solKeysRef.current?.practice
       if (lib === null || key === undefined) return
@@ -725,9 +739,8 @@ export default function App({ mnemonic, sessionRef, onLock, onErase }: AppProps)
 
   // ---- TRON refresh --------------------------------------------------------
   const refreshTron = useCallback(
-    (chain: TronChainConfig, opts?: { silent?: boolean; quick?: boolean; ownAction?: boolean }) => {
+    (chain: TronChainConfig, opts?: { silent?: boolean; quick?: boolean }) => {
       const lib = tronRef.current
-      if (opts?.ownAction === true) ownActionAtRef.current[chain.id] = Date.now()
       const key = chain.mainnet ? tronKeysRef.current?.real : tronKeysRef.current?.practice
       if (lib === null || key === undefined) return
       const seq = (tronSeqRef.current[chain.id] ?? 0) + 1
@@ -1254,6 +1267,7 @@ export default function App({ mnemonic, sessionRef, onLock, onErase }: AppProps)
         onRefreshEvm={refreshEvm}
         onRefreshSol={refreshSol}
         onRefreshTron={refreshTron}
+        onOwnCredit={expectOwnCredit}
         onRefreshAll={refreshAll}
         onLock={onLock}
         onOpenSettings={() => {

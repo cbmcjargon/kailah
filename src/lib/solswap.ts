@@ -468,6 +468,22 @@ function tokenAmountFrom(acc: SimAccount | null | undefined): bigint {
 const ATA_RENT_FALLBACK = 2_039_280n
 
 /**
+ * Lamports a swap surely needs on hand beside what it swaps: the base
+ * network fee and the temporary wrapped-SOL account's deposit, which the
+ * same transaction returns. A priority fee and a first USDC account's
+ * deposit come on top when they apply; the simulation at prepare checks
+ * those exactly and says what is missing (swapShortfall). The form refused
+ * at a fixed 0.003 / 0.005 SOL, turning away swaps that would have gone
+ * through (review 2026-10-28).
+ */
+export const SWAP_SOL_FLOOR = 5_000n + ATA_RENT_FALLBACK
+
+/** `balance` lamports surely can't carry this swap (selling SOL, `amount` lamports of it too). */
+export function swapSolShort(direction: SwapDirection, amount: bigint, balance: bigint): boolean {
+  return balance < (direction === 'sol-to-usdc' ? amount + SWAP_SOL_FLOOR : SWAP_SOL_FLOOR)
+}
+
+/**
  * The chain rounds the priority fee UP when charging while the swap service
  * reports it un-rounded — observed live as exactly +1 lamport on a
  * first-time swap, where the cost bound has zero slack and the mismatch gate

@@ -160,6 +160,9 @@ check('tampered blob is rejected (reads empty, no throw)', addrcache.get(acct.xp
   const read = (f) => readFileSync(new URL(`../src/${f}`, import.meta.url), 'utf8')
   const app = read('App.tsx')
   check('S4 polls tell a snapshot by its flag, not by a real scan\'s missing coins (BL10)', /const snapshotOnly = baseline\?\.snapshot === true/.test(app) && !/snapshotOnly = baseline\?\.incomplete/.test(app))
+  check('S4b ...and a real scan that missed coins is scanned in full again every 10 minutes, not left until the balance moves (review 2026-10-28)',
+    /const PARTIAL_RESCAN_MS = 10 \* 60 \* 1000/.test(app) && /baseline\?\.incomplete\?\.utxos === true &&\s*baseline\.snapshot !== true &&\s*Date\.now\(\) - \(fullScanAtRef\.current\[key\] \?\? 0\) >= PARTIAL_RESCAN_MS/.test(app) &&
+      /\(budgetChain \|\| \(!snapshotOnly && !partialDue\)\)/.test(app) && /if \(prevAccount === undefined\) fullScanAtRef\.current\[key\] = Date\.now\(\)/.test(app))
   check('S5 a partial scan keeps the last complete balance on screen, with a note (BM4)', /const keepLast = kept != null && kept\.incomplete\?\.balance !== true/.test(app) && /showing the last complete balance/.test(app))
   check('S6 a rescan queued mid-scan runs as asked (quick stays quick) and not for a network hidden since (BL11)',
     /pendingManualScanRef\.current\[key\] = \{ quick: opts\?\.quick === true/.test(app) && /if \(shown\) refreshSlotRef\.current\?\.\(key, queued\.quick \? \{ quick: true \} : undefined\)/.test(app))
@@ -194,6 +197,17 @@ check('tampered blob is rejected (reads empty, no throw)', addrcache.get(acct.xp
   tipCalls = 0
   const again = await scanAccount(acct, chainClient, { quickCheckAgainst: quick })
   check('S11b ...from the tip cache while it is fresh (no extra request), handing back the same state when the tip hasn\'t moved', again === quick && tipCalls === 0)
+  // the cache ages out at the 600 s poll cadence: once no payment still shows
+  // its count, a quick poll reads the cached tip however old (review 2026-10-28)
+  store.set('kailah.tipcache.v1', JSON.stringify({ btc: { h: 900_007, at: 0 } }))
+  tip = 900_009; tipCalls = 0
+  const deep = await scanAccount(acct, chainClient, { quickCheckAgainst: quick })
+  check('S11c past the confirmations the list shows, a quick poll asks for no live tip, the cache being stale or not (Dogecoin\'s budget)',
+    tipCalls === 0 && deep.txs[0]?.confirmations === 8, `${tipCalls} tip call(s), ${deep.txs[0]?.confirmations} conf`)
+  store.set('kailah.tipcache.v1', JSON.stringify({ btc: { h: 900_001, at: 0 } }))
+  tipCalls = 0
+  const shallow = await scanAccount(acct, chainClient, { quickCheckAgainst: { ...full, txs: full.txs.map((t) => ({ ...t, confirmations: 2 })), tipHeight: 900_001 } })
+  check('S11d ...while one still shows its count gets one live tip when the cache is stale', tipCalls === 1 && shallow.txs[0]?.confirmations === 10, `${tipCalls} tip call(s)`)
 
   // BM29: a scan for an account removed meanwhile keeps no address map
   secureRemove('addrmap')

@@ -161,6 +161,40 @@ export async function saveVault(
   password: string,
   onProgress?: ProgressFn,
 ): Promise<void> {
+  const sealed = await sealVault(mnemonic, password, onProgress)
+  try {
+    localStorage.setItem(STORAGE_KEY, sealed)
+  } catch {
+    throw new Error(
+      'This browser is blocking local storage, so the wallet cannot be saved on this device.',
+    )
+  }
+}
+
+/**
+ * Save a NEW wallet: refused when a vault exists by the time it would be
+ * written. Another window of the wallet may have created one while this
+ * window's welcome screen stood open, and saveVault would have replaced it
+ * without a word (review 2026-10-28).
+ */
+export async function createVault(mnemonic: string, password: string, onProgress?: ProgressFn): Promise<void> {
+  if (hasVault()) throw new Error(VAULT_EXISTS)
+  const sealed = await sealVault(mnemonic, password, onProgress)
+  if (hasVault()) throw new Error(VAULT_EXISTS)
+  try {
+    localStorage.setItem(STORAGE_KEY, sealed)
+  } catch {
+    throw new Error(
+      'This browser is blocking local storage, so the wallet cannot be saved on this device.',
+    )
+  }
+}
+
+const VAULT_EXISTS =
+  'A wallet was set up in another window of Kailah Wallet meanwhile, so this one was not saved over it. Reload this page to unlock that wallet.'
+
+/** The stored form of a new v2 (Argon2id) vault record. */
+async function sealVault(mnemonic: string, password: string, onProgress?: ProgressFn): Promise<string> {
   const salt = crypto.getRandomValues(new Uint8Array(SALT_BYTES))
   const iv = crypto.getRandomValues(new Uint8Array(IV_BYTES))
   const key = await deriveKeyArgon(password, salt, ARGON, onProgress)
@@ -177,13 +211,7 @@ export async function saveVault(
     iv: base64.encode(iv),
     ct: base64.encode(new Uint8Array(ctBuf)),
   }
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(record))
-  } catch {
-    throw new Error(
-      'This browser is blocking local storage, so the wallet cannot be saved on this device.',
-    )
-  }
+  return JSON.stringify(record)
 }
 
 /** Which KDF protects the stored vault right now (for the settings screen). */
@@ -214,12 +242,13 @@ export async function unlockVault(password: string, onProgress?: ProgressFn): Pr
   // A record that can't be read (not JSON, bad base64, an unknown version,
   // impossible lengths) is damaged, whatever the password: only a failed
   // decryption means the password is wrong (bug audit 2026-10-27, BL38).
+  let raw: string | null = null
   let record: VaultRecord
   let salt: Uint8Array
   let iv: Uint8Array
   let ct: Uint8Array
   try {
-    const raw = localStorage.getItem(STORAGE_KEY)
+    raw = localStorage.getItem(STORAGE_KEY)
     if (raw === null) throw new Error('no vault')
     record = JSON.parse(raw) as VaultRecord
     salt = base64.decode(record.salt)
@@ -265,8 +294,13 @@ export async function unlockVault(password: string, onProgress?: ProgressFn): Pr
   }
   if (legacy) {
     // Transparent upgrade; if storage refuses, the v1 vault simply stays.
+    // Written only over the very record just unlocked: an erase during the
+    // slow Argon2id derivation (or a wallet another window created) must
+    // not be overwritten, and an erased vault came back (BL40; review
+    // 2026-10-28).
     try {
-      await saveVault(mnemonic, password, onProgress)
+      const sealed = await sealVault(mnemonic, password, onProgress)
+      if (localStorage.getItem(STORAGE_KEY) === raw) localStorage.setItem(STORAGE_KEY, sealed)
     } catch {
       // keep the legacy record
     }

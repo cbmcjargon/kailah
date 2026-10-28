@@ -8,7 +8,7 @@ import {
   SolBroadcastError,
   SolExpiredError,
   SOL_LANDED_FAILED,
-  solTxStatus,
+  settleSolAttempt,
 } from '../lib/sol'
 import type { MarketGap, PreparedSwap, SwapDirection, SwapQuote } from '../lib/solswap'
 import {
@@ -18,6 +18,8 @@ import {
   prepareSwap,
   swapMarketGap,
   SWAP_SLIPPAGE_BPS,
+  SWAP_SOL_FLOOR,
+  swapSolShort,
 } from '../lib/solswap'
 import { evmToUsd } from '../lib/units'
 import { formatTypedAmount, formatUsd, readTypedAmount } from '../lib/format'
@@ -36,6 +38,8 @@ interface SolSwapModalProps {
   usdcPrice: number | undefined
   onClose: () => void
   onSwapped: () => void
+  /** what this swap may credit, said before it goes out (it can land though its answer is lost) */
+  onOwnCredit: (asset: string, amount: bigint) => void
 }
 
 type Step =
@@ -47,13 +51,12 @@ type Step =
   | { kind: 'success'; signature: string; prepared: PreparedSwap }
   | { kind: 'failed'; message: string; signature?: string; signed?: string; prepared: PreparedSwap }
 
-/** SOL kept back on a MAX swap so fees and a possible token account fit. */
-const MAX_SWAP_SOL_RESERVE = 5_000_000n
 /**
- * SOL a USDC→SOL swap needs on hand: the network fee and the temporary
- * wrapped-SOL account's deposit (returned in the same transaction).
+ * SOL kept back on a MAX swap so fees, a priority fee and a possible first
+ * USDC account fit: what MAX fills in should go through. A typed amount is
+ * held only to what a swap surely needs (swapSolShort).
  */
-const USDC_SWAP_SOL_NEEDED = 3_000_000n
+const MAX_SWAP_SOL_RESERVE = 5_000_000n
 
 export default function SolSwapModal({
   chain,
@@ -63,6 +66,7 @@ export default function SolSwapModal({
   usdcPrice,
   onClose,
   onSwapped,
+  onOwnCredit,
 }: SolSwapModalProps) {
   const [step, setStep] = useState<Step>({ kind: 'form' })
   const [direction, setDirection] = useState<SwapDirection>('sol-to-usdc')
@@ -105,15 +109,13 @@ export default function SolSwapModal({
   // amount it couldn't cover only in simulation, in raw words (bug audit
   // 2026-10-27, BM21).
   const solShort =
-    parsedAmount !== null &&
-    state.balance !== null &&
-    (solToUsdc ? parsedAmount + MAX_SWAP_SOL_RESERVE > state.balance : state.balance < USDC_SWAP_SOL_NEEDED)
+    parsedAmount !== null && state.balance !== null && swapSolShort(direction, parsedAmount, state.balance)
   if (solShort && amountError === null) {
     amountError = solToUsdc
-      ? `Keep about ${formatSol(MAX_SWAP_SOL_RESERVE)} SOL for the network fee and account deposits: you can swap up to ${formatSol(
-          (state.balance ?? 0n) > MAX_SWAP_SOL_RESERVE ? (state.balance ?? 0n) - MAX_SWAP_SOL_RESERVE : 0n,
+      ? `A swap needs about ${formatSol(SWAP_SOL_FLOOR)} SOL beside the amount, for the network fee and a temporary account deposit (returned in the same swap): you can swap up to about ${formatSol(
+          (state.balance ?? 0n) > SWAP_SOL_FLOOR ? (state.balance ?? 0n) - SWAP_SOL_FLOOR : 0n,
         )} SOL.`
-      : `A swap to SOL needs about ${formatSol(USDC_SWAP_SOL_NEEDED)} SOL on hand for the network fee and a temporary account deposit (returned in the same swap).`
+      : `A swap to SOL needs about ${formatSol(SWAP_SOL_FLOOR)} SOL on hand for the network fee and a temporary account deposit (returned in the same swap).`
   }
 
   // Live quote, debounced; a sequence guard keeps stale replies from landing.
@@ -257,6 +259,7 @@ export default function SolSwapModal({
 
   const handleBroadcast = (prepared: PreparedSwap) => {
     setStep({ kind: 'broadcasting' })
+    onOwnCredit(prepared.direction === 'sol-to-usdc' ? chain.usdc.symbol : 'SOL', prepared.outAmount)
     broadcastSwap(solKey, prepared)
       .then((signature) => {
         onSwapped()
@@ -308,7 +311,7 @@ export default function SolSwapModal({
     }
     const signature = failed.signature
     setRetryChecking(true)
-    solTxStatus(chain, signature)
+    settleSolAttempt(chain, signature)
       .then((status) => {
         if (!aliveRef.current) return
         if (status === 'ok') {

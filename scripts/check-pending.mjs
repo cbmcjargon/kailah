@@ -173,7 +173,7 @@ console.log('--- A. decision rules ---')
 // ===========================================================================
 // Mock JSON-RPC network for EVM (viem) and Solana. `net` decides answers.
 const net = { down: false, evm: {}, sol: {}, send: 'ok' }
-const SOL_ERR = { processed: 'Transaction simulation failed: This transaction has already been processed', expired: 'Transaction simulation failed: Blockhash not found', other: 'Node is behind by 12 slots', rent: 'Transaction simulation failed: Transaction results in an account (1) with insufficient funds for rent' }
+const SOL_ERR = { processed: 'Transaction simulation failed: This transaction has already been processed', expired: 'Transaction simulation failed: Blockhash not found', other: 'Node is behind by 12 slots', rent: 'Transaction simulation failed: Transaction results in an account (1) with insufficient funds for rent', slippage: 'Transaction simulation failed: Error processing Instruction 3: custom program error: 0x1771' }
 const TX = (hash) => ({
   hash, nonce: '0x7', blockHash: null, blockNumber: null, transactionIndex: null,
   from: '0x9858effd232b4033e47d90003d41ec34ecaeda94', to: '0x000000000000000000000000000000000000dead',
@@ -385,17 +385,30 @@ console.log('--- C2. the same-nonce retry, end to end (audit H1/M2/M3) ---')
   net.evm = { byHash: { [ledger.pendingEvm(CH.chainId)[0].hash]: 'pending' }, nonce: '0x8', latestNonce: '0x7' }
   const B5 = await prep({ reuseNonce: 7 }).catch((x) => x)
   check('C2.10c ...while a nonce the chain has not used yet is still retried at the same nonce', B5?.request?.nonce === 7, B5?.message)
-  // every node refusing "nonce too low": the form must stop retrying that nonce
-  clear(); net.evm = { byHash: {}, nonce: '0x7' }; net.send = 'nonce-low'
-  const A6 = await prep(); const eN = await rejects(() => broadcastEvmSend(key, A6))
-  net.send = 'rejected'
-  const A7 = await prep(); const eI = await rejects(() => broadcastEvmSend(key, A7))
-  check('C2.10d a "nonce too low" refusal is definite and says the nonce is used; other refusals don\'t (BM14)',
-    eN instanceof evm.EvmBroadcastError && eN.definite && eN.nonceUsed === true && eI instanceof evm.EvmBroadcastError && eI.definite && eI.nonceUsed === false && ledger.pendingEvm(CH.chainId).length === 0)
+  // "Replace it", then the waiting send mines while the review is open:
+  // every node refuses the replacement "nonce too low". That refusal took
+  // nothing, and the form keeps the nonce, so its next try says the first
+  // send went through. Clearing the nonce there (12aefe0) let the next try
+  // prepare a fresh one and pay twice (review 2026-10-28).
+  clear(); net.evm = { byHash: {}, nonce: '0x7' }; net.send = 'ok'
+  const W = await prep(); await broadcastEvmSend(key, W)
+  const hW = ledger.pendingEvm(CH.chainId)[0]?.hash
+  net.evm = { byHash: { [hW]: 'pending' }, nonce: '0x8' }
+  const eW = await rejects(() => prep())
+  const RW = await prep({ reuseNonce: eW?.entry?.nonce })
+  net.evm = { byHash: { [hW]: 'mined' }, nonce: '0x8', latestNonce: '0x8' }; net.send = 'nonce-low'
+  const eN = await rejects(() => broadcastEvmSend(key, RW))
+  check('C2.10d a replacement refused "nonce too low" is a definite refusal: its own record goes, the waiting send\'s stays',
+    eN instanceof evm.EvmBroadcastError && eN.definite && ledger.pendingEvm(CH.chainId).map((p) => p.hash).join() === hW)
+  const eAgain = await rejects(() => prep({ reuseNonce: 7 }))
+  check('C2.10e ...and the retry the form keeps (same nonce) says the waiting send went through, preparing nothing',
+    eAgain instanceof evm.EvmNonceSettled && /went through after all/.test(eAgain.message), eAgain?.message?.slice(0, 70))
   {
     const { readFileSync } = await import('node:fs')
     const modal = readFileSync(new URL('../src/components/EvmSendModal.tsx', import.meta.url), 'utf8')
-    check('C2.10e ...and the send form drops its retry nonce on it (no loop of "nonce too low")', /else if \(e\.nonceUsed\) \{\s*setRetryNonce\(null\)/.test(modal))
+    const onFail = /broadcastEvmSend\(evmKey, prepared\)[\s\S]*?\.catch\(\(e\) => \{([\s\S]*?)\n {6}\}\)/.exec(modal)?.[1] ?? ''
+    check('C2.10f the send form never drops its retry nonce when a broadcast fails (that let a "nonce too low" retry pay twice)',
+      /setRetryNonce\(prepared\.request\.nonce\)/.test(onFail) && !/setRetryNonce\(null\)/.test(onFail))
   }
   clear(); net.send = 'ok'; net.evm = { byHash: {}, nonce: '0x7' }
   // M3: tokens to the token contract, the zero address, or a contract
@@ -434,7 +447,9 @@ console.log('--- F. TRON entries and wiring (audit H2) ---')
     const body = (() => {
       if (path.endsWith('/gettransactionbyid')) return node.seen ? { txID: JSON.parse(init.body).value } : {}
       if (path.endsWith('/broadcasttransaction')) {
-        if (node.broadcast === 'dup') return { result: false, code: 'DUP_TRANSACTION', message: '' }
+        // java-tron's api.proto Return.response_code is DUP_TRANSACTION_ERROR;
+        // this mock said DUP_TRANSACTION, the name the wallet wrongly checked
+        if (node.broadcast === 'dup') return { result: false, code: 'DUP_TRANSACTION_ERROR', message: Buffer.from('Transaction already exists').toString('hex') }
         if (node.broadcast === 'rejected') return { result: false, code: 'SIGERROR', message: Buffer.from('validate signature error').toString('hex') }
         return { result: true }
       }
@@ -461,7 +476,7 @@ console.log('--- F. TRON entries and wiring (audit H2) ---')
   check('F7b dismissed: the next prepare gets past the ledger (and fails later on the mock, not on the guard)', !(e3b instanceof ledger.EarlierSendLanded) && !/may still go through/.test(e3b?.message ?? '') && ledger.pendingTron(CH.id).length === 0)
   clearTron(); node.broadcast = 'dup'
   const dup = await tron.broadcastTronSend(key, prepared).catch((e) => e)
-  check('F8 DUP_TRANSACTION (the node already holds it) counts as success', dup === prepared.txID)
+  check('F8 DUP_TRANSACTION_ERROR, java-tron\'s "the node already holds it", counts as success (review 2026-10-28: the code name was wrong)', dup === prepared.txID)
   clearTron(); node.broadcast = 'rejected'
   const e4 = await rejects(() => tron.broadcastTronSend(key, prepared))
   check('F9 a node that answered with a rejection never took it: the record is dropped', e4 !== null && ledger.pendingTron(CH.id).length === 0)
@@ -882,6 +897,23 @@ console.log('--- I. lost answers: the guard after a failed broadcast (bug audit 
   check("I12b ...and a record written afterwards keeps the other window's entry instead of overwriting it", Array.isArray(inB) && inB.length === 2)
   storeB.lockSecureStore()
   clearUtxo('ltc')
+  await tick()
+
+  // storage that refuses writes (quota full): the record lives in memory only,
+  // and a refresh must not replace it with the older blob on disk (review 2026-10-28)
+  const realSet = globalThis.localStorage.setItem
+  globalThis.localStorage.setItem = () => { throw new Error('QuotaExceededError') }
+  ledger.recordPending({ kind: 'utxo', chainId: 'ltc', txid: '7'.repeat(64), to: 'ltc1qz', ts: Date.now() })
+  await tick()
+  const bq = await ledger.utxoInFlightBlock('ltc', async () => false)
+  globalThis.localStorage.setItem = realSet
+  check('I13 with storage refusing writes, the next send still sees the attempt (a refresh read the older blob back and wiped it)',
+    bq?.reason === 'pending' && bq.entry.txid === '7'.repeat(64))
+  clearUtxo('ltc')
+  await tick()
+  await storeB.unlockSecureStore(MN)
+  check('I13b ...and once a write goes through again, the disk has the current ledger', Array.isArray(storeB.secureGet('pending')) && !storeB.secureGet('pending').some((p) => p.txid === '7'.repeat(64)))
+  storeB.lockSecureStore()
 }
 
 console.log('--- J. before a Speed up: attempts the network does not show yet (bug audit 2026-10-27, BH5) ---')
@@ -952,6 +984,226 @@ console.log('--- K. the Solana stake view (bug audit 2026-10-27, BL26) ---')
   check('K3 a stake that is activating or winding down is re-read on quick polls (its state changes at the epoch, no balance moving)', /prev\.txs\.length === 0 \|\| stakeMoving\)/.test(app))
   net.sol = {}
   skey.zero()
+}
+
+console.log('--- L. resends: a refusal is about the resend, not the first try (review 2026-10-28) ---')
+{
+  const mockRpc = globalThis.fetch
+  const tron = await import('../src/lib/tron.ts')
+  const utxo = await import('../src/lib/utxosend.ts')
+  const { CHAINS } = await import('../src/lib/networks.ts')
+  const { createFailoverClient } = await import('../src/lib/api.ts')
+  const { EsploraProvider } = await import('../src/lib/esplora.ts')
+
+  // --- TRON ---
+  const CH = tron.TRON_CHAINS['tron-nile']
+  const clearTron = () => { for (const p of ledger.pendingTron(CH.id)) ledger.dropPending(p) }
+  const node = { broadcast: 'ok', tx: 'unseen' }
+  globalThis.fetch = async (url, init) => {
+    const path = new URL(String(url)).pathname
+    if (path.endsWith('/broadcasttransaction')) {
+      if (node.broadcast === 'neterr') throw new TypeError('fetch failed')
+      const hex = (t) => Buffer.from(t).toString('hex')
+      const answer = {
+        ok: { result: true },
+        dup: { result: false, code: 'DUP_TRANSACTION_ERROR', message: hex('Transaction already exists') },
+        busy: { result: false, code: 'SERVER_BUSY', message: hex('Server busy.') },
+        balance: { result: false, code: 'CONTRACT_VALIDATE_ERROR', message: hex('Validate TransferContract error, balance is not sufficient.') },
+        expired: { result: false, code: 'TRANSACTION_EXPIRATION_ERROR', message: hex('Transaction expired') },
+      }[node.broadcast]
+      return new Response(JSON.stringify(answer), { status: 200 })
+    }
+    if (path.endsWith('/gettransactionbyid')) {
+      const id = JSON.parse(init.body).value
+      const body = node.tx === 'unseen' ? {} : { txID: id, ...(node.tx === 'out-of-energy' ? { ret: [{ contractRet: 'OUT_OF_ENERGY' }] } : node.tx === 'success' ? { ret: [{ contractRet: 'SUCCESS' }] } : {}) }
+      return new Response(JSON.stringify(body), { status: 200 })
+    }
+    return new Response('{}', { status: 200 })
+  }
+  const key = tron.deriveTronKey(MN, true)
+  const now0 = Date.now()
+  const tprep = (id, extra = {}) => ({ chain: CH, asset: 'trx', to: 'TJvaAeFb8Lykt9RQcVyyTFN2iDvGMuyD4M', amount: 1n, estimatedFeeSun: 0n, feeLimitSun: 0n,
+    createsAccount: false, rawDataHex: '0a02aabb', rawData: {}, txID: id.repeat(64), expiration: now0 + 60_000, timestamp: now0, ...extra })
+  const guard = () => tron.assertNoTronInFlight(CH).then(() => null, (e) => e)
+  const lostAnswer = async (id) => {
+    clearTron(); node.broadcast = 'neterr'; node.tx = 'unseen'
+    return rejects(() => tron.broadcastTronSend(key, tprep(id)))
+  }
+
+  let e = await lostAnswer('a')
+  node.broadcast = 'dup'
+  let r = await tron.rebroadcastTron(CH, e).catch((x) => x)
+  check('L1 TRON: "Send again" answered DUP_TRANSACTION_ERROR is a success, and the record stays (the send is on its way)',
+    r === 'a'.repeat(64) && ledger.pendingTron(CH.id).length === 1, r?.message)
+  let g = await guard()
+  check('L1b ...as an ordinary attempt: while unseen the next send waits for it', /may still go through/.test(g?.message ?? ''), g?.message?.slice(0, 60))
+  node.tx = 'success'
+  g = await guard()
+  check('L1c ...and once seen it is dropped without a false "went through after all" (the person was told it was sent)', g === null && ledger.pendingTron(CH.id).length === 0, g?.message?.slice(0, 60))
+
+  for (const [code, label] of [['busy', 'SERVER_BUSY'], ['balance', 'balance is not sufficient (the first try spent it)']]) {
+    e = await lostAnswer('b')
+    node.broadcast = code
+    r = await rejects(() => tron.rebroadcastTron(CH, e))
+    const kept = ledger.pendingTron(CH.id)
+    check(`L2 TRON: a resend refused with ${label} keeps the first try's record, still failed, and can be sent again`,
+      r instanceof tron.TronBroadcastError && /may still go through/.test(r.message) && kept.length === 1 && kept[0].failed === true, r?.message?.slice(0, 80))
+    g = await guard()
+    check(`L2b ...so the next send waits instead of paying again (${code})`, /may still go through/.test(g?.message ?? ''), g?.message?.slice(0, 60))
+  }
+  clearTron(); node.broadcast = 'busy'
+  r = await rejects(() => tron.broadcastTronSend(key, tprep('c')))
+  check('L2c ...while a FIRST broadcast the node refuses still drops its record ("Nothing was sent")', /Nothing was sent/.test(r?.message ?? '') && ledger.pendingTron(CH.id).length === 0)
+
+  e = await lostAnswer('d')
+  node.tx = 'out-of-energy'
+  g = await guard()
+  check('L3 TRON: a failed attempt that reached a block but failed there (OUT_OF_ENERGY) is not reported as "went through"',
+    !(g instanceof ledger.EarlierSendLanded) && /failed there, so nothing was paid/.test(g?.message ?? '') && ledger.pendingTron(CH.id).length === 0, g?.message?.slice(0, 70))
+  check('L3b ...and the send after that one goes ahead', (await guard()) === null)
+  e = await lostAnswer('e')
+  node.broadcast = 'expired'; node.tx = 'out-of-energy'
+  r = await rejects(() => tron.rebroadcastTron(CH, e))
+  check('L3c ...nor is a resend answered "expired" whose first try failed in a block', /failed there/.test(r?.message ?? '') && !(r instanceof tron.TronExpiredError) && ledger.pendingTron(CH.id).length === 0, r?.message?.slice(0, 60))
+
+  // a node that sets the timestamp just short of the expiration
+  clearTron(); node.broadcast = 'neterr'; node.tx = 'unseen'
+  const exp = Date.now() + 9 * 60_000
+  await rejects(() => tron.broadcastTronSend(key, tprep('f', { expiration: exp, timestamp: exp - 1_000 })))
+  const ent = ledger.pendingTron(CH.id)[0]
+  check('L4 TRON: the hold lasts at least to the transaction\'s own expiration, whatever its unchecked timestamp says',
+    ent !== undefined && ent.holdUntil >= exp, `holdUntil − expiration = ${Math.round(((ent?.holdUntil ?? 0) - exp) / 1000)} s`)
+  {
+    const real = Date.now
+    Date.now = () => real() + 5 * 60_000
+    const b = await ledger.tronInFlightBlock(CH.id, async () => false)
+    Date.now = real
+    check('L4b ...so five minutes on, unseen and still valid, it still holds the next send', b?.reason === 'pending')
+  }
+  clearTron(); node.broadcast = 'neterr'
+  // this clock 50 s fast: the node's 60 s window ends 10 s from "now" here
+  await rejects(() => tron.broadcastTronSend(key, tprep('9', { expiration: Date.now() + 10_000, timestamp: Date.now() - 50_000 })))
+  const ent2 = ledger.pendingTron(CH.id)[0]
+  check('L4c ...and an honest node\'s 60 s window still holds a whole 60 s on a device clock running fast (BM3 kept)',
+    ent2 !== undefined && ent2.holdUntil - Date.now() >= 60_000, `${Math.round(((ent2?.holdUntil ?? 0) - Date.now()) / 1000)} s`)
+  clearTron()
+  key.zero()
+  globalThis.fetch = mockRpc
+
+  // --- Solana ---
+  const devnet = sol.SOL_CHAINS['sol-devnet']
+  const clearSol = () => { for (const p of ledger.pendingSol('sol-devnet')) ledger.dropPending(p) }
+  const skey = sol.deriveSolKey(MN, 0, true)
+  const unsigned = solLib.createTx(skey.address, [solLib.sys.transferSol({ source: skey.address, destination: '11111111111111111111111111111112', amount: 1n })], '11111111111111111111111111111111')
+  const sprep = (lvbh) => ({ chain: devnet, asset: 'sol', to: '11111111111111111111111111111112', lastValidBlockHeight: lvbh, amount: 1n, feeLamports: 5000n, rentLamports: 0n, unsigned, blockhash: '11111111111111111111111111111111' })
+  const solLost = async (lvbh = 4242) => {
+    clearSol(); net.sol = { send: 'neterr', status: 'unseen', height: 100 }
+    return rejects(() => sol.broadcastSolSend(skey, sprep(lvbh)))
+  }
+  const sguard = () => sol.assertNoSolInFlight(devnet).then(() => null, (x) => x)
+
+  let se = await solLost()
+  net.sol = { send: 'slippage', status: 'unseen', height: 100 }
+  let sr = await rejects(() => sol.rebroadcastSol(devnet, se.signature, se.signed))
+  check('L5 Solana: a resend refused in its test run (a swap\'s slippage once the first try moved the price) keeps the record and the bytes',
+    sr instanceof sol.SolBroadcastError && sr.signed === se.signed && /may still go through/.test(sr.message) && ledger.pendingSol('sol-devnet')[0]?.failed === true, sr?.message?.slice(0, 80))
+  let sg = await sguard()
+  check('L5b ...so the next send waits for the first try', /may still go through/.test(sg?.message ?? ''), sg?.message?.slice(0, 60))
+  check('L5c ...and the refusal reads cleanly (no ".." where the node\'s text ends)', !/\.\./.test(sr?.message ?? ''), sr?.message)
+
+  se = await solLost()
+  net.sol = { send: 'ok', status: 'unseen', height: 100 }
+  sr = await sol.rebroadcastSol(devnet, se.signature, se.signed).catch((x) => x)
+  check('L6 Solana: a resend that goes out cleanly is a success and no longer flagged failed', sr === se.signature && ledger.pendingSol('sol-devnet')[0]?.failed === undefined)
+  net.sol = { status: 'seen', height: 100 }
+  sg = await sguard()
+  check('L6b ...so once seen it is dropped, not reported as "went through after all"', sg === null && ledger.pendingSol('sol-devnet').length === 0, sg?.message?.slice(0, 60))
+
+  se = await solLost()
+  net.sol = { status: 'seen-failed', height: 100 }
+  const st = await sol.settleSolAttempt(devnet, se.signature)
+  sg = await sguard()
+  check('L7 Solana: Back after a failed broadcast that landed but failed there: told once, and the next send goes ahead (no second refusal)',
+    st === 'failed' && sg === null && ledger.pendingSol('sol-devnet').length === 0, sg?.message?.slice(0, 60))
+  se = await solLost()
+  net.sol = { status: 'seen', height: 100 }
+  check('L7b ...and one that went through: shown as sent, record settled', (await sol.settleSolAttempt(devnet, se.signature)) === 'ok' && ledger.pendingSol('sol-devnet').length === 0)
+  se = await solLost()
+  net.sol = { status: 'unseen', height: 100 }
+  check('L7c ...while one the network doesn\'t show yet keeps its record (it may still land)', (await sol.settleSolAttempt(devnet, se.signature)) === 'unseen' && ledger.pendingSol('sol-devnet').length === 1)
+  for (const f of ['SolSendModal', 'SolSwapModal']) {
+    const { readFileSync } = await import('node:fs')
+    const src = readFileSync(new URL(`../src/components/${f}.tsx`, import.meta.url), 'utf8')
+    check(`L7d ${f}'s Back after a failed broadcast settles through settleSolAttempt`, /settleSolAttempt\(chain, signature\)/.test(src) && !/solTxStatus\(/.test(src))
+  }
+
+  // no recorded height: "blockhash not found" from a lagging node is not proof
+  se = await solLost(Number.MAX_SAFE_INTEGER)
+  net.sol = { send: 'expired', status: 'unseen', height: 100 }
+  sr = await rejects(() => sol.rebroadcastSol(devnet, se.signature, se.signed))
+  check('L8 Solana: with no block height on record, "blockhash not found" on a young attempt keeps the record (no proof it expired)',
+    sr instanceof sol.SolBroadcastError && ledger.pendingSol('sol-devnet').length === 1, sr?.name)
+  clearSol(); net.sol = {}
+  skey.zero()
+
+  // --- UTXO ---
+  const clearUtxo = () => { for (const p of ledger.pendingUtxo('btc')) ledger.dropPending(p) }
+  const built = { txid: '7'.repeat(64), hex: '00', toAddress: 'bc1qpayee' }
+  const client = (fn) => ({ broadcast: fn })
+  const lost = async () => {
+    clearUtxo()
+    await utxo.broadcastUtxo(client(async () => { throw new Error('mempool.space broadcast failed (HTTP 502)') }), CHAINS.btc, built).catch(() => null)
+  }
+  for (const [label, msg] of [
+    ['"inputs missing or spent" (the first try spent them)', 'mempool.space: sendrawtransaction RPC error: {"code":-25,"message":"bad-txns-inputs-missingorspent"}'],
+    ['rate limited', 'mempool.space: rate limited (HTTP 429)'],
+  ]) {
+    await lost()
+    const ur = await utxo.broadcastUtxo(client(async () => { throw new Error(msg) }), CHAINS.btc, built).catch((x) => x)
+    check(`L9 UTXO: a Retry refused with ${label} keeps the first try's record, failed, and is not "Nothing was sent"`,
+      ur instanceof utxo.UtxoBroadcastError && ur.definite === false && !/Nothing was sent/.test(ur.message) && ledger.pendingUtxo('btc')[0]?.failed === true, ur?.message?.slice(0, 70))
+    check(`L9b ...so the next send waits for it (${label.split(' ')[0]})`, (await ledger.utxoInFlightBlock('btc', async () => false))?.reason === 'pending')
+  }
+  await lost()
+  await utxo.broadcastUtxo(client(async () => built.txid), CHAINS.btc, built)
+  check('L10 UTXO: a Retry that goes out cleanly clears the failed flag', ledger.pendingUtxo('btc')[0]?.failed === undefined)
+  check('L10b ...so once seen it is dropped, not reported as "went through after all"', (await ledger.utxoInFlightBlock('btc', async () => true)) === null && ledger.pendingUtxo('btc').length === 0)
+  await lost()
+  check('L10c ...while a Retry interrupted mid-flight leaves it failed (recorded failed before it goes out)',
+    await (async () => {
+      let during
+      await utxo.broadcastUtxo(client(async () => { during = ledger.pendingUtxo('btc')[0]?.failed; throw new TypeError('Load failed') }), CHAINS.btc, built).catch(() => null)
+      return during === true && ledger.pendingUtxo('btc')[0]?.failed === true
+    })())
+
+  // the failover: provider 1's answer is lost (it may have taken it), provider 2 refuses
+  const prov = (name, fn) => ({ providerName: name, getTipHeight: async () => 100, broadcast: fn })
+  const fc = createFailoverClient([
+    prov('first', async () => { throw new TypeError('Load failed') }),
+    prov('second', async () => { throw new Error('second: rate limited (HTTP 429)') }),
+  ])
+  clearUtxo()
+  const fr = await utxo.broadcastUtxo(fc, CHAINS.btc, built).catch((x) => x)
+  check('L11 UTXO: a refusal from the next provider after one went quiet is not "Nothing was sent": the record stays, failed',
+    fr instanceof utxo.UtxoBroadcastError && fr.definite === false && ledger.pendingUtxo('btc')[0]?.failed === true, fr?.message?.slice(0, 70))
+  const fc2 = createFailoverClient([prov('only', async () => { throw new Error('only: sendrawtransaction RPC error: {"code":-26,"message":"min relay fee not met"}') })])
+  clearUtxo()
+  const fr2 = await utxo.broadcastUtxo(fc2, CHAINS.btc, built).catch((x) => x)
+  check('L11b ...while the first provider\'s own refusal is still definite', fr2 instanceof utxo.UtxoBroadcastError && fr2.definite === true && ledger.pendingUtxo('btc').length === 0)
+
+  // BL1 end to end: the node's floor, through esplora, the failover and the broadcast's own sentence
+  {
+    const realFetch = globalThis.fetch
+    globalThis.fetch = async () => new Response(`sendrawtransaction RPC error: {"code":-26,"message":"insufficient fee, rejecting replacement ${'b'.repeat(64)}, less fees than conflicting txs; 0.00000564 < 0.00001046"}`, { status: 400 })
+    const ep = new EsploraProvider({ name: 'mock', kind: 'esplora', base: 'https://esplora.invalid/api', pageSize: 50 }, CHAINS.btc)
+    clearUtxo()
+    const br = await utxo.broadcastUtxo(createFailoverClient([ep]), CHAINS.btc, { txid: '8'.repeat(64), hex: '00', toAddress: 'bc1qpayee' }, { replaces: '9'.repeat(64) }).catch((x) => x)
+    globalThis.fetch = realFetch
+    check('L12 Speed up: the floor a node names is read from the message the failed step shows (BL1 end to end; "Rebuild at the required fee" never appeared)',
+      utxo.replacementFloorFrom(br?.message ?? '', 8) === 1046n, br?.message)
+  }
+  clearUtxo()
+  globalThis.fetch = mockRpc
 }
 
 console.log(failures === 0 ? '\nAll pending-ledger checks passed.' : `\n${failures} CHECK(S) FAILED.`)
