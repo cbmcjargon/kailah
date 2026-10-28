@@ -20,8 +20,11 @@ PRIVATE BY DESIGN
 ALSO
 • SOL and TRX staking; SOL ↔ USDC swaps (a 0.5% Kailah fee, shown before you confirm)
 • QR code scanning, payment alerts (with no amounts) and CSV export
-• Face ID or fingerprint unlock with a passkey
+• Face ID or fingerprint unlock with a passkey, where your device supports it (your password always works)
 • Show only the networks you use; hidden ones are never queried
+
+REFERRAL LINKS
+The Buy screens list exchanges where you can buy coins. Three of them, Strike, Kraken and Gemini, are the developer's referral links, and the wallet labels each one "Invite link". A new account made through one gets that exchange's current sign-up offer under its own terms (fee-free trading up to a set amount on Strike, a sign-up bonus on Kraken and Gemini; offers vary by country), and the developer receives a referral reward. They open only when you tap them; the extension never adds referral codes to other links or to sites you visit.
 
 OPEN SOURCE AND VERIFIABLE
 MIT-licensed source: https://github.com/cbmcjargon/kailah

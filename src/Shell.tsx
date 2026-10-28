@@ -209,8 +209,8 @@ export default function Shell() {
     // module comes with the wallet chunk, keeping it off the welcome screen;
     // if it can't load, the wallet can't either, and undecided shows all.
     try {
-      const { saveNetworkPrefs, DEFAULT_SHOWN } = await import('./lib/netprefs')
-      saveNetworkPrefs(DEFAULT_SHOWN)
+      const { saveNetworkPrefs, NEW_WALLET_SHOWN } = await import('./lib/netprefs')
+      saveNetworkPrefs(NEW_WALLET_SHOWN)
     } catch {
       // undecided: every network shows
     }

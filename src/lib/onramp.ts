@@ -71,7 +71,7 @@ export function strikeOption(addr: string): BuyOption {
     kind: 'exchange',
     tag: 'Invite link',
     blurb:
-      "The simplest app for buying bitcoin in the US — bank or card, then send it here. New accounts get their first trading fees waived through this invite, which also supports the wallet's creator.",
+      "The simplest app for buying bitcoin in the US — bank or card, then send it here. New accounts made through this invite get fee-free trading up to a set amount, under Strike's current referral terms (not in the UK); the wallet's creator gets a referral reward too.",
     url: STRIKE_INVITE_URL,
     prefillsAddress: false,
     steps: [
@@ -84,7 +84,10 @@ export function strikeOption(addr: string): BuyOption {
 
 // The wallet creator's Kraken invite link — shown with an explicit
 // "Invite link" tag wherever it appears. Disclosure is non-negotiable: users
-// must be able to tell a referral from a neutral recommendation.
+// must be able to tell a referral from a neutral recommendation. Each
+// referral's blurb also says what a new account gets from it: the Chrome Web
+// Store allows affiliate links only with a direct user benefit, disclosed in
+// the listing and the UI (review 2026-10-28).
 const KRAKEN_INVITE_URL = 'https://proinvite.kraken.com/9f1e/rf9gcbrs'
 
 /**
@@ -97,7 +100,7 @@ export function krakenOption(coin: string, networkName: string, addr: string): B
     name: 'Kraken',
     kind: 'exchange',
     tag: 'Invite link',
-    blurb: `Low fees and every coin in this wallet. Signing up through this invite supports the wallet's creator.`,
+    blurb: `Low fees and every coin in this wallet. New to Kraken? An account made through this invite can earn a sign-up bonus under Kraken's current referral offer (it varies by country); the wallet's creator gets one too.`,
     url: KRAKEN_INVITE_URL,
     prefillsAddress: false,
     steps: [
@@ -120,7 +123,7 @@ export function geminiOption(coin: string, networkName: string, addr: string): B
     name: 'Gemini',
     kind: 'exchange',
     tag: 'Invite link',
-    blurb: `US-regulated exchange. Signing up through this invite supports the wallet's creator.`,
+    blurb: `US-regulated exchange. New accounts made through this invite get a crypto bonus after their first trades, under Gemini's current referral terms; the wallet's creator gets one too.`,
     url: GEMINI_INVITE_URL,
     prefillsAddress: false,
     steps: [

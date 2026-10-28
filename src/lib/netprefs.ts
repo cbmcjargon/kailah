@@ -15,11 +15,13 @@
 // other kailah.sec.* blob.
 //
 // No stored choice means "undecided": every network shows, exactly as before
-// this feature. A brand-new wallet decides at once (DEFAULT_SHOWN). An
-// existing or restored wallet decides after its first real-mode scan of all
-// nine (decideShown): the defaults plus every network with funds or history,
-// plus every network whose scan could not tell — never hide funds the user
-// already holds.
+// this feature. A brand-new wallet decides at once and shows every network
+// (NEW_WALLET_SHOWN): it is how someone new, or a store reviewer, finds what
+// the wallet does; it showed only Bitcoin and Base until 2026-10-28, hiding
+// most of what the listing describes. An existing or restored wallet decides
+// after its first real-mode scan of all nine (decideShown): DEFAULT_SHOWN
+// plus every network with funds or history, plus every network whose scan
+// could not tell — never hide funds the user already holds.
 //
 // Engines: the EVM, Solana and TRON code are chunks of their own
 // (src/engines), and an engine whose every network is hidden in the current
@@ -57,8 +59,11 @@ export const REAL_NETWORKS: readonly RealNetworkId[] = [
   'tron',
 ]
 
-/** A new wallet starts with Bitcoin plus one stablecoin network. */
+/** What a restored wallet keeps even where it finds nothing: Bitcoin plus one stablecoin network. */
 export const DEFAULT_SHOWN: readonly RealNetworkId[] = ['btc', 'base']
+
+/** A brand-new wallet shows every network; the user hides what they don't use. */
+export const NEW_WALLET_SHOWN: readonly RealNetworkId[] = REAL_NETWORKS
 
 /** Practice network → the real network whose choice it mirrors. */
 export const PRACTICE_TWINS: Readonly<Record<string, RealNetworkId>> = {

@@ -343,5 +343,39 @@ console.log('--- H. lookups that failed, staked TRX, the portfolio (bug audit 20
       /pinned: active\.pinned/.test(dash) && /useState\(pinned \?\? accountState\?\.nextReceive \?\? null\)/.test(receive) && /Verify on Ledger/.test(buy))
 }
 
+console.log('--- I. what a store reviewer meets (review 2026-10-28) ---')
+{
+  const src = (f) => readFile(new URL(`../${f}`, import.meta.url), 'utf8')
+  const shell = await src('src/Shell.tsx')
+  check('I1 a brand-new wallet shows every network (it showed only Bitcoin and Base, hiding most of what the listing describes)',
+    same(np.NEW_WALLET_SHOWN, np.REAL_NETWORKS) && np.NEW_WALLET_SHOWN.length === 9 &&
+      /const \{ saveNetworkPrefs, NEW_WALLET_SHOWN \} = await import\('\.\/lib\/netprefs'\)\n\s*saveNetworkPrefs\(NEW_WALLET_SHOWN\)/.test(shell))
+  const unused = Object.fromEntries(np.REAL_NETWORKS.map((id) => [id, 'unused']))
+  check('I1b ...while a restored wallet that uses nothing still keeps just Bitcoin and Base', same(np.decideShown(unused), ['btc', 'base']))
+
+  // Every Buy option the app can list, from every place that builds one.
+  const onramp = await import('../src/lib/onramp.ts')
+  const { CHAINS } = await import('../src/lib/networks.ts')
+  const options = [
+    ...Object.values(CHAINS).flatMap((c) => onramp.getBuyOptions(c, 'addr')),
+    onramp.strikeOption('addr'), onramp.krakenOption('SOL', 'Solana', 'addr'), onramp.geminiOption('SOL', 'Solana', 'addr'),
+  ]
+  const referral = (o) => /invite|referral|[?&]ref=|proinvite/i.test(o.url)
+  const refs = options.filter(referral)
+  check('I2 every referral link is tagged "Invite link", says what a new account gets, and that the creator is rewarded (store affiliate policy)',
+    refs.length >= 3 && refs.every((o) => o.tag === 'Invite link' && /bonus|fee-free/.test(o.blurb) && /creator gets/.test(o.blurb)),
+    refs.filter((o) => !(o.tag === 'Invite link' && /bonus|fee-free/.test(o.blurb) && /creator gets/.test(o.blurb))).map((o) => o.name).join(', '))
+  check('I2b ...and nothing else carries a tag or a referral-looking URL', options.filter((o) => !referral(o)).every((o) => o.tag === undefined))
+  const inline = [await src('src/components/ChainCard.tsx'), await src('src/components/BuyModal.tsx')]
+  check('I2c the two inline Strike mentions (empty Bitcoin card, practice Buy) carry the tag, the benefit and the reward too',
+    inline.every((t) => /buy-option-tag">Invite link</.test(t) && /fee-free trades to start through this invite/.test(t) && /creator gets a\s+referral reward/.test(t)))
+  const listing = await src('extension/store/description.txt')
+  check('I3 the store description discloses the referral links: which, what a new account gets, that the developer is rewarded',
+    /REFERRAL LINKS/.test(listing) && ['Strike', 'Kraken', 'Gemini'].every((n) => listing.includes(n)) && /developer receives a referral reward/.test(listing) && /sign-up offer/.test(listing))
+  check('I4 the listing promises biometric unlock only where the device supports it', /Face ID or fingerprint unlock with a passkey, where your device supports it/.test(listing))
+  const welcome = await src('src/components/Welcome.tsx')
+  check('I5 the welcome screen names more than Bitcoin, Dogecoin and Litecoin', /Ethereum, Solana, TRON/.test(welcome) && !/Dogecoin &amp; Litecoin/.test(welcome))
+}
+
 console.log(failures === 0 ? '\nAll networks-shown checks passed.' : `\n${failures} CHECK(S) FAILED.`)
 process.exit(failures === 0 ? 0 : 1)

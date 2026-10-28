@@ -2,7 +2,7 @@
   "id": "/",
   "name": "Kailah Wallet",
   "short_name": "Kailah",
-  "description": "Self-custody Bitcoin, Dogecoin and Litecoin wallet. Your keys never leave your device.",
+  "description": "Self-custody wallet for Bitcoin, Dogecoin, Litecoin, Ethereum, Solana, TRON and stablecoins. Your keys never leave your device.",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",

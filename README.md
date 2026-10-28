@@ -1,6 +1,6 @@
 # Kailah Wallet
 
-**v2.7.5** — a self-custody wallet for Bitcoin, Dogecoin, Litecoin, USDC + ETH
+**v2.7.6** — a self-custody wallet for Bitcoin, Dogecoin, Litecoin, USDC + ETH
 (Base / Ethereum / Arbitrum), BNB, Solana (SOL + USDC, with in-wallet swaps
 and native staking), and TRON (TRX + USDT) that runs entirely in the browser. No servers, no accounts, no custody: keys are
 generated on your device, encrypted with your password, and never leave it.
@@ -189,9 +189,9 @@ different name and logo.
   amount-free) system notifications while the wallet is open. There is
   deliberately no push server.
 - **Networks shown** — pick which networks the dashboard shows (Settings ›
-  Networks shown). A new wallet starts with Bitcoin and Base; an existing or
-  restored wallet checks every network once in real mode and keeps each one
-  with funds or history. Hidden networks are not scanned or polled at all (no
+  Networks shown). A new wallet shows every network; an existing or restored
+  wallet checks every network once in real mode and keeps Bitcoin, Base and
+  each one with funds or history. Hidden networks are not scanned or polled at all (no
   provider requests, no alerts, not in the total), and coins that arrive on
   one stay hidden until you show it again — the dashboard always says how
   many are hidden. An engine whose networks are all hidden isn't even

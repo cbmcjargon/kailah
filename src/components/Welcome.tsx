@@ -13,7 +13,8 @@ export default function Welcome({ onCreate, onRestore }: WelcomeProps) {
         <h1 className="onboard-title">Kailah Wallet</h1>
         <p className="onboard-tagline">
           <IconShield size={16} className="inline-icon" />
-          Self-custody Bitcoin, Dogecoin &amp; Litecoin — your keys never leave this device.
+          Self-custody Bitcoin, Ethereum, Solana, TRON, stablecoins and more — your keys never
+          leave this device.
         </p>
       </div>
       <div className="stack">

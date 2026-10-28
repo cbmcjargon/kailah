@@ -70,8 +70,9 @@ export default function BuyModal({ chain, address, onClose, onVerifyOnDevice }: 
               <a href={STRIKE_INVITE_URL} target="_blank" rel="noopener noreferrer">
                 Strike
               </a>
-              <span className="buy-option-tag">Invite link</span> is the simplest place to start
-              — switch to Real mode and tap Buy when you are.
+              <span className="buy-option-tag">Invite link</span> is the simplest place to begin,
+              with fee-free trades to start through this invite (the wallet&rsquo;s creator gets a
+              referral reward) — switch to Real mode and tap Buy when you are.
             </p>
           )}
         </div>

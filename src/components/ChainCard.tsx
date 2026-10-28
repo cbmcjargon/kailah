@@ -133,7 +133,8 @@ export default function ChainCard({
                   Strike
                 </a>
                 <span className="buy-option-tag">Invite link</span> is the simplest place to buy
-                your first — or tap Receive if you already have some.
+                your first, with fee-free trades to start through this invite (the wallet&rsquo;s
+                creator gets a referral reward) — or tap Receive if you already have some.
               </p>
             )}
           </>

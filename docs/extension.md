@@ -276,6 +276,13 @@ prompt, a click on an OS notification, and the store's own install flow.
     [PRIVACY.md](../PRIVACY.md), at
     https://github.com/cbmcjargon/kailah/blob/main/PRIVACY.md once the
     repository is public.
+- **Referral links.** The Chrome Web Store's affiliate policy allows them
+  only when the listing and the UI describe them and they give the user a
+  direct benefit. The description's "Referral links" section says which
+  exchanges are the developer's referrals, what a new account gets and that
+  the developer is rewarded; each one is tagged "Invite link" in the wallet,
+  with its sign-up offer in the blurb (`src/lib/onramp.ts`). Keep the two in
+  step when an offer or link changes.
 - **Description.** Paste-ready plain text in
   `extension/store/description.txt` (about 2,600 characters; the store allows
   16,000). The short summary is the manifest `description`.
