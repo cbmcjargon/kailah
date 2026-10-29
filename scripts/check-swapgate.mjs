@@ -34,6 +34,19 @@
 //      line, ONE fresh route is built around it and passes the whole gate
 //      again (a tampered fresh route is still refused), plumbing failures
 //      are not re-routed, and the market-price check behind the review.
+//   M. the 2026-10-29 upgrades: the rate and route the form and review show
+//      come from the quote itself, a Jupiter swap reads as a swap in Solana
+//      activity (never as "Received" the coin it bought), and the form's quote
+//      refreshes every 20 s only while the form shows one and the page is
+//      visible, keeping the old quote on screen until the new one lands.
+//   P. a route too large for one transaction (live 2026-10-29: 1,708 bytes)
+//      is caught before anything is simulated, rebuilt ONCE with Jupiter's
+//      maxAccounts, and the smaller route passes the whole gate again (a
+//      tampered one is still refused); still too large ends in plain words.
+//   N. Solana activity reads version-1 transactions (a real one, recorded
+//      2026-10-29: solana-history-v1-tx.json), which it used to skip, and
+//      still skips what it can't read safely: a version the node refuses, a
+//      version it doesn't know, account and balance lists that don't line up.
 const store = new Map()
 globalThis.localStorage = {
   getItem: (k) => (store.has(k) ? store.get(k) : null),
@@ -113,6 +126,8 @@ function resetWorld(direction, fixtures = FIX) {
     labelAsks: 0,
     // applied to the build Jupiter returns for a re-route (excludeDexes)
     onReroute: null,
+    // applied to the build Jupiter returns for a smaller route (maxAccounts)
+    onSmaller: null,
   }
 }
 const WSOL_MINT = 'So11111111111111111111111111111111111111112'
@@ -134,6 +149,10 @@ globalThis.fetch = async (url, init) => {
     if (u.includes('excludeDexes=') && world.onReroute) {
       world.onReroute(world)
       world.onReroute = null
+    }
+    if (u.includes('maxAccounts=') && world.onSmaller) {
+      world.onSmaller(world)
+      world.onSmaller = null
     }
     world.builds++
     world.jupUrls.push(u)
@@ -848,6 +867,173 @@ console.log('--- L. the 2026-10-27 audit: shortfalls in plain words, the form\'s
   check('L9b ...and an existing holder\'s carries none', holder.prepared?.accountDepositLamports === 0n)
   check('L9c the review shows it, and the stake form can try the validator list again (BL28)',
     /USDC account deposit \(one-time\)/.test(swapForm) && /setValidatorTry\(\(n\) => n \+ 1\)/.test(readFileSync(new URL('../src/components/SolStakeModal.tsx', import.meta.url), 'utf8')))
+}
+
+console.log('--- M. the 2026-10-29 upgrades: rate, route, swaps in activity, a quote that stays current ---')
+{
+  const { swapRate } = await import('../src/lib/solswap.ts')
+  const { isSwapDelta } = await import('../src/lib/sol.ts')
+  const SOL = 1_000_000_000n
+  check('M1 the rate is USDC units per whole SOL, either way round, rounded down',
+    swapRate('sol-to-usdc', SOL, 182_310_000n) === 182_310_000n &&
+      swapRate('sol-to-usdc', SOL / 2n, 91_155_000n) === 182_310_000n &&
+      swapRate('usdc-to-sol', 182_310_000n, SOL) === 182_310_000n &&
+      swapRate('usdc-to-sol', 10_000_000n, 3n * SOL) === 3_333_333n)
+  check('M1b ...and there is none for an empty side', swapRate('sol-to-usdc', 0n, 5n) === null && swapRate('usdc-to-sol', 5n, 0n) === null)
+  const sell = await run('sol-to-usdc')
+  const buy = await run('usdc-to-sol')
+  check('M2 the review\'s route is the prepared build\'s own exchanges (recorded: BisonFi, TesseraV)',
+    sell.err === null && sell.prepared.route.join() === 'BisonFi' && buy.err === null && buy.prepared.route.join() === 'TesseraV',
+    `${sell.prepared?.route} / ${buy.prepared?.route} ${sell.err?.message ?? ''}${buy.err?.message ?? ''}`)
+  check('M2b ...and its rate is the recorded quote\'s: 0.1 SOL for 10.047972 USDC is 100.47972 USDC per SOL',
+    swapRate(sell.prepared.direction, sell.prepared.inAmount, sell.prepared.outAmount) === 100_479_720n)
+  const after = await run('sol-to-usdc', (w) => { w.build.routePlan = [{ swapInfo: { label: 'Orca <script>' } }, { swapInfo: { label: 'Raydium CLMM' } }] })
+  check('M2c a route label that isn\'t a plain exchange name is left out (only routeLabels\' names reach the screen)',
+    after.err === null && after.prepared.route.join() === 'Raydium CLMM', after.prepared?.route?.join() ?? after.err?.message)
+
+  const J = { failed: false, viaJupiter: true, otherTokenMoved: false }
+  check('M3 through Jupiter, SOL out and USDC in, or USDC out and SOL in, is a swap',
+    isSwapDelta(-100_006_000n, 10_047_972n, J) && isSwapDelta(98_527_520n, -10_000_000n, J))
+  check('M3b receiving USDC alone, sending USDC (SOL paid the fee or a deposit), or SOL alone is not',
+    !isSwapDelta(0n, 5_000_000n, J) && !isSwapDelta(-2_044_280n, -5_000_000n, J) &&
+      !isSwapDelta(-5_000n, 0n, J) && !isSwapDelta(1_000n, 1_000n, J))
+  check('M3c a failed transaction is never a swap', !isSwapDelta(-100_006_000n, 10_047_972n, { ...J, failed: true }))
+  check('M3d without Jupiter\'s program, a fee paid in SOL beside USDC arriving (a claim, a refund) is not a swap (seen live 2026-10-29)',
+    !isSwapDelta(-9_000n, 2_070n, { ...J, viaJupiter: false }) && !isSwapDelta(-100_006_000n, 10_047_972n, { ...J, viaJupiter: false }))
+  check('M3f nor is a swap of another token into USDC (that token went down), its SOL leg only the fee',
+    !isSwapDelta(-12_000n, 2_500_000n, { ...J, otherTokenMoved: true }))
+  const { JUPITER_V6_PROGRAM } = await import('../src/lib/sol.ts')
+  const gateSrc = readFileSync(new URL('../src/lib/solswap.ts', import.meta.url), 'utf8')
+  check('M3e history\'s Jupiter program is the one the swap gate allows',
+    gateSrc.includes(`const JUPITER_V6_PROGRAM = '${JUPITER_V6_PROGRAM}'`) && JUPITER_V6_PROGRAM.startsWith('JUP6'))
+  const solLibSrc = readFileSync(new URL('../src/lib/sol.ts', import.meta.url), 'utf8')
+  const card = readFileSync(new URL('../src/components/SolCard.tsx', import.meta.url), 'utf8')
+  check('M4 activity marks each row with isSwapDelta, and the card names a swap before "Received"/"Sent"',
+    /swap: isSwapDelta\(delta, usdcDelta, \{\s*failed: s\.err != null,\s*viaJupiter: keys\.some\(\(k\) => k\.pubkey === JUPITER_V6_PROGRAM\),\s*otherTokenMoved: otherTokenMoved\(tx\?\.meta, chain\.usdc\.mint, address\),\s*\}\)/.test(solLibSrc) &&
+      card.indexOf('Swapped SOL →') > 0 && card.indexOf('Swapped SOL →') < card.indexOf("? 'Received'") &&
+      /t\.swap \? \(\s*<IconSwap/.test(card))
+
+  const form = readFileSync(new URL('../src/components/SolSwapModal.tsx', import.meta.url), 'utf8')
+  check('M5 the quote refreshes every 20 s, only on the form, with a quote shown, while the page is visible',
+    /const QUOTE_REFRESH_MS = 20_000/.test(form) &&
+      /if \(step\.kind !== 'form' \|\| !hasQuote\) return/.test(form) &&
+      /document\.visibilityState === 'visible'\) setRefreshTick/.test(form))
+  check('M5b a refresh keeps the shown quote until its replacement lands, and a failed one keeps it unless stale',
+    /if \(!isRefresh\) \{\s*setQuote\(null\)/.test(form) &&
+      /if \(isRefresh && shown !== null && Date\.now\(\) - shown\.builtAt < QUOTE_STALE_MS\) return/.test(form))
+  check('M5c the form and the review show the rate and the route',
+    /1 SOL ≈ \{quoteRate\}/.test(form) && /via \{quoteRoute\.join/.test(form) && /<dt>Rate<\/dt>/.test(form) && /<dt>Route<\/dt>/.test(form))
+}
+
+console.log('--- N. Solana activity reads version-1 transactions ---')
+{
+  const { fetchSolHistory, SOL_HISTORY_TX_VERSION } = await import('../src/lib/sol.ts')
+  const rec = JSON.parse(readFileSync('scripts/fixtures/solana-history-v1-tx.json', 'utf8'))
+  const ME = rec.tx.transaction.message.accountKeys.find((k) => k.signer).pubkey
+  const OTHER = '9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM'
+  // base58 signatures of the right length, one per scripted transaction
+  const sig = (c) => c.repeat(88)
+  const legacy = {
+    version: 'legacy', blockTime: rec.tx.blockTime - 60,
+    meta: { err: null, fee: 5000, preBalances: [1_000_000, 100], postBalances: [994_900, 5_200], preTokenBalances: [], postTokenBalances: [] },
+    transaction: { message: { accountKeys: [{ pubkey: OTHER, signer: true }, { pubkey: ME, signer: false }] } },
+  }
+  const misaligned = structuredClone(legacy)
+  misaligned.meta.preBalances = [1_000_000]
+  misaligned.meta.postBalances = [994_900]
+  const unknownVersion = { ...structuredClone(legacy), version: 7 }
+  // through Jupiter: another token of ours went down as USDC came in, SOL paid the fee
+  const USDC_MINT = MAINNET.usdc.mint
+  const BONKISH = 'DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263'
+  const tokenToUsdc = {
+    version: 0, blockTime: rec.tx.blockTime - 120,
+    meta: {
+      err: null, fee: 5000, preBalances: [50_000_000, 1], postBalances: [49_995_000, 1],
+      preTokenBalances: [{ accountIndex: 1, owner: ME, mint: BONKISH, uiTokenAmount: { amount: '900000' } }, { accountIndex: 1, owner: ME, mint: USDC_MINT, uiTokenAmount: { amount: '0' } }],
+      postTokenBalances: [{ accountIndex: 1, owner: ME, mint: BONKISH, uiTokenAmount: { amount: '0' } }, { accountIndex: 1, owner: ME, mint: USDC_MINT, uiTokenAmount: { amount: '3000000' } }],
+    },
+    transaction: { message: { accountKeys: [{ pubkey: ME, signer: true }, { pubkey: 'JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4', signer: false }] } },
+  }
+  const txs = new Map([
+    [rec.signature, { tx: rec.tx, version: 1 }],
+    [sig('B'), { tx: null, version: 2 }],
+    [sig('C'), { tx: legacy, version: 'legacy' }],
+    [sig('D'), { tx: misaligned, version: 'legacy' }],
+    [sig('E'), { tx: unknownVersion, version: 0 }],
+    [sig('F'), { tx: tokenToUsdc, version: 0 }],
+  ])
+  const asked = []
+  const realFetch = globalThis.fetch
+  globalThis.fetch = async (url, init) => {
+    const { method, params } = JSON.parse(init.body)
+    const answer = (result) => new Response(JSON.stringify({ jsonrpc: '2.0', id: 1, result }), { status: 200 })
+    if (method === 'getSignaturesForAddress') {
+      if (params[0] !== ME) return answer([])
+      return answer([...txs.keys()].map((signature, k) => ({ signature, blockTime: rec.tx.blockTime - k, err: null })))
+    }
+    if (method === 'getTransaction') {
+      const want = params[1]?.maxSupportedTransactionVersion
+      asked.push(want)
+      const t = txs.get(params[0])
+      // the node's own refusal of a version above the ceiling asked for
+      if (typeof t.version === 'number' && (want === undefined || t.version > want)) {
+        return new Response(JSON.stringify({ jsonrpc: '2.0', id: 1, error: { code: -32015, message: `Transaction version (${t.version}) is not supported by the requesting client. Please try the request again with the following configuration parameter: "maxSupportedTransactionVersion": ${t.version}` } }), { status: 200 })
+      }
+      return answer(t.tx)
+    }
+    throw new Error(`unexpected RPC ${method}`)
+  }
+  const rows = await fetchSolHistory(MAINNET, ME)
+  globalThis.fetch = realFetch
+  const v1 = rows.find((r) => r.signature === rec.signature)
+  // seven requests for six transactions: the one a server refuses is asked of the second server too
+  check('N1 history asks for transactions up to version 1, every time', SOL_HISTORY_TX_VERSION === 1 && asked.length === 7 && asked.every((v) => v === 1), asked.join())
+  check('N2 the recorded version-1 transaction is in Activity with its own SOL and USDC changes (−11,816 lamports, +2,491 USDC units)',
+    v1 !== undefined && v1.amount === -11_816n && v1.usdcAmount === 2_491n && v1.direction === 'in' && v1.time === rec.tx.blockTime && !v1.failed,
+    v1 === undefined ? 'missing' : `${v1.amount} ${v1.usdcAmount} ${v1.direction}`)
+  check('N3 ...and the swap rule reads it like any other: Jupiter ran, SOL went out, USDC came in, and the token it passed through ended where it began (an arbitrage loop), so it is named a swap',
+    v1?.swap === true)
+  const plain = rows.find((r) => r.signature === sig('C'))
+  check('N4 an older (legacy) transaction reads exactly as before', plain !== undefined && plain.amount === 5_100n && plain.direction === 'in' && plain.counterparty === OTHER)
+  check('N5 a version the node refuses (2), a version history doesn\'t know (7) and lists that don\'t line up are skipped; nothing else is lost',
+    rows.length === 3 && !rows.some((r) => [sig('B'), sig('D'), sig('E')].includes(r.signature)), rows.map((r) => r.signature.slice(0, 4)).join())
+  const t2u = rows.find((r) => r.signature === sig('F'))
+  check('N6 a swap of another token into USDC through Jupiter (that token went down, SOL paid only the fee) is not "Swapped SOL → USDC"; it reads as the USDC received',
+    t2u !== undefined && t2u.swap === false && t2u.usdcAmount === 3_000_000n && t2u.direction === 'in')
+}
+
+console.log('--- P. a route too large for one transaction asks once for a smaller one ---')
+{
+  const { SMALLER_ROUTE_MAX_ACCOUNTS } = await import('../src/lib/solswap.ts')
+  // 30 more accounts on the swap instruction, none in a lookup table: 960 more bytes
+  const extra = Array.from({ length: 30 }, (_, i) => ({ pubkey: base58.encode(new Uint8Array(32).fill(i + 1)), isSigner: false, isWritable: false }))
+  const bloat = (w) => { w.build.swapInstruction.accounts = [...w.build.swapInstruction.accounts, ...extra] }
+  const honest = (w) => { w.build = structuredClone(FIX[w.direction].build) }
+  const capped = (w) => w.jupUrls.filter((u) => u.includes(`&maxAccounts=${SMALLER_ROUTE_MAX_ACCOUNTS}`)).length
+
+  await run('sol-to-usdc')
+  const ordinarySims = world.simulations.length
+  const r = await run('sol-to-usdc', (w) => { bloat(w); w.onSmaller = honest })
+  check('P1 an oversized route is never simulated; Jupiter is asked once more, capped at 32 accounts, and that route passes the whole gate',
+    r.err === null && r.prepared.simplerRoute === true && r.prepared.swapFee > 0n && world.builds === 2 && capped(world) === 1 && world.jupUrls[0].includes('maxAccounts') === false,
+    r.err?.message?.slice(0, 80) ?? `builds=${world.builds} capped=${capped(world)}`)
+  check('P1b ...and the oversized route was never simulated: exactly as many simulations as an ordinary swap',
+    r.err === null && ordinarySims >= 2 && world.simulations.length === ordinarySims, `${world.simulations.length} vs ${ordinarySims}`)
+  const fits = await run('usdc-to-sol')
+  check('P2 a route that fits is not rebuilt, and says so', fits.err === null && fits.prepared.simplerRoute === false && world.builds === 1)
+  const still = await run('sol-to-usdc', (w) => { bloat(w) })
+  check('P3 a smaller route still too large ends in plain words: nothing signed, nothing simulated, no third request',
+    /too large to fit in one Solana transaction.*nothing was signed/i.test(still.err?.message ?? '') && world.simulations.length === 0 && world.builds === 2,
+    still.err?.message?.slice(0, 90))
+  const tampered = await run('sol-to-usdc', (w) => {
+    bloat(w)
+    w.onSmaller = (w2) => { honest(w2); w2.build.swapInstruction.accounts[10] = { ...w2.build.swapInstruction.accounts[10], pubkey: OTHER } }
+  })
+  check('P4 the smaller route goes through every check: one with its fee account swapped is refused', refused(tampered), tampered.err?.message?.slice(0, 60) ?? 'accepted!')
+  const busy = await run('sol-to-usdc', (w) => { bloat(w); w.onSmaller = (w2) => { w2.jupStatus = 429 } })
+  check('P5 Jupiter busy when asked for the smaller route: plain words, nothing signed', /too large to fit|busy/i.test(busy.err?.message ?? ''), busy.err?.message?.slice(0, 80))
+  const form = readFileSync(new URL('../src/components/SolSwapModal.tsx', import.meta.url), 'utf8')
+  check('P6 the review says when the route is the simpler one', /step\.prepared\.simplerRoute &&/.test(form) && /too large to fit in one Solana transaction/.test(form))
 }
 
 console.log(failures === 0 ? '\nAll swap-gate checks passed.' : `\n${failures} CHECK(S) FAILED.`)

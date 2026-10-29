@@ -112,6 +112,10 @@ export class EsploraProvider implements ProviderApi {
   readonly xpub: XpubApi | undefined = undefined
   // mempool.space and friends shed scan bursts with brief, CORS-less 429s.
   readonly burstLimited = true
+  // From the spec: blockstream.info caps each IP at 700 requests an hour, so
+  // both Bitcoin networks use it only as a backup, and its 429 is never retried.
+  readonly backupOnly: boolean
+  readonly budgetLimited: boolean
 
   private readonly base: string
   private readonly spec: ProviderSpec
@@ -124,6 +128,8 @@ export class EsploraProvider implements ProviderApi {
     this.spec = spec
     this.base = spec.base
     this.providerName = spec.name
+    this.backupOnly = spec.backupOnly === true
+    this.budgetLimited = spec.budgetLimited === true
   }
 
   // -------------------------------------------------------------------------

@@ -173,24 +173,45 @@ export default function SolCard({
                 className="tx-row"
                 onClick={() => onTxClick(t)}
               >
-                <span className={`tx-icon tx-icon-${t.direction}`} aria-hidden="true">
-                  {t.direction === 'in' ? <IconArrowDown size={14} /> : <IconArrowUp size={14} />}
+                <span className={`tx-icon tx-icon-${t.swap ? 'self' : t.direction}`} aria-hidden="true">
+                  {t.swap ? (
+                    <IconSwap size={14} />
+                  ) : t.direction === 'in' ? (
+                    <IconArrowDown size={14} />
+                  ) : (
+                    <IconArrowUp size={14} />
+                  )}
                 </span>
                 <div className="tx-main">
                   <span className="tx-title">
                     {t.failed
                       ? 'Failed'
-                      : t.direction === 'in'
-                        ? 'Received'
-                        : t.direction === 'out'
-                          ? 'Sent'
-                          : 'Self'}
+                      : t.swap
+                        ? t.amount < 0n
+                          ? `Swapped SOL → ${chain.usdc.symbol}`
+                          : `Swapped ${chain.usdc.symbol} → SOL`
+                        : t.direction === 'in'
+                          ? 'Received'
+                          : t.direction === 'out'
+                            ? 'Sent'
+                            : 'Self'}
                   </span>
                   <span className="tx-sub">
+                    {t.swap &&
+                      (t.amount < 0n
+                        ? `${formatSol(-t.amount)} SOL · `
+                        : `${formatSolUsdc(chain, -t.usdcAmount)} ${chain.usdc.symbol} · `)}
                     {t.time !== null ? new Date(t.time * 1000).toLocaleDateString() : ''}
                   </span>
                 </div>
-                {t.usdcAmount !== 0n ? (
+                {t.swap ? (
+                  // what the swap brought in; what it took is on the line above
+                  <span className="tx-amount tnum tx-amount-in">
+                    {t.amount < 0n
+                      ? `+${formatSolUsdc(chain, t.usdcAmount)} ${chain.usdc.symbol}`
+                      : `+${formatSol(t.amount)} SOL`}
+                  </span>
+                ) : t.usdcAmount !== 0n ? (
                   <span className={`tx-amount tnum ${t.usdcAmount > 0n ? 'tx-amount-in' : ''}`}>
                     {t.usdcAmount > 0n ? '+' : ''}
                     {formatSolUsdc(chain, t.usdcAmount)} {chain.usdc.symbol}

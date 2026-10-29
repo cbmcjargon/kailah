@@ -1,7 +1,8 @@
 // Is a live site serving exactly this build? Fetches every file of dist/ from
 // each origin, compares it byte for byte with the local build, and checks that
 // every response carries the security headers of public/_headers, value for
-// value. Run from the repo root, on the commit the site should be serving:
+// value, and that every page tells browsers to re-check it (no-cache or
+// max-age=0). Run from the repo root, on the commit the site should be serving:
 //   npm ci && npm run build && npm run verify:live [origin ...]
 // With no origin it checks both official ones. Exits 0 only if all match.
 //
@@ -81,6 +82,12 @@ for (const origin of ORIGINS) {
       if (got === null) problems.push(`${shown}: missing header ${name}`)
       else if (got !== value) problems.push(`${shown}: header ${name} differs: ${got.slice(0, 80)}`)
     }
+    // A page must be re-checked on every visit: one a browser kept could
+    // point at chunks a redeploy removed (review 2026-10-29).
+    if (path === '' || path.endsWith('.html')) {
+      const cache = r.headers.get('cache-control') ?? ''
+      if (!/no-cache|max-age=0\b/i.test(cache)) problems.push(`${shown}: a browser may reuse this page (Cache-Control: ${cache || 'none'})`)
+    }
     let body = r.body
     const want = local(path)
     if (!body.equals(want) && (path === '' || path.endsWith('.html'))) {
@@ -99,6 +106,7 @@ for (const origin of ORIGINS) {
   } else {
     console.log(`  ✓ ${paths.length} responses byte-identical to the local build` + (normalized ? ` (${normalized} HTML after removing Netlify's hosting comment)` : ''))
     console.log(`  ✓ all ${Object.keys(expected).length} security headers on every response, equal to public/_headers`)
+    console.log('  ✓ every page tells browsers to re-check it (no-cache or max-age=0)')
   }
 }
 console.log(failed ? '\nMISMATCH: the site is not serving this build.' : '\nMATCH: every origin serves exactly this build.')

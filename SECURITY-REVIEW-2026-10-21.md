@@ -795,7 +795,14 @@ not exercised live.
    once that is published.
 2. **Solana swaps.** Simulation runs on a single RPC. (The route's on-chain
    slippage floor, finding 2's other residual, is decoded since 2026-10-25;
-   see "Swaps on Jupiter Swap V2".)
+   see "Swaps on Jupiter Swap V2".) *2026-10-29:* mainnet now has a second
+   RPC (Pocket Network's public gateway). Reads fail over to it, and the
+   double-pay guard asks both and needs them to agree (the lower block
+   height; "landed" or "never seen" only when both say so), which closes
+   the 2026-10-26 residual of a single lying RPC ending a hold. Simulation
+   still uses the first RPC that answers. The same day, the mirror's pages
+   got "Cache-Control: no-cache" (the 2026-10-26 residual about
+   `index.html`), effective at its next redeploy.
 3. **UTXO frontier.** A provider that lies consistently across many full
    scans can ratchet the cached frontier about 20 indices per scan (finding
    7's residual). Closing this needs multi-provider corroboration.
@@ -803,7 +810,11 @@ not exercised live.
    tip heights but returns 404 for address lookups, so it can't run the
    wallet's scans. Practice-mode Bitcoin depends on mempool.space alone.
    This is safe: a failed scan surfaces as an error, never as an empty
-   wallet. But it is a single point of failure.
+   wallet. But it is a single point of failure. *Resolved 2026-10-28:*
+   blockstream.info now serves testnet4 (every lookup a scan makes) and
+   replaced mempool.emzy.de, as a backup (it caps each IP at 700 requests
+   an hour); after a failed scan,
+   background polls back off from one minute to ten (check-failover K).
 5. **Unexercised end to end:** a Speed up of a real stuck transaction. This
    was attempted on testnet4 on 2026-10-22 and blocked: mempool.space timed
    out from the development machine over both IPv4 and IPv6, and the backup

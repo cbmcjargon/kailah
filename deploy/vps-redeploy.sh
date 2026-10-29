@@ -75,39 +75,26 @@ tar -C dist -cf - . | remote "rm -rf '$STAGE' && mkdir -p '$STAGE' && tar -C '$S
 #    inherits NONE of the server-level ones, which once left the service
 #    worker and the Argon2 worker without a CSP on this origin. A location
 #    whose `{` is not on its own line stops the run before anything is
-#    written. sites-enabled/<name> is usually a symlink into sites-available:
-#    back up and rewrite the REAL file so the backup never lands in an
+#    written. HTML responses also get "Cache-Control: no-cache"
+#    (deploy/nginx-site.awk), so a browser never reuses a page whose chunks
+#    a redeploy removed. sites-enabled/<name> is usually a symlink into
+#    sites-available: back up and rewrite the REAL file so the backup never lands in an
 #    include dir (nginx would load it as a duplicate server block).
 #    Syntax-check, then reload.
 scp "${SSH_OPTS[@]}" "$HEADERS_FILE" "$WALLET_VPS:/tmp/wallet-headers.conf"
 scp "${SSH_OPTS[@]}" "$GZIP_FILE" "$WALLET_VPS:/tmp/wallet-gzip.conf"
+# The rewrite itself (deploy/nginx-site.awk, run offline by check-headers)
+# also adds "Cache-Control: no-cache" to every HTML response.
+scp "${SSH_OPTS[@]}" deploy/nginx-site.awk "$WALLET_VPS:/tmp/wallet-site.awk"
 rm -f "$HEADERS_FILE" "$GZIP_FILE"
 remote "
   set -e
   real=\$(readlink -f '$SITE')
   cp -p \"\$real\" \"\$real.bak-\$(date +%Y%m%d-%H%M%S)\"
-  awk -v hdrs=\"\$(cat /tmp/wallet-headers.conf)\" -v gz=\"\$(cat /tmp/wallet-gzip.conf)\" -v managed='$MANAGED' '
-    BEGIN {
-      n = split(managed, arr, \" \"); for (i = 1; i <= n; i++) if (arr[i] != \"\") m[arr[i]] = 1
-      loc = \"    \" hdrs; gsub(/\n/, \"\n    \", loc)
-    }
-    {
-      drop = 0
-      if (\$0 ~ /^[[:space:]]*add_header[[:space:]]/) {
-        name = \$0; sub(/^[[:space:]]*add_header[[:space:]]+/, \"\", name); sub(/[[:space:]].*/, \"\", name)
-        if (name in m) drop = 1
-      }
-      if (\$0 ~ /^[[:space:]]*gzip(_[a-z_]+)?[[:space:]]/ || \$0 ~ /kailah-gzip/) drop = 1
-      if (!drop) print
-      if (!done && \$0 ~ /^[[:space:]]*root[[:space:]]/) { print hdrs; print gz; done = 1 }
-      if (\$0 ~ /^[[:space:]]*location[[:space:]]/) {
-        if (\$0 !~ /\{[[:space:]]*(#.*)?\$/) { print \"location without { on its line: \" \$0 > \"/dev/stderr\"; exit 3 }
-        print loc
-      }
-    }
-  ' \"\$real\" > /tmp/wallet-site.new
+  awk -v hdrsfile=/tmp/wallet-headers.conf -v gzfile=/tmp/wallet-gzip.conf -v managed='$MANAGED' \\
+    -f /tmp/wallet-site.awk \"\$real\" > /tmp/wallet-site.new
   cat /tmp/wallet-site.new > \"\$real\"
-  rm -f /tmp/wallet-site.new /tmp/wallet-headers.conf /tmp/wallet-gzip.conf
+  rm -f /tmp/wallet-site.new /tmp/wallet-headers.conf /tmp/wallet-gzip.conf /tmp/wallet-site.awk
   nginx -t && systemctl reload nginx
 "
 
@@ -120,6 +107,10 @@ ENTRY=$(grep -o 'assets/index-[^"]*\.js' dist/index.html | head -1)
 echo "entry chunk on the wire: $(curl -s -o /dev/null -H 'Accept-Encoding: gzip' \
   -w '%header{content-encoding} %{size_download} bytes' "https://wallet.photoprompting.org/$ENTRY")" \
   "(raw $(wc -c < "dist/$ENTRY" | tr -d ' ') bytes)"
+# The page must be re-checked on every visit; chunks keep their own policy.
+PAGE_CACHE=$(curl -sSI https://wallet.photoprompting.org/ | grep -i '^cache-control:' | tr -d '\r')
+echo "page ${PAGE_CACHE:-cache-control: (none)}"
+echo "$PAGE_CACHE" | grep -qi 'no-cache' || { echo "the page is missing Cache-Control: no-cache" >&2; exit 1; }
 # One path per location block: every one must carry the whole managed set.
 WANT=$(echo "$MANAGED" | wc -w | tr -d ' ')
 for P in / /sw.js "/$ENTRY"; do

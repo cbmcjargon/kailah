@@ -477,6 +477,21 @@ try {
   }
 }
 
+// --- 8b. A route capped for size: the one smaller route prepareSwap asks for
+//     when the best route won't fit in a transaction (2026-10-29) ----------
+try {
+  const { SMALLER_ROUTE_MAX_ACCOUNTS } = await import('../src/lib/solswap.ts')
+  const qc = await getSwapQuote(MAINNET, 'sol-to-usdc', 100_000_000n, BINANCE_HOT, [], SMALLER_ROUTE_MAX_ACCOUNTS)
+  const pc = await prepareSwap(MAINNET, BINANCE_HOT, qc)
+  check(
+    `a route capped at ${SMALLER_ROUTE_MAX_ACCOUNTS} accounts (the size retry) passes the whole gate on mainnet`,
+    pc.simulatedUsdcDelta >= pc.minOutAmount && pc.swapFee > 0n && pc.simplerRoute === false,
+    `route ${pc.route.join(' > ')}, ${pc.simulatedUsdcDelta} USDC units`,
+  )
+} catch (e) {
+  check('a route capped for size passes the gate', false, e.message)
+}
+
 // --- 9. USDC→SOL build direction --------------------------------------------
 try {
   const q = await getSwapQuote(MAINNET, 'usdc-to-sol', 10_000_000n, BINANCE_HOT)

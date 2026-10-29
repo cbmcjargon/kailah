@@ -28,6 +28,10 @@
 //   J. before a Speed up (BH5): a payment sent since that the network doesn't
 //      show yet blocks it (a scan can't see what it spends); the transaction
 //      being replaced, and attempts the network shows, don't.
+//   M. two Solana servers (review 2026-10-29): a read fails over to the
+//      second; the hold ends on the LOWER of their block heights, and
+//      "landed" or "never seen" counts only when every server that answers
+//      agrees; a refusal after the first server went quiet keeps the record.
 const store = new Map()
 globalThis.localStorage = {
   getItem: (k) => (store.has(k) ? store.get(k) : null),
@@ -1203,6 +1207,97 @@ console.log('--- L. resends: a refusal is about the resend, not the first try (r
       utxo.replacementFloorFrom(br?.message ?? '', 8) === 1046n, br?.message)
   }
   clearUtxo()
+  globalThis.fetch = mockRpc
+}
+
+console.log('--- M. two Solana servers: either can serve a read, neither alone ends a hold (review 2026-10-29) ---')
+{
+  const mockRpc = globalThis.fetch
+  const MAIN = sol.SOL_CHAINS.sol
+  const [A, B] = MAIN.rpcs
+  check('M1 Solana mainnet asks publicnode, then Pocket Network\'s public gateway', MAIN.rpcs.join() === 'https://solana-rpc.publicnode.com,https://solana.api.pocket.network', MAIN.rpcs.join())
+  // each server's own behaviour: 'down' (no answer), a height, a status, a send outcome
+  const srv = {}
+  const reset = () => {
+    srv[A] = { height: 1000, status: 'unseen', send: 'ok' }
+    srv[B] = { height: 1000, status: 'unseen', send: 'ok' }
+  }
+  const asked = []
+  globalThis.fetch = async (url, init) => {
+    const u = String(url)
+    const me = srv[u]
+    if (me === undefined) throw new Error(`unexpected server ${u}`)
+    const { id, method } = JSON.parse(init.body)
+    asked.push(`${u === A ? 'A' : 'B'}:${method}`)
+    if (me.down) throw new TypeError('Load failed')
+    switch (method) {
+      case 'getEpochInfo': return reply(id, { result: { blockHeight: me.height, absoluteSlot: me.height + 22_000_000, epoch: 500 } })
+      case 'getSignatureStatuses':
+        return reply(id, { result: { context: { slot: 1 }, value: [me.status === 'unseen' ? null : { slot: 1, confirmations: null, err: me.status === 'failed' ? { InstructionError: [0, { Custom: 1 }] } : null, confirmationStatus: 'confirmed' }] } })
+      case 'sendTransaction':
+        if (me.send === 'refused') return reply(id, { error: { code: -32002, message: 'Transaction simulation failed: Attempt to debit an account but found no record of a prior credit.' } })
+        return reply(id, { result: 'sig' })
+      case 'getBalance': return reply(id, { result: { context: { slot: 1 }, value: 4_200_000 } })
+      default: return reply(id, { error: { code: -32601, message: `mock: no ${method}` } })
+    }
+  }
+  const clearMain = () => { for (const p of ledger.pendingSol(MAIN.id)) ledger.dropPending(p) }
+  const rec = (sig, lvbh, extra = {}) => {
+    const p = { kind: 'sol', chainId: MAIN.id, signature: sig, ts: Date.now() - 30_000, lastValidBlockHeight: lvbh, ...extra }
+    ledger.recordPending(p)
+    return p
+  }
+  const guard = () => sol.assertNoSolInFlight(MAIN).then(() => null, (e) => e)
+
+  reset(); srv[A].down = true
+  const bal = await sol.getSolBalance(MAIN, 'HAgk14JpMQLgt6rVgv7cBQFJWFto5Dqxi472uT3DKpqk').catch((e) => e)
+  check('M2 with publicnode down, a read is answered by the second server', bal === 4_200_000n, String(bal?.message ?? bal))
+
+  // the hold ends on the LOWER height: one server can't end it early
+  reset(); clearMain(); rec('M3', 1500)
+  srv[A].height = 1600; srv[B].height = 1490
+  const held = await guard()
+  check('M3 one server reports the chain past an attempt\'s last valid height, the other doesn\'t: the send is still held',
+    /may still go through/.test(held?.message ?? ''), held?.message?.slice(0, 60) ?? 'released!')
+  srv[B].height = 1510
+  const freed = await guard()
+  check('M3b ...and once both are past it, the attempt that never showed is released', freed === null && ledger.pendingSol(MAIN.id).length === 0, freed?.message)
+
+  // "landed" or "unseen" counts only when every server that answers agrees
+  reset(); clearMain(); rec('M4', 5000)
+  srv[A].status = 'ok'; srv[B].status = 'unseen'
+  const split = await guard()
+  check('M4 one server says the attempt landed, the other has never seen it: the wallet says it couldn\'t check, and holds',
+    /Couldn't check whether your send/.test(split?.message ?? '') && ledger.pendingSol(MAIN.id).length === 1, split?.message?.slice(0, 60))
+  srv[B].status = 'ok'
+  const agreed = await guard()
+  check('M4b ...both say it landed: the record is settled', agreed === null && ledger.pendingSol(MAIN.id).length === 0, agreed?.message)
+  reset(); clearMain(); rec('M4c', 5000); srv[A].down = true; srv[B].status = 'ok'
+  const oneUp = await guard()
+  check('M4c with one server down, the other\'s answer is used (no worse than one server)', oneUp === null && ledger.pendingSol(MAIN.id).length === 0, oneUp?.message)
+  reset()
+  check('M4d the status lookups and the height ask both servers', ['A:getSignatureStatuses', 'B:getSignatureStatuses'].every((m) => asked.includes(m)) && ['A:getEpochInfo', 'B:getEpochInfo'].every((m) => asked.includes(m)))
+
+  // a refusal after the first server went quiet proves nothing
+  reset(); clearMain()
+  srv[A].down = true; srv[B].send = 'refused'
+  const entry = rec('M5', 9_999_999)
+  const quiet = await rejects(() => sol.submitSolTx(MAIN, 'M5', 'AAAA', entry))
+  check('M5 publicnode goes quiet, then Pocket refuses: "it may still go through", and the record stays (marked failed)',
+    quiet instanceof sol.SolBroadcastError && /may still go through/.test(quiet.message) && ledger.pendingSol(MAIN.id).some((p) => p.signature === 'M5' && p.failed === true),
+    quiet?.message?.slice(0, 70))
+  reset(); clearMain()
+  srv[A].send = 'refused'; srv[B].send = 'refused'
+  const entry2 = rec('M5b', 9_999_999)
+  const both = await rejects(() => sol.submitSolTx(MAIN, 'M5b', 'AAAA', entry2))
+  check('M5b both servers refuse in their test run: "Nothing was sent", and the record goes',
+    /Nothing was sent/.test(both?.message ?? '') && !ledger.pendingSol(MAIN.id).some((p) => p.signature === 'M5b'), both?.message?.slice(0, 70))
+  reset(); clearMain()
+  srv[A].send = 'refused'
+  const entry3 = rec('M5c', 9_999_999)
+  const second = await sol.submitSolTx(MAIN, 'M5c', 'AAAA', entry3).catch((e) => e)
+  check('M5c the first server refuses (a lagging node, say) and the second takes it: sent', second === 'M5c', String(second?.message ?? second))
+  clearMain()
   globalThis.fetch = mockRpc
 }
 

@@ -321,7 +321,8 @@ async function failoverSection() {
   // --- FailoverClient actually falls over: bad-first provider, real second.
   console.log('\n=== failover ===')
   const badSpec = { name: 'bad-first', kind: 'esplora', base: 'https://nonexistent.invalid/api', pageSize: 25 }
-  const goodSpec = CHAINS.btc.providers[1] // blockstream.info
+  // a regular provider: a backup (blockstream.info) is never remembered as active
+  const goodSpec = CHAINS.btc.providers.find((p) => p.name === 'mempool.emzy.de')
   const failover = createFailoverClient([
     new EsploraProvider(badSpec, CHAINS.btc),
     new EsploraProvider(goodSpec, CHAINS.btc),
@@ -334,7 +335,7 @@ async function failoverSection() {
   )
   check(
     'failover: activeProvider is now the healthy second provider',
-    failover.activeProvider() === 'blockstream.info',
+    failover.activeProvider() === 'mempool.emzy.de',
     failover.activeProvider(),
   )
   // Once the healthy provider is remembered, the next call must not re-touch the

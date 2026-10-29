@@ -6,11 +6,12 @@ import type { ChainConfig, ChainId, NetMode } from './types'
 // is retained as the index-0 receive address for display/back-compat.
 //
 // Providers are ordered; api.ts fails over down the list. CORS for every base
-// was verified live from the wallet origin (2026-07-20). Only BTC mainnet has
-// a genuine second provider (testnet4's backup can't serve address lookups);
-// Litecoin has a backup-only one (BlockCypher, 2026-10-26); the others run
-// single-provider through the same failover client. Scanning is per-address gap-limit (see scanner.ts), which
-// works uniformly on every one of these esplora/blockcypher backends.
+// was verified live from the wallet origin (2026-07-20). BTC mainnet (three
+// mempool instances) and Dogecoin have a genuine second provider; BTC
+// mainnet and testnet4 (blockstream.info) and Litecoin (Bitcore, BlockCypher)
+// have backup-only ones too. Scanning is
+// per-address gap-limit (see scanner.ts), which works uniformly on every one
+// of these esplora/blockcypher/bitcore backends.
 
 // SLIP-0132 version bytes (kept for interoperability/export display).
 const ZPUB = { public: 0x04b24746, private: 0x04b2430c } // BTC/LTC mainnet BIP84
@@ -25,12 +26,22 @@ export const CHAINS: Record<ChainId, ChainConfig> = {
     providers: [
       // Ordered by preference; api.ts health-probes and starts on a live one.
       // Community mempool instances verified 2026-08-01 (CORS *, tips agree).
-      // blockstream.info sits last: it hard-caps 700 requests/hour per IP,
-      // which normal polling exhausts — good spare tire, bad daily driver.
+      // blockstream.info hard-caps 700 requests/hour per IP, which normal
+      // polling exhausts — good spare tire, bad daily driver. So it is a
+      // backup (2026-10-29), as on testnet4: asked only while all three
+      // mempool instances fail, never for a mere rate limit, polled every
+      // 10 minutes meanwhile, and its 429 is never retried.
       { name: 'mempool.space', kind: 'esplora', base: 'https://mempool.space/api', pageSize: 50 },
       { name: 'mempool.emzy.de', kind: 'esplora', base: 'https://mempool.emzy.de/api', pageSize: 50 },
       { name: 'mempool.bitaroo.net', kind: 'esplora', base: 'https://mempool.bitaroo.net/api', pageSize: 50 },
-      { name: 'blockstream.info', kind: 'esplora', base: 'https://blockstream.info/api', pageSize: 25 },
+      {
+        name: 'blockstream.info',
+        kind: 'esplora',
+        base: 'https://blockstream.info/api',
+        pageSize: 25,
+        backupOnly: true,
+        budgetLimited: true,
+      },
     ],
     explorerTx: (t) => `https://mempool.space/tx/${t}`,
     explorerAddr: (a) => `https://mempool.space/address/${a}`,
@@ -55,7 +66,22 @@ export const CHAINS: Record<ChainId, ChainConfig> = {
     mainnet: false,
     providers: [
       { name: 'mempool.space', kind: 'esplora', base: 'https://mempool.space/testnet4/api', pageSize: 50 },
-      { name: 'mempool.emzy.de', kind: 'esplora', base: 'https://mempool.emzy.de/testnet4/api', pageSize: 50 },
+      // Every lookup a scan makes, verified live 2026-10-28 (testnet4's
+      // genesis, CORS *, 25 txs a page). It replaced mempool.emzy.de, whose
+      // testnet4 answers tips but 404s every address lookup: practice
+      // Bitcoin had depended on mempool.space alone. A backup, like
+      // Litecoin's: it caps each IP at 700 requests an hour (one restore of
+      // the test wallet took 203), so it serves only while mempool.space
+      // fails, the card polls every 10 minutes meanwhile, and its 429 is
+      // never retried.
+      {
+        name: 'blockstream.info',
+        kind: 'esplora',
+        base: 'https://blockstream.info/testnet4/api',
+        pageSize: 25,
+        backupOnly: true,
+        budgetLimited: true,
+      },
     ],
     explorerTx: (t) => `https://mempool.space/testnet4/tx/${t}`,
     explorerAddr: (a) => `https://mempool.space/testnet4/address/${a}`,

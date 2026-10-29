@@ -1,10 +1,10 @@
 // api.ts — getClient(chain): a FailoverClient over the chain's ordered
 // ProviderApi list (types.ts / networks.ts). Providers are tried in order; the
 // last-good one is remembered and tried first next time. BTC mainnet and
-// Dogecoin (BlockCypher + Bitcore) have a genuine second provider, and
-// Litecoin two backup-only ones (Bitcore, then BlockCypher;
-// ProviderApi.backupOnly); testnet4 runs single-provider through the same
-// client so the seam is uniform.
+// Dogecoin (BlockCypher + Bitcore) have a genuine second provider, Litecoin
+// two backup-only ones (Bitcore, then BlockCypher; ProviderApi.backupOnly),
+// and BTC mainnet and testnet4 one each (blockstream.info, capped at 700
+// requests an hour).
 
 import type {
   AccountUtxo,
@@ -97,8 +97,8 @@ class FailoverClientImpl implements FailoverClient {
    * black-holed provider and each pays the full request timeout — the live
    * mempool.space outage (2026-08-01) turned every Bitcoin refresh into
    * minutes of stalls. Cooled-down providers are skipped while the cooldown
-   * lasts, but always remain as last resort so a single-provider chain
-   * (testnet4) still gets attempted.
+   * lasts, but always remain as last resort so a chain with one regular
+   * provider (Litecoin, testnet4) still gets attempted.
    */
   private static readonly DOWN_COOLDOWN_MS = 60_000
   private downUntil: number[] = []

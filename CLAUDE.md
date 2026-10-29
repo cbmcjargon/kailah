@@ -1,6 +1,6 @@
 # Kailah Wallet — maintenance notes
 
-Self-custody browser wallet, v2.7.7: four engines — UTXO (BTC/DOGE/LTC),
+Self-custody browser wallet, v2.7.8: four engines — UTXO (BTC/DOGE/LTC),
 EVM (USDC+ETH on Base/Ethereum/Arbitrum + BNB on BSC, no explorer API there),
 Solana (SOL + SPL USDC + Jupiter swaps + native staking via hand-built
 stake-program instructions in solstake.ts), TRON (TRX + USDT-TRC20 + Stake 2.0 via tron.ts/tronstake.ts — the node builds raw txs and the wallet DECODES the protobuf bytes
@@ -29,14 +29,16 @@ not feature building, unless the user asks for something new.
 - Deploy: Netlify (`npx netlify-cli deploy --prod --dir=dist --site …`) and the
   nginx mirror (`deploy/vps-redeploy.sh`, which also regenerates the mirror's
   security headers from public/_headers, so redeploy it whenever the CSP hosts
-  change). Site ID, host and access live in ops/infrastructure.md, which is
+  change, and gives HTML "Cache-Control: no-cache" through
+  deploy/nginx-site.awk, which check-headers C runs offline; verify:live
+  fails a page a browser may reuse). Site ID, host and access live in ops/infrastructure.md, which is
   private (see "Public repository" below): @ops/infrastructure.md
   The Netlify CLI rewrites .netlify/netlify.toml's `publish` to this Mac's
   absolute path on every deploy. Restore `publish = "dist"` before
   committing, and never `git add -A` right after a deploy without checking.
   The public snapshot's leak scan refuses that path (it caught it once,
   2026-10-25).
-- Tests: `npm run check:offline` (keys, txbuild, txv2, qrparse, vault, scanner, hw, pending, netprefs, failover, swapgate, lookalike, trondecode, bitcore, amounts, sw —
+- Tests: `npm run check:offline` (keys, txbuild, txv2, qrparse, vault, scanner, hw, pending, netprefs, failover, swapgate, lookalike, trondecode, bitcore, amounts, sw, headers —
   no network; this is what CI runs on every push) and `npm run check:live`
   (account, evm, sol, solswap, solstake, tron — real networks; a provider being
   down or rate-limited prints SKIP, never FAIL). check-providers.mjs is run by
@@ -77,6 +79,8 @@ not feature building, unless the user asks for something new.
   must list exactly the hosts called by networks.ts providers + prices.ts +
   evm.ts (Base RPCs + blockscout) + the sol.ts/tron.ts RPCs + solswap.ts
   (Jupiter Swap V2, api.jup.ag). PRIVACY.md lists the same hosts.
+  check-headers B proves both ways (nothing missing, nothing stale) from the
+  modules' own configs, and that no other module calls fetch.
 - The EVM engine (evm.ts, USDC on Base) is intentionally separate from the
   UTXO stack: account model, viem signing with pinned chainId, no address
   rotation. Never blind-retry a failed EVM broadcast with a FRESH nonce: a
@@ -127,7 +131,13 @@ not feature building, unless the user asks for something new.
   retried after 1.5/4/8 s; BlockCypher (budgetLimited) is never spent to
   dodge the active provider's pause; a provider that never answered is down
   for 60 s. The start-up probe starts on the first provider IN CONFIGURED
-  ORDER that answers, never on the fastest. check-failover proves all of it. Don't add retries inside a provider: a second
+  ORDER that answers, never on the fastest. After a failed scan, background
+  polls of that account back off 1→2→4→8→10 min (lib/pollbackoff.ts; a
+  refresh, unlock or mode change never waits): a failed full gap walk used to
+  be resent every 60 s. Testnet4's backup is blockstream.info, backupOnly
+  and budgetLimited like Litecoin's (700 requests an hour per IP; one
+  restore of the test wallet takes ~200): mempool.emzy.de's testnet4 404s
+  address lookups, so it is no backup. check-failover proves all of it. Don't add retries inside a provider: a second
   layer multiplies requests, and mempool.space and mempool.emzy.de block a
   whole IP for a while after heavy bursts (2026-10-25). Keep live testnet
   scans and burst tests rare.
@@ -174,8 +184,13 @@ not feature building, unless the user asks for something new.
   broadcast is recorded BEFORE it goes out, and a new send is refused while
   an attempt may still land (EVM: every attempt per nonce stays recorded,
   a same-nonce retry outbids by 10 %, "unknown" blocks for 10 min; Solana:
-  held until the RPC's block height passes the blockhash's last valid
-  height, and a failed broadcast is retried with the SAME bytes; TRON: until
+  held until the chain's block height passes the blockhash's last valid
+  height — mainnet has two RPCs (publicnode, then Pocket Network) and the
+  guard asks both (rpcEach): the LOWER height counts, and "landed" or
+  "never seen" only when every RPC that answers agrees, so one server alone
+  can't end a hold; a refusal after one RPC went quiet keeps the record
+  (afterNetworkError) — and a failed broadcast is retried with the SAME
+  bytes; TRON: until
   the tx's own window ends on THIS device's clock (holdUntil: the later of
   expiration − timestamp from now and the expiration itself, since nothing
   checks the timestamp), bounded to 10 min, and "Send again" re-posts the
@@ -205,9 +220,21 @@ not feature building, unless the user asks for something new.
   under its own name, 2026-10-27's 0xffff) via api.jup.ag's
   program-id-to-label, and rebuilt ONCE with excludeDexes; the fresh route
   goes through the whole gate again. Plumbing failures (system, token,
-  ATA, compute budget) are never re-routed. The market-rate warning runs on
+  ATA, compute budget) are never re-routed. A route whose assembled
+  transaction is over 1,232 bytes is caught before anything is simulated
+  and rebuilt ONCE with maxAccounts=32 (SMALLER_ROUTE_MAX_ACCOUNTS), which
+  then also caps the re-route; still too large ends in plain words. The market-rate warning runs on
   the form AND the review, since the route prepared can differ from the
-  form's quote (30 s rebuild, re-route).
+  form's quote (30 s rebuild, re-route). The form's quote refreshes every
+  20 s while the form shows one and the page is visible (a hidden tab or the
+  review asks Jupiter nothing). Solana activity calls a row "Swapped" only
+  when Jupiter's program ran and our SOL and USDC moved opposite ways
+  (sol.isSwapDelta), with no other token of ours moved: a fee beside
+  arriving USDC is a claim, not a swap (check-swapgate M). History asks for
+  transactions up to version 1 (SOL_HISTORY_TX_VERSION; v1 is live on
+  mainnet, and at 0 the node refused them, so payments in one never showed);
+  raise it only after checking the new version's jsonParsed shape
+  (check-swapgate N).
 - The lookalike check trusts only the wallet's own send log (lib/sentlog.ts),
   never history rows.
 - Test wallet for dev flows: the public BIP39 vector phrase (abandon ×11 +

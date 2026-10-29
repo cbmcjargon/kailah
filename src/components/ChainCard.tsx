@@ -141,15 +141,25 @@ export default function ChainCard({
         )}
       </div>
 
-      {error !== null && !loading && (
+      {error !== null && !loading && chain.mainnet && (
         <div className="chain-error" role="alert">
-          <span>
-            {error}
-            {!chain.mainnet &&
-              ' Test-network services are often overloaded; your address and Get coins still work, and real networks have more providers.'}
-          </span>
+          <span>{error}</span>
           <button type="button" className="btn btn-ghost btn-small" onClick={onRefresh}>
             Retry
+          </button>
+        </div>
+      )}
+      {error !== null && !loading && !chain.mainnet && (
+        // A test network's free services are often busy, and a practice
+        // balance holds nothing of value: a calm note, not an alarm. The
+        // scan's own message stays on hover (review 2026-10-28).
+        <div className="chain-note" role="status" title={error}>
+          <span>
+            Couldn&rsquo;t check the test network just now; its free data services are often busy.
+            Kailah tries again on its own, and your address and Get coins still work.
+          </span>
+          <button type="button" className="btn btn-ghost btn-small" onClick={onRefresh}>
+            Check now
           </button>
         </div>
       )}

@@ -67,7 +67,12 @@ export const SOL_CHAINS: Record<SolChainId, SolChainConfig> = {
     networkName: 'Solana',
     feeNote: 'Network fees on Solana are a flat ~0.000005 SOL — effectively free.',
     mainnet: true,
-    rpcs: ['https://solana-rpc.publicnode.com'],
+    // In order; rpc() fails over down the list. Pocket Network's public
+    // gateway (2026-10-29) answers every method the wallet uses, version-1
+    // transactions included, with CORS for the wallet's origins; Solana's own
+    // api.mainnet-beta refuses browser origins. The double-pay guard asks
+    // both (rpcEach): one server alone can't end a hold.
+    rpcs: ['https://solana-rpc.publicnode.com', 'https://solana.api.pocket.network'],
     explorerTx: (s) => `https://explorer.solana.com/tx/${s}`,
     explorerAddr: (a) => `https://explorer.solana.com/address/${a}`,
     decimals: 9,
@@ -190,41 +195,72 @@ export async function solRpc<T>(
   return rpc(chain, method, params)
 }
 
+/** An RPC's own error answer, as opposed to no answer at all. */
+class RpcAnswerError extends Error {}
+
+/** One request to one RPC. Throws RpcAnswerError for an error answer, anything else for no usable answer. */
+async function rpcAt<T>(chain: SolChainConfig, url: string, method: string, params: unknown[]): Promise<T> {
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),
+    // Hard deadline: a black-holed RPC must fail over in seconds, not
+    // hang for the browser's minute-plus connect timeout. (Older Safari
+    // lacks AbortSignal.timeout — degrade to no deadline there.)
+    signal:
+      typeof AbortSignal !== 'undefined' && 'timeout' in AbortSignal
+        ? AbortSignal.timeout(15_000)
+        : undefined,
+  })
+  const body = (await res.json()) as { result?: T; error?: RpcError }
+  if (body.error) {
+    throw new RpcAnswerError(body.error.message ?? `${chain.name} RPC error`)
+  }
+  return body.result as T
+}
+
+/** The error rpc() and rpcEach() throw when no RPC answered at all. */
+function unreachableError(chain: SolChainConfig): Error {
+  // for a read that's harmless; a broadcast reads `unreachable` as "it may
+  // have gone out" (submitSolTx)
+  return Object.assign(
+    new Error(`Couldn't reach the ${chain.networkName} network right now. Your coins are safe; try again in a few minutes.`),
+    { unreachable: true },
+  )
+}
+
 async function rpc<T>(chain: SolChainConfig, method: string, params: unknown[]): Promise<T> {
   let lastErr: unknown
+  let silent = false
   for (const url of chain.rpcs) {
     try {
-      const res = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),
-        // Hard deadline: a black-holed RPC must fail over in seconds, not
-        // hang for the browser's minute-plus connect timeout. (Older Safari
-        // lacks AbortSignal.timeout — degrade to no deadline there.)
-        signal:
-          typeof AbortSignal !== 'undefined' && 'timeout' in AbortSignal
-            ? AbortSignal.timeout(15_000)
-            : undefined,
-      })
-      const body = (await res.json()) as { result?: T; error?: RpcError }
-      if (body.error) {
-        throw new Error(body.error.message ?? `${chain.name} RPC error`)
-      }
-      return body.result as T
+      return await rpcAt<T>(chain, url, method, params)
     } catch (e) {
       lastErr = e
+      if (!(e instanceof RpcAnswerError)) silent = true
     }
   }
-  const detail = lastErr instanceof Error ? lastErr.message : String(lastErr)
-  if (lastErr instanceof TypeError || /load failed|failed to fetch|networkerror|timed? ?out|abort/i.test(detail)) {
-    // no answer at all: for a read that's harmless; a broadcast reads
-    // `unreachable` as "it may have gone out" (submitSolTx)
-    throw Object.assign(
-      new Error(`Couldn't reach the ${chain.networkName} network right now. Your coins are safe; try again in a few minutes.`),
-      { unreachable: true },
-    )
-  }
-  throw new Error(detail)
+  if (!(lastErr instanceof RpcAnswerError)) throw unreachableError(chain)
+  // An answer after another RPC went quiet: for a broadcast, the quiet one
+  // may have taken the bytes before its answer was lost, so a refusal here
+  // proves nothing about them (submitSolTx; the UTXO side's api.ts does the
+  // same, review 2026-10-28).
+  throw Object.assign(new Error(lastErr.message), silent ? { afterNetworkError: true } : {})
+}
+
+/**
+ * The same request to EVERY RPC at once, for the answers the double-pay
+ * guard ends a hold on: one server alone, lying or lagging, must not decide
+ * that an attempt landed, didn't, or can no longer land. Returns the answers
+ * of the RPCs that gave one; throws when none did.
+ */
+async function rpcEach<T>(chain: SolChainConfig, method: string, params: unknown[]): Promise<T[]> {
+  const settled = await Promise.allSettled(chain.rpcs.map((url) => rpcAt<T>(chain, url, method, params)))
+  const answers = settled.flatMap((s) => (s.status === 'fulfilled' ? [s.value] : []))
+  if (answers.length > 0) return answers
+  const answered = settled.find((s) => s.status === 'rejected' && s.reason instanceof RpcAnswerError)
+  if (answered?.status === 'rejected') throw new Error((answered.reason as Error).message)
+  throw unreachableError(chain)
 }
 
 export async function getSolBalance(chain: SolChainConfig, address: string): Promise<bigint> {
@@ -304,6 +340,47 @@ export interface SolTx {
   time: number | null
   counterparty: string | null
   failed: boolean
+  /** our SOL and USDC moved opposite ways: a swap (isSwapDelta) */
+  swap: boolean
+}
+
+/** Jupiter's v6 swap program: what solswap.ts routes through, and what marks a swap in history. */
+export const JUPITER_V6_PROGRAM = 'JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4'
+
+/**
+ * Whether a transaction is a SOL ↔ USDC swap: Jupiter's program ran in it,
+ * our SOL and USDC moved opposite ways, and no other token of ours moved.
+ * Only a transaction we signed can take either from us, so this can't be
+ * planted by a sender. A swap used to show as "Received" the USDC it bought
+ * (or "Sent" the USDC it spent), with the other side hidden. Without the
+ * Jupiter check, USDC arriving beside a fee we paid (a claim, a refund) read
+ * as a swap of that fee (2026-10-29); without the other-token check, a swap
+ * of another token into USDC, made with this phrase in another wallet,
+ * would read as "Swapped SOL → USDC" for the fee.
+ */
+export function isSwapDelta(
+  lamports: bigint,
+  usdc: bigint,
+  tx: { failed: boolean; viaJupiter: boolean; otherTokenMoved: boolean },
+): boolean {
+  return (
+    tx.viaJupiter &&
+    !tx.failed &&
+    !tx.otherTokenMoved &&
+    lamports !== 0n &&
+    usdc !== 0n &&
+    lamports > 0n !== usdc > 0n
+  )
+}
+
+/** Whether any of `owner`'s token balances but `usdcMint` changed (wrapped SOL counts). */
+function otherTokenMoved(meta: ParsedTxMeta | null | undefined, usdcMint: string, owner: string): boolean {
+  const mints = new Set<string>()
+  for (const e of [...(meta?.preTokenBalances ?? []), ...(meta?.postTokenBalances ?? [])]) {
+    if (e.owner === owner && typeof e.mint === 'string' && e.mint !== usdcMint) mints.add(e.mint)
+  }
+  for (const mint of mints) if (usdcDeltaFor(meta, mint, owner) !== 0n) return true
+  return false
 }
 
 interface SigInfo {
@@ -326,6 +403,8 @@ interface ParsedTxMeta {
 }
 
 interface ParsedTxResult {
+  /** 'legacy', 0, or 1 */
+  version?: unknown
   blockTime?: number | null
   meta?: ParsedTxMeta | null
   transaction?: { message?: { accountKeys?: { pubkey?: string }[] } }
@@ -334,7 +413,18 @@ interface ParsedTxResult {
 /** Bounded per-refresh: 1 signatures call + up to this many detail fetches. */
 const HISTORY_DETAIL_LIMIT = 8
 
-/** Net USDC change for one owner across a parsed tx's token-balance lists. */
+/**
+ * The newest transaction version history asks for. Version 1 transactions
+ * are live on mainnet (about 1 in 9 of Jupiter's, 2026-10-29), and asked for
+ * at 0 the node refuses them, so a payment sent in one never showed in
+ * Activity. Their jsonParsed shape is v0's: account keys, then pre/post
+ * balances and token balances, index for index (checked live on both RPCs,
+ * which answer older transactions identically at 0 and 1). A newer version
+ * is refused by the node and skipped, never read in a shape not checked.
+ */
+export const SOL_HISTORY_TX_VERSION = 1
+
+/** Net change of one mint (USDC, or any other) for one owner across a parsed tx's token-balance lists. */
 function usdcDeltaFor(meta: ParsedTxMeta | null | undefined, mint: string, owner: string): bigint {
   const sum = (entries: TokenBalanceEntry[] | undefined) => {
     let v = 0n
@@ -376,13 +466,16 @@ export async function fetchSolHistory(chain: SolChainConfig, address: string): P
     try {
       const tx = await rpc<ParsedTxResult | null>(chain, 'getTransaction', [
         s.signature,
-        { encoding: 'jsonParsed', commitment: 'confirmed', maxSupportedTransactionVersion: 0 },
+        { encoding: 'jsonParsed', commitment: 'confirmed', maxSupportedTransactionVersion: SOL_HISTORY_TX_VERSION },
       ])
+      const version = tx?.version
+      if (!(version === undefined || version === 'legacy' || version === 0 || version === 1)) continue
       const keys = tx?.transaction?.message?.accountKeys ?? []
       const pre = tx?.meta?.preBalances ?? []
       const post = tx?.meta?.postBalances ?? []
       const myIndex = keys.findIndex((k) => k.pubkey === address)
-      if (pre.length !== post.length) continue
+      // balances are read by our key's index: the lists must line up
+      if (pre.length !== post.length || keys.length !== pre.length) continue
       const delta =
         myIndex < 0 ? 0n : BigInt(post[myIndex] ?? 0) - BigInt(pre[myIndex] ?? 0)
       const usdcDelta = usdcDeltaFor(tx?.meta, chain.usdc.mint, address)
@@ -425,6 +518,11 @@ export async function fetchSolHistory(chain: SolChainConfig, address: string): P
         time: tx?.blockTime ?? s.blockTime ?? null,
         counterparty,
         failed: s.err != null,
+        swap: isSwapDelta(delta, usdcDelta, {
+          failed: s.err != null,
+          viaJupiter: keys.some((k) => k.pubkey === JUPITER_V6_PROGRAM),
+          otherTokenMoved: otherTokenMoved(tx?.meta, chain.usdc.mint, address),
+        }),
       })
     } catch {
       // one unparseable tx never blocks the list
@@ -851,7 +949,10 @@ export async function submitSolTx(
         signed,
       )
     }
-    if (outcome === 'refused') {
+    // a refusal from one RPC after another went quiet proves nothing: the
+    // quiet one may have taken the bytes (rpc's afterNetworkError)
+    const afterSilence = (e as { afterNetworkError?: unknown } | null)?.afterNetworkError === true
+    if (outcome === 'refused' && !afterSilence) {
       if (resend) {
         throw new SolBroadcastError(
           `The network refused this second try in its test run: ${solRefusalText(msg)} The first try may still go through, so new sends on ${chain.networkName} wait until its window closes.`,
@@ -889,29 +990,41 @@ export async function rebroadcastSol(chain: SolChainConfig, signature: string, s
  * SLOT (~22 million higher on mainnet), which made every attempt look
  * expired (bug audit 2026-10-27, BM2).
  */
-export function solBlockHeight(chain: SolChainConfig): Promise<number> {
-  return rpc<{ blockHeight?: unknown }>(chain, 'getEpochInfo', [{ commitment: 'confirmed' }]).then((r) => {
-    const h = r?.blockHeight
-    if (typeof h !== 'number' || !Number.isSafeInteger(h)) throw new Error('bad block height')
-    return h
-  })
+export async function solBlockHeight(chain: SolChainConfig): Promise<number> {
+  // Every RPC is asked and the LOWEST height counts: a hold ends once the
+  // chain passes an attempt's last valid height, so one server reporting a
+  // height it hasn't reached could otherwise end it early (review 2026-10-29).
+  const answers = await rpcEach<{ blockHeight?: unknown }>(chain, 'getEpochInfo', [{ commitment: 'confirmed' }])
+  const heights = answers.map((r) => r?.blockHeight)
+  if (!heights.every((h): h is number => typeof h === 'number' && Number.isSafeInteger(h))) {
+    throw new Error('bad block height')
+  }
+  return Math.min(...heights)
 }
 
-/** True once the network reports the signature at any confirmation level. */
 /**
  * Where an attempt stands: landed and did what it said ('ok'), landed but
  * failed there ('failed': only its fee was spent; bug audit 2026-10-27,
  * BL25 — it used to read as a success), or not on the network ('unseen').
- * A failed lookup throws.
+ * Every RPC is asked, and the answer counts only when every one that
+ * answered agrees: either answer can end the double-pay guard's hold, so one
+ * server alone mustn't decide it (review 2026-10-29). A failed lookup, or
+ * RPCs that disagree (one may just lag a second behind), throws, which the
+ * guard reads as "couldn't tell" and keeps holding.
  */
 export async function solTxStatus(chain: SolChainConfig, signature: string): Promise<'ok' | 'failed' | 'unseen'> {
-  const r = await rpc<{ value?: ({ err?: unknown } | null)[] }>(chain, 'getSignatureStatuses', [
+  const answers = await rpcEach<{ value?: ({ err?: unknown } | null)[] }>(chain, 'getSignatureStatuses', [
     [signature],
     { searchTransactionHistory: true },
   ])
-  const st = r.value?.[0] ?? null
-  if (st === null) return 'unseen'
-  return st.err != null ? 'failed' : 'ok'
+  const statuses = answers.map((r) => {
+    const st = r?.value?.[0] ?? null
+    return st === null ? 'unseen' : st.err != null ? 'failed' : 'ok'
+  })
+  if (!statuses.every((st) => st === statuses[0])) {
+    throw new Error(`The ${chain.networkName} servers disagree about this transaction right now.`)
+  }
+  return statuses[0]!
 }
 
 /**
@@ -932,12 +1045,21 @@ export async function settleSolAttempt(chain: SolChainConfig, signature: string)
 export const SOL_LANDED_FAILED =
   'The transaction reached the network but failed there, so nothing was sent; only its network fee was spent. You can try again.'
 
+/**
+ * True once the network reports the signature at any confirmation level.
+ * Like solTxStatus, every RPC is asked and they must agree (seen or not);
+ * RPCs that disagree throw, and the guard keeps holding.
+ */
 export async function solTxSeen(chain: SolChainConfig, signature: string): Promise<boolean> {
-  const r = await rpc<{ value?: (object | null)[] }>(chain, 'getSignatureStatuses', [
+  const answers = await rpcEach<{ value?: (object | null)[] }>(chain, 'getSignatureStatuses', [
     [signature],
     { searchTransactionHistory: true },
   ])
-  return (r.value?.[0] ?? null) !== null
+  const seen = answers.map((r) => (r?.value?.[0] ?? null) !== null)
+  if (!seen.every((v) => v === seen[0])) {
+    throw new Error(`The ${chain.networkName} servers disagree about this transaction right now.`)
+  }
+  return seen[0]!
 }
 
 /**

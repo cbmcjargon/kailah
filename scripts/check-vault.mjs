@@ -1,5 +1,6 @@
 // check-vault.mjs — OFFLINE. Vault v2 checks: Argon2id round trip, transparent v1 (PBKDF2) -> v2 upgrade,
-// wrong password, tampered parameters, and the password-strength policy.
+// wrong password, tampered parameters, and the password-strength policy; and
+// that Erase, as Shell.tsx runs it, leaves no kailah.* key the code names.
 const store = new Map()
 globalThis.localStorage = {
   getItem: (k) => (store.has(k) ? store.get(k) : null),
@@ -168,6 +169,53 @@ check('four random words accepted', passwordProblem('correct horse battery stapl
 check('mixed 12-char accepted', passwordProblem('Tr0ub4dor&3x') === null)
 check('strength: passphrase is strong', passwordStrength('correct horse battery staple') === 'strong')
 check('strength: 10-char mixed is okay', passwordStrength('Abcdef1234') === 'okay', passwordStrength('Abcdef1234'))
+
+// --- Erase leaves no kailah.* key (review 2026-10-29: it was checked only by hand) --
+// Every storage key the code names is written; then the clear functions the
+// Erase handler in Shell.tsx calls run, as Shell imports them. A key added
+// anywhere in src/ that Erase doesn't clear fails this.
+{
+  const { readFileSync, readdirSync, statSync } = await import('node:fs')
+  const { join } = await import('node:path')
+  const walk = (d) => readdirSync(d).flatMap((f) => (statSync(join(d, f)).isDirectory() ? walk(join(d, f)) : /\.tsx?$/.test(f) ? [join(d, f)] : []))
+  const named = new Set()
+  for (const f of walk('src')) for (const m of readFileSync(f, 'utf8').matchAll(/'(kailah\.[A-Za-z0-9._-]+)'/g)) named.add(m[1])
+  // kailah.sec.* is a prefix: one blob per name the secure store knows
+  const sec = readFileSync('src/lib/securestore.ts', 'utf8')
+  const names = /const KNOWN_NAMES = \[([^\]]+)\]/.exec(sec)[1].match(/'([a-z]+)'/g).map((n) => n.slice(1, -1))
+  named.delete('kailah.sec.')
+  for (const n of names) named.add(`kailah.sec.${n}`)
+
+  const shell = readFileSync('src/Shell.tsx', 'utf8')
+  const start = shell.indexOf('const erase = useCallback(() => {')
+  const body = shell.slice(start, shell.indexOf('}, [])', start))
+  // Shell's own imports: local name -> [module, exported name]
+  const imports = new Map()
+  for (const m of shell.matchAll(/import \{([^}]+)\} from '(\.\/[^']+)'/g)) {
+    for (const part of m[1].split(',').map((x) => x.trim()).filter(Boolean)) {
+      const [exported, local] = part.split(/\s+as\s+/)
+      imports.set((local ?? exported).trim(), [m[2], exported.trim()])
+    }
+  }
+  const ui = await import('../src/components/ui.ts')
+  const calls = [...body.matchAll(/^\s+(?:void )?([A-Za-z]+)\(([^)]*)\)/gm)].map((m) => ({ name: m[1], arg: m[2].trim() }))
+  // storage clears only: the device handle (ledger/) and React state are not storage
+  const storageCalls = calls.filter((c) => imports.has(c.name) && !imports.get(c.name)[0].includes('/ledger/'))
+  for (const k of named) localStorage.setItem(k, k === 'kailah.biovault.v1' ? '{}' : 'x')
+  const ran = []
+  for (const c of storageCalls) {
+    const [mod, exported] = imports.get(c.name)
+    const fn = (await import(`../src/${mod.slice(2)}.ts`))[exported]
+    const arg = c.arg === '' ? [] : c.arg === 'false' ? [false] : [ui[c.arg]]
+    await fn(...arg)
+    ran.push(c.arg ? `${c.name}(${c.arg})` : `${c.name}()`)
+  }
+  const left = [...store.keys()].filter((k) => k.startsWith('kailah.'))
+  check('Erase: every storage key the code names (and every secure-store blob) is gone afterwards',
+    named.size >= 15 && left.length === 0, left.length ? `left: ${left.join(', ')}` : `${named.size} keys, cleared by ${ran.join(', ')}`)
+  check('...and the Erase handler is what clears them (the calls were read from Shell.tsx, not listed here)',
+    ran.includes('clearVault()') && ran.includes('clearSecureStore()') && ran.some((r) => r.startsWith('storageRemove(')))
+}
 
 console.log(failures === 0 ? '\nAll vault checks passed.' : `\n${failures} CHECK(S) FAILED.`)
 process.exit(failures === 0 ? 0 : 1)

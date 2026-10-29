@@ -93,6 +93,8 @@ export interface ProviderSpec {
   broadcastBase?: string
   /** a backup only (ProviderApi.backupOnly) */
   backupOnly?: boolean
+  /** esplora only: an hourly per-IP cap, so a 429 means the hour is spent (ProviderApi.budgetLimited) */
+  budgetLimited?: boolean
 }
 
 export interface DerivedKey {

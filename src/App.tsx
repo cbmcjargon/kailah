@@ -28,6 +28,7 @@ import { CHAINS, chainsForMode } from './lib/networks'
 import { deriveAccount } from './lib/keys'
 import { expectCredit, newAlertBook, receivedAmount } from './lib/alerts'
 import { scanAccount } from './lib/scanner'
+import { afterScanFailure, pollDue, type PollBackoff } from './lib/pollbackoff'
 import {
   forgetStateSnapshot,
   loadStateSnapshot,
@@ -391,6 +392,8 @@ export default function App({ mnemonic, sessionRef, derivedKeys, onLock, onErase
   // Set when a manual refresh piggybacks on an in-flight silent scan, so that
   // scan's failure is surfaced instead of staying quiet.
   const escalatedRef = useRef<Partial<Record<string, boolean>>>({})
+  // after a failed scan, background polls wait longer each time (pollbackoff.ts)
+  const pollBackoffRef = useRef<Partial<Record<string, PollBackoff>>>({})
 
   // Orphans every in-flight scan by advancing (never resetting) the per-chain
   // sequence numbers — a reset would let a pre-lock response reuse a fresh
@@ -413,6 +416,7 @@ export default function App({ mnemonic, sessionRef, derivedKeys, onLock, onErase
     scanInFlightRef.current = {}
     escalatedRef.current = {}
     pendingManualScanRef.current = {}
+    pollBackoffRef.current = {}
   }, [])
 
   // One UTXO account's scan, by slot key: a ChainId for the seed account,
@@ -504,6 +508,7 @@ export default function App({ mnemonic, sessionRef, derivedKeys, onLock, onErase
       })
         .then((state) => {
           if (!isCurrent()) return
+          delete pollBackoffRef.current[key]
           // A scan that couldn't reach every funded address may report a total
           // that is too low; don't record it or fire a "received" alert, or the
           // next healthy scan's rebound reads as fake incoming money. Nor show
@@ -547,6 +552,7 @@ export default function App({ mnemonic, sessionRef, derivedKeys, onLock, onErase
         })
         .catch((e: unknown) => {
           if (!isCurrent()) return
+          pollBackoffRef.current[key] = afterScanFailure(pollBackoffRef.current[key], Date.now())
           const escalated = escalatedRef.current[key] === true
           escalatedRef.current[key] = false
           if (opts?.silent === true && !escalated) {
@@ -939,15 +945,19 @@ export default function App({ mnemonic, sessionRef, derivedKeys, onLock, onErase
   useEffect(() => {
     const slowChain = (chain: ChainConfig) =>
       chain.providers[0]?.kind === 'blockcypher' || getClient(chain).onBackup()
-    // hidden networks are not polled at all (DOGE's budget, every provider's quota)
+    // hidden networks are not polled at all (DOGE's budget, every provider's quota),
+    // nor is an account whose last scan failed until its backoff ends
     const poll = (cadence: 'fast' | 'slow') => {
+      const due = (key: string) => pollDue(pollBackoffRef.current[key], Date.now())
       for (const chain of shownIn(chainsForMode(modeRef.current), netPrefsRef.current)) {
-        if (slowChain(chain) === (cadence === 'slow')) refreshChain(chain, { silent: true, quick: true })
+        if (slowChain(chain) === (cadence === 'slow') && due(chain.id)) {
+          refreshChain(chain, { silent: true, quick: true })
+        }
       }
       // hardware accounts (BTC/LTC) follow their chain's cadence
       for (const hw of hwAccountsRef.current) {
         const chain = chainsForMode(modeRef.current).find((c) => c.id === hw.chain)
-        if (chain !== undefined && slowChain(chain) === (cadence === 'slow')) {
+        if (chain !== undefined && slowChain(chain) === (cadence === 'slow') && due(hardwareSlotKey(hw.record))) {
           refreshHw(hw, { silent: true, quick: true })
         }
       }

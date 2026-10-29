@@ -16,7 +16,9 @@ import {
   getSwapQuote,
   MARKET_GAP_WARN_PCT,
   prepareSwap,
+  routeLabels,
   swapMarketGap,
+  swapRate,
   SWAP_SLIPPAGE_BPS,
   SWAP_SOL_FLOOR,
   swapSolShort,
@@ -57,6 +59,15 @@ type Step =
  * held only to what a swap surely needs (swapSolShort).
  */
 const MAX_SWAP_SOL_RESERVE = 5_000_000n
+
+/**
+ * The form's quote is fetched again this often while the form is open and
+ * the page visible, so the rate shown stays current while the user decides.
+ * A refresh keeps the quote on screen until the new one lands; one that
+ * fails leaves it there, unless it is older than QUOTE_STALE_MS.
+ */
+const QUOTE_REFRESH_MS = 20_000
+const QUOTE_STALE_MS = 50_000
 
 export default function SolSwapModal({
   chain,
@@ -121,36 +132,63 @@ export default function SolSwapModal({
   // Live quote, debounced; a sequence guard keeps stale replies from landing.
   // The sequence moves on first, so a quote still in flight for an amount
   // that was since cleared or refused can't land on the form (bug audit
-  // 2026-10-27, BM20).
+  // 2026-10-27, BM20). A refresh (refreshTick, same amount and direction)
+  // keeps the shown quote until its replacement lands.
+  const quoteKeyRef = useRef('')
+  const quoteRef = useRef<SwapQuote | null>(null)
+  quoteRef.current = quote
+  const [refreshTick, setRefreshTick] = useState(0)
   useEffect(() => {
     const seq = ++quoteSeqRef.current
-    setQuote(null)
-    setQuoteError(null)
+    const key = `${amountStr}|${direction}|${requote}`
+    const isRefresh = key === quoteKeyRef.current
+    quoteKeyRef.current = key
+    if (!isRefresh) {
+      setQuote(null)
+      setQuoteError(null)
+    }
     if (parsedAmount === null || overBalance || solShort) {
       setQuoteLoading(false)
       return
     }
-    setQuoteLoading(true)
-    const timer = setTimeout(() => {
-      getSwapQuote(chain, direction, parsedAmount, solKey.address)
-        .then((q) => {
-          if (aliveRef.current && quoteSeqRef.current === seq) {
-            setQuote(q)
-            setQuoteLoading(false)
-          }
-        })
-        .catch((e: unknown) => {
-          if (aliveRef.current && quoteSeqRef.current === seq) {
+    if (!isRefresh) setQuoteLoading(true)
+    const timer = setTimeout(
+      () => {
+        getSwapQuote(chain, direction, parsedAmount, solKey.address)
+          .then((q) => {
+            if (aliveRef.current && quoteSeqRef.current === seq) {
+              setQuote(q)
+              setQuoteError(null)
+              setQuoteLoading(false)
+            }
+          })
+          .catch((e: unknown) => {
+            if (!aliveRef.current || quoteSeqRef.current !== seq) return
+            const shown = quoteRef.current
+            if (isRefresh && shown !== null && Date.now() - shown.builtAt < QUOTE_STALE_MS) return
+            setQuote(null)
             setQuoteError(errMessage(e))
             setQuoteLoading(false)
-          }
-        })
-    }, 600)
+          })
+      },
+      isRefresh ? 0 : 600,
+    )
     return () => clearTimeout(timer)
     // parsedAmount is derived from amountStr; comparing the string avoids
     // re-running on unrelated renders while still tracking every edit.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [amountStr, direction, chain, requote])
+  }, [amountStr, direction, chain, requote, refreshTick])
+
+  // Refresh only while the form shows a quote and the page is visible: a
+  // hidden tab or the review screen asks Jupiter nothing.
+  const hasQuote = quote !== null
+  useEffect(() => {
+    if (step.kind !== 'form' || !hasQuote) return
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === 'visible') setRefreshTick((n) => n + 1)
+    }, QUOTE_REFRESH_MS)
+    return () => window.clearInterval(timer)
+  }, [step.kind, hasQuote])
 
   const usdHint =
     parsedAmount !== null && (solToUsdc ? price : usdcPrice) !== undefined
@@ -335,6 +373,15 @@ export default function SolSwapModal({
 
   const broadcasting = step.kind === 'broadcasting'
   const highImpact = quote !== null && quote.priceImpactPct > 1
+  // "1 SOL ≈ 182.31 USDC", to the cent, Kailah's fee included
+  const rateText = (d: SwapDirection, inAmount: bigint, outAmount: bigint): string | null => {
+    const rate = swapRate(d, inAmount, outAmount)
+    if (rate === null) return null
+    const cent = 10n ** BigInt(Math.max(0, chain.usdc.decimals - 2))
+    return formatSolUsdc(chain, rate - (rate % cent))
+  }
+  const quoteRate = quote !== null ? rateText(quote.direction, quote.inAmount, quote.outAmount) : null
+  const quoteRoute = quote !== null ? routeLabels(quote.build) : []
 
   return (
     <Modal title="Swap" onClose={onClose} canDismiss={!broadcasting}>
@@ -427,9 +474,16 @@ export default function SolSwapModal({
                     </span>
                   )}
                 </div>
+                {quoteRate !== null && (
+                  <span className="field-hint tnum">
+                    1 SOL ≈ {quoteRate} {chain.usdc.symbol}
+                    {quoteRoute.length > 0 && <> · via {quoteRoute.join(' → ')}</>}
+                  </span>
+                )}
                 <span className="field-hint">
                   At least {fmtOut(quote.minOutAmount)} {outSymbol} after slippage (
-                  {SWAP_SLIPPAGE_BPS / 100}%). Routed by Jupiter across Solana exchanges.
+                  {SWAP_SLIPPAGE_BPS / 100}%). Routed by Jupiter across Solana exchanges; the quote
+                  refreshes every {QUOTE_REFRESH_MS / 1000} seconds.{' '}
                   {quote.feeBps > 0 ? (
                     <>
                       Includes Kailah&rsquo;s {quote.feeBps / 100}% fee (≈{' '}
@@ -529,6 +583,21 @@ export default function SolSwapModal({
                 {rs.fmtOut(step.prepared.minOutAmount)} {rs.outSymbol}
               </dd>
             </div>
+            {rateText(step.prepared.direction, step.prepared.inAmount, step.prepared.outAmount) !== null && (
+              <div className="review-row">
+                <dt>Rate</dt>
+                <dd className="tnum">
+                  1 SOL ≈ {rateText(step.prepared.direction, step.prepared.inAmount, step.prepared.outAmount)}{' '}
+                  {chain.usdc.symbol}
+                </dd>
+              </div>
+            )}
+            {step.prepared.route.length > 0 && (
+              <div className="review-row">
+                <dt>Route</dt>
+                <dd>{step.prepared.route.join(' → ')}</dd>
+              </div>
+            )}
             <div className="review-row">
               <dt>
                 Kailah fee
@@ -567,6 +636,12 @@ export default function SolSwapModal({
             Rates move with the market; if the price shifts beyond the slippage limit before the
             transaction lands, it fails safely and nothing is exchanged.
           </p>
+          {step.prepared.simplerRoute && (
+            <p className="text-tertiary">
+              Jupiter&rsquo;s best route was too large to fit in one Solana transaction, so this is a
+              simpler route through fewer exchanges. The amounts above are for it.
+            </p>
+          )}
           {step.prepared.reroutedAround !== null && (
             <p className="text-tertiary">
               Jupiter&rsquo;s first route failed its test run at {step.prepared.reroutedAround}, so

@@ -610,6 +610,23 @@ textarea.input {
   flex-shrink: 0;
 }
 
+.chain-note {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  background: var(--surface-2);
+  border: 1px solid var(--hairline);
+  color: var(--text-2);
+  border-radius: var(--radius-ctl);
+  padding: 8px 8px 8px 14px;
+  font-size: 13.5px;
+}
+
+.chain-note .btn {
+  flex-shrink: 0;
+}
+
 .chain-address {
   display: flex;
   align-items: center;

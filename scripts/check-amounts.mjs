@@ -7,6 +7,7 @@
 //      an ordinary account on an L1 chain keeps exactly 21 000; Base's L1
 //      data fee is reserved (MAX leaves room for it, the fee shown includes
 //      it, a token send's ETH check counts it); native sends to 0x0 refused;
+//      fees from the RPC are held to 1,000 gwei a gas (100 priority) (A11);
 //   B. TRON: USDT balance read from the token contract (a never-activated
 //      holder's USDT used to read 0); USDT fees at the chain's own energy
 //      price (100 sun, not 420) minus the account's spare energy, plus
@@ -19,7 +20,8 @@
 //   C. typed amounts: a decimal comma works on every form ("0,5"), a number
 //      that reads as a thousands grouping on this device ("1,234" in the US)
 //      or carries two marks is refused, and every amount the wallet fills
-//      in (a scanned request, Max) reads back exactly in every locale.
+//      in (a scanned request, Max) reads back exactly in every locale;
+//   E. UTXO fee rates from any service are clamped to 1-1,000 sat/vB.
 const store = new Map()
 globalThis.localStorage = {
   getItem: (k) => (store.has(k) ? store.get(k) : null),
@@ -67,8 +69,8 @@ const evmFetch = async (_url, init) => {
     case 'eth_call':
       if (String(params[0]?.to).toLowerCase() === ORACLE) return net.l1Err ? err('execution reverted') : ok(hex32(net.l1))
       return ok(hex32(net.token))
-    case 'eth_getBlockByNumber': return ok(BLOCK)
-    case 'eth_maxPriorityFeePerGas': return ok('0x989680')
+    case 'eth_getBlockByNumber': return ok(net.baseFee === undefined ? BLOCK : { ...BLOCK, baseFeePerGas: '0x' + net.baseFee.toString(16) })
+    case 'eth_maxPriorityFeePerGas': return ok('0x' + (net.priority ?? 10_000_000n).toString(16))
     case 'eth_getTransactionCount': return ok('0x3')
     case 'eth_getCode': return net.codeErr ? err('mock: getCode down') : ok(net.code)
     case 'eth_estimateGas': return net.estimateErr === 'revert' ? err('execution reverted') : net.estimateErr ? err('header not found') : ok('0x' + net.estimate.toString(16))
@@ -147,6 +149,19 @@ console.log('--- A. EVM fees ---')
   const l1 = await tokenSend(ethereum)
   check('A10b ...while 500k on an L1 chain is still refused as unusual', /unusually large amount of gas/.test(l1?.message ?? ''), l1?.message?.slice(0, 60))
   net.estimate = 21000n; net.token = 0n
+  // Both fee numbers come from the RPC: a hostile one could otherwise hand
+  // most of a MAX send to the block producer (review 2026-10-29: untested).
+  const GWEI = 10n ** 9n
+  net.balance = 10n ** 18n; net.baseFee = 50_000n * GWEI; net.priority = 5_000n * GWEI
+  const hot = await send(ethereum).catch((e) => e)
+  check('A11 an RPC asking 50,000 gwei a gas (5,000 priority) gets the ceilings: 1,000 gwei max, 100 gwei priority',
+    hot?.request?.maxFeePerGas === 1_000n * GWEI && hot?.request?.maxPriorityFeePerGas === 100n * GWEI,
+    hot?.message ?? `${hot?.request?.maxFeePerGas} / ${hot?.request?.maxPriorityFeePerGas}`)
+  check('A11b ...and the fee shown is what those ceilings allow (21,000 gas × 1,000 gwei = 0.021 ETH)', hot?.feeWei === 21_000n * 1_000n * GWEI, String(hot?.feeWei))
+  net.baseFee = 1n * GWEI; net.priority = GWEI / 100n
+  const calm = await send(ethereum).catch((e) => e)
+  check('A11c a market fee under the ceilings is used as quoted, with headroom (control)', calm?.request?.maxFeePerGas < 1_000n * GWEI && calm?.request?.maxPriorityFeePerGas === GWEI / 100n, calm?.message ?? String(calm?.request?.maxFeePerGas))
+  net.baseFee = undefined; net.priority = undefined; net.balance = 10n ** 16n
   key.zero()
 }
 
@@ -585,6 +600,37 @@ console.log('--- D. EVM: errors, history, display, alerts ---')
   check('D6 the BNB card names BNB, rows have unique keys, and a refresh the user asked for shows its error even when a poll superseded it (BL23)',
     /chain\.gasPrimary === true \? chain\.gas\.symbol : chain\.token\.symbol/.test(card) && /\$\{t\.direction\}-\$\{i\}/.test(card) && (app.match(/const manualFailed = manualWaitingRef\.current\[chain\.id\] === true/g) ?? []).length === 3)
   check('D7 the EVM send form shows errors through evmErrorText (BL13)', (read('components/EvmSendModal.tsx').match(/evmErrorText\(e, chain\)/g) ?? []).length === 2)
+}
+
+console.log('--- E. UTXO fee rates from any service are clamped (review 2026-10-29) ---')
+{
+  const { toRate, EsploraProvider } = await import('../src/lib/esplora.ts')
+  const { CHAINS } = await import('../src/lib/networks.ts')
+  check('E1 toRate rounds up, floors at 1 and caps at 1,000 sat/vB; nonsense reads as 1',
+    toRate(4.2) === 5n && toRate(0.2) === 1n && toRate(0) === 1n && toRate(-7) === 1n && toRate(1_000_000) === 1000n &&
+      toRate(NaN) === 1n && toRate(Infinity) === 1n && toRate(999.01) === 1000n)
+  const realFetch = globalThis.fetch
+  const answer = {}
+  globalThis.fetch = async (url) => {
+    const u = String(url)
+    if (u.endsWith('/v1/fees/recommended')) return answer.recommended ? new Response(JSON.stringify(answer.recommended)) : new Response('not found', { status: 404 })
+    if (u.endsWith('/fee-estimates')) return new Response(JSON.stringify(answer.estimates))
+    return new Response('not found', { status: 404 })
+  }
+  answer.recommended = { fastestFee: 1e9, halfHourFee: 5_000, hourFee: -3 }
+  const mp = await new EsploraProvider(CHAINS.btc.providers[0], CHAINS.btc).getFeeOptions()
+  check('E2 a mempool-style service asking a billion sat/vB is held to 1,000; a negative rate reads as 1',
+    mp.map((f) => f.rate).join() === '1000,1000,1', mp.map((f) => f.rate).join())
+  answer.recommended = null
+  answer.estimates = { 1: 4_000_000, 3: 12.5, 6: 'x' }
+  const bs = await new EsploraProvider(CHAINS.btc.providers.find((p) => p.name === 'blockstream.info'), CHAINS.btc).getFeeOptions()
+  check('E3 an esplora /fee-estimates answer is clamped the same way',
+    bs.map((f) => f.rate).join() === '1000,13,1', bs.map((f) => f.rate).join())
+  globalThis.fetch = realFetch
+  const { readFileSync } = await import('node:fs')
+  const src = (f) => readFileSync(new URL(`../src/lib/${f}`, import.meta.url), 'utf8')
+  check('E4 BlockCypher and Bitcore fee answers go through the same toRate',
+    /return toRate\(perKb \/ 1000\)/.test(src('blockcypher.ts')) && /return toRate\(Math\.round\(r\.feerate \* 1e8\) \/ 1000\)/.test(src('bitcore.ts')))
 }
 
 console.log(failures === 0 ? '\nAll amount checks passed.' : `\n${failures} CHECK(S) FAILED.`)

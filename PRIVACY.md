@@ -52,7 +52,10 @@ which is why the builds are reproducible and the dependencies pinned (see
     cloudflare-eth.com, arb1.arbitrum.io, bsc-dataseed.bnbchain.org,
     base.blockscout.com, base-sepolia.blockscout.com, eth.blockscout.com,
     arbitrum.blockscout.com.
-  - **Solana:** solana-rpc.publicnode.com, api.devnet.solana.com.
+  - **Solana:** solana-rpc.publicnode.com, solana.api.pocket.network
+    (Pocket Network, a second server for when the first is unreachable,
+    and asked alongside it before a held send is released),
+    api.devnet.solana.com.
   - **TRON:** api.trongrid.io, nile.trongrid.io.
 - **Prices:** api.coinbase.com, api.exchange.coinbase.com, api.coingecko.com.
   These receive price requests only, with no addresses.

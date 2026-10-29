@@ -191,10 +191,15 @@ export async function getSwapQuote(
   taker: string,
   /** Jupiter's names of exchanges to route around (prepareSwap's one re-route) */
   excludeDexes: readonly string[] = [],
+  /** a cap on the route's accounts (prepareSwap's one smaller route) */
+  maxAccounts?: number,
 ): Promise<SwapQuote> {
   if (!chain.mainnet) throw new Error('Swapping is only available on Solana mainnet.')
   if (amount <= 0n) throw new Error('Enter an amount to swap.')
   if (!excludeDexes.every((l) => DEX_LABEL.test(l))) throw new Error(MISMATCH)
+  if (maxAccounts !== undefined && !(Number.isInteger(maxAccounts) && maxAccounts >= 8 && maxAccounts <= 64)) {
+    throw new Error(MISMATCH)
+  }
   const inputMint = direction === 'sol-to-usdc' ? SOL_WRAPPED_MINT : chain.usdc.mint
   const outputMint = direction === 'sol-to-usdc' ? chain.usdc.mint : SOL_WRAPPED_MINT
   const feeBps = swapFeeBpsFor(chain, taker)
@@ -202,7 +207,8 @@ export async function getSwapQuote(
     `${JUP_BASE}/build?inputMint=${inputMint}&outputMint=${outputMint}` +
       `&amount=${amount}&taker=${taker}&slippageBps=${SWAP_SLIPPAGE_BPS}` +
       (feeBps > 0 ? `&platformFeeBps=${feeBps}&feeAccount=${SWAP_FEE_ACCOUNT}` : '') +
-      (excludeDexes.length > 0 ? `&excludeDexes=${excludeDexes.map(encodeURIComponent).join(',')}` : ''),
+      (excludeDexes.length > 0 ? `&excludeDexes=${excludeDexes.map(encodeURIComponent).join(',')}` : '') +
+      (maxAccounts !== undefined ? `&maxAccounts=${maxAccounts}` : ''),
   )) as JupBuildResponse
   if (!b.inAmount || !b.outAmount || !b.otherAmountThreshold || !b.swapInstruction) {
     throw new Error('The swap service returned an incomplete quote — try again.')
@@ -257,6 +263,10 @@ export interface PreparedSwap {
    * the first route passed.
    */
   reroutedAround: string | null
+  /** Jupiter's names for the exchanges this route goes through (routeLabels), for the review */
+  route: string[]
+  /** Jupiter's best route was too large for one transaction, and this is the smaller one asked for instead */
+  simplerRoute: boolean
 }
 
 /** A swap quote against the wallet's own price feed (the review and the form both show it). */
@@ -356,6 +366,26 @@ function toTxIx(ix: JupIx | null | undefined): TxIx {
 const CU_LIMIT_MAX = 1_400_000
 /** Jupiter routes use up to four; more than this is not a swap we recognize. */
 const MAX_LOOKUP_TABLES = 8
+/** Solana's ceiling on a serialized transaction (PACKET_DATA_SIZE). */
+const MAX_TX_BYTES = 1232
+/**
+ * Jupiter's maxAccounts for the one smaller route asked for when the best
+ * route doesn't fit in a transaction (default 64; the wallet adds its own
+ * compute-budget and close instructions). Verified live 2026-10-29: at 20 a
+ * 56-account route came back as 39 accounts, at the same price.
+ */
+export const SMALLER_ROUTE_MAX_ACCOUNTS = 32
+const TOO_LARGE =
+  "Jupiter's route for this swap is too large to fit in one Solana transaction, even after asking for a simpler one, so nothing was signed. Try a smaller amount, or try again in a minute."
+
+/** The assembled transaction is over MAX_TX_BYTES: no node would take it. */
+class SwapTooLargeError extends Error {
+  readonly bytes: number
+  constructor(bytes: number) {
+    super(TOO_LARGE)
+    this.bytes = bytes
+  }
+}
 
 function computeUnitLimitIx(units: number): TxIx {
   const data = new Uint8Array(5)
@@ -904,6 +934,20 @@ function isJupiterOwnError(reason: string): boolean {
   return code >= 6000 && code < 6100
 }
 
+/**
+ * A swap's rate as the form and the review show it, "1 SOL ≈ … USDC": USDC
+ * smallest units per whole SOL, rounded down. Kailah's fee is included (a
+ * quote's output is net of it), so it is the rate the user actually gets.
+ * Null when either side is empty.
+ */
+export function swapRate(direction: SwapDirection, inAmount: bigint, outAmount: bigint): bigint | null {
+  if (inAmount <= 0n || outAmount <= 0n) return null
+  const LAMPORTS_PER_SOL = 1_000_000_000n
+  return direction === 'sol-to-usdc'
+    ? (outAmount * LAMPORTS_PER_SOL) / inAmount
+    : (inAmount * LAMPORTS_PER_SOL) / outAmount
+}
+
 /** Jupiter's names for the exchanges in a build's route, in route order. */
 export function routeLabels(b: { routePlan?: unknown }): string[] {
   const out: string[] = []
@@ -1046,29 +1090,61 @@ export async function prepareSwap(
       ? await getSwapQuote(chain, quote.direction, quote.inAmount, owner)
       : quote
 
+  // A route too large for one transaction is asked for again ONCE, capped at
+  // SMALLER_ROUTE_MAX_ACCOUNTS (Jupiter's maxAccounts), and the cap stays for
+  // the re-route below. The smaller route goes through every check from the
+  // start; one still too large ends in plain words, nothing signed.
+  let smaller = false
+  let exclude: readonly string[] = []
+  let current = q // the route last tried, for naming a failure
+  const routeFor = () =>
+    getSwapQuote(chain, q.direction, q.inAmount, owner, exclude, smaller ? SMALLER_ROUTE_MAX_ACCOUNTS : undefined)
+  const attempt = async (route: SwapQuote): Promise<PreparedSwap> => {
+    current = route
+    try {
+      return await prepareRoute(chain, owner, route, feeBps)
+    } catch (e) {
+      if (!(e instanceof SwapTooLargeError) || smaller) throw e
+      smaller = true
+      let fewer: SwapQuote
+      try {
+        fewer = await routeFor()
+      } catch (e2) {
+        if (e2 instanceof Error && e2.message === MISMATCH) throw e2
+        throw new Error(TOO_LARGE)
+      }
+      current = fewer
+      return await prepareRoute(chain, owner, fewer, feeBps)
+    }
+  }
+  const plain = (e: unknown): never => {
+    throw e instanceof SwapTooLargeError ? new Error(TOO_LARGE) : e
+  }
+
   let first: RouteFailure
   try {
-    return await prepareRoute(chain, owner, q, feeBps)
+    return { ...(await attempt(q)), simplerRoute: smaller }
   } catch (e) {
-    if (!(e instanceof SwapSimulationError)) throw e
-    first = await describeFailure(e, q.build)
+    if (!(e instanceof SwapSimulationError)) plain(e)
+    first = await describeFailure(e as SwapSimulationError, current.build)
   }
   if (!first.reroute) throw new Error(failureMessage(first))
   // ONE fresh route around what failed. Nothing has been signed, and the new
   // route goes through every check below from the start; the review screen
   // shows its amounts and checks them against the market again.
+  exclude = first.exclude
   let fresh: SwapQuote
   try {
-    fresh = await getSwapQuote(chain, q.direction, q.inAmount, owner, first.exclude)
+    fresh = await routeFor()
   } catch (e) {
     if (e instanceof Error && e.message === MISMATCH) throw e
     throw new Error(failureMessage(first))
   }
   try {
-    return { ...(await prepareRoute(chain, owner, fresh, feeBps)), reroutedAround: first.where }
+    return { ...(await attempt(fresh)), reroutedAround: first.where, simplerRoute: smaller }
   } catch (e) {
-    if (!(e instanceof SwapSimulationError)) throw e
-    throw new Error(failureMessage(first, await describeFailure(e, fresh.build)))
+    if (!(e instanceof SwapSimulationError)) plain(e)
+    throw new Error(failureMessage(first, await describeFailure(e as SwapSimulationError, current.build)))
   }
 }
 
@@ -1154,6 +1230,12 @@ async function prepareRoute(
   } catch {
     throw new Error(MISMATCH)
   }
+  // Too large for any node to take (a three-hop route can be; seen live
+  // 2026-10-29, 1,708 bytes, which the RPC refused in raw words): say so
+  // before anything is simulated, and prepareSwap asks for a smaller route.
+  // The final limit instruction is the same size as the probe's.
+  const bytes = base64.decode(probe).length
+  if (bytes > MAX_TX_BYTES) throw new SwapTooLargeError(bytes)
   const used = (await simulateSwap(chain, probe)).value.unitsConsumed
   const limit =
     typeof used === 'number' && used > 0 ? Math.min(CU_LIMIT_MAX, Math.ceil(used * 1.2)) : CU_LIMIT_MAX
@@ -1279,6 +1361,8 @@ async function prepareRoute(
     txBase64,
     lastValidBlockHeight,
     reroutedAround: null,
+    route: routeLabels(q.build),
+    simplerRoute: false,
   }
 }
 

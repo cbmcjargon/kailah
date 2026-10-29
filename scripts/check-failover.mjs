@@ -31,6 +31,10 @@
 //      down); nothing is remembered once the wallet locked or was erased;
 //      BlockCypher serves up to 500 inputs/outputs and marks a bigger
 //      transaction partial; its broadcast has a deadline.
+//   K. practice Bitcoin has a second service that serves address lookups,
+//      and background polls back off after a failed scan, while a test
+//      network's failed check reads as a calm note (review 2026-10-28).
+import { readFileSync } from 'node:fs'
 const { createFailoverClient } = await import('../src/lib/api.ts')
 
 let failures = 0
@@ -504,6 +508,128 @@ console.log('--- J. after the 2026-10-27 audit: rate limits, start-up order, bac
   await bc.broadcast('00')
   check('J6 a BlockCypher broadcast has a deadline, so "Broadcasting…" can\'t hang forever (BL4)', seen[0]?.signal instanceof AbortSignal)
   globalThis.fetch = realFetch
+}
+
+console.log('\n--- K. practice Bitcoin: a second service, and polls that back off (review 2026-10-28) ---')
+{
+  // testnet4's second service used to be mempool.emzy.de, which answers tips
+  // but 404s every address lookup: when mempool.space was busy or blocked,
+  // a new wallet's practice Bitcoin card could only fail.
+  const { CHAINS } = await import('../src/lib/networks.ts')
+  const { buildProviders } = await import('../src/lib/api.ts')
+  const tn = CHAINS['btc-testnet'].providers
+  check('K1 practice Bitcoin: mempool.space, then blockstream.info as a backup with an hourly budget (700 an hour per IP)',
+    tn.map((p) => p.name).join() === 'mempool.space,blockstream.info' &&
+      tn.every((p) => p.kind === 'esplora') && tn[0].backupOnly !== true && tn[0].budgetLimited !== true &&
+      tn[1].base === 'https://blockstream.info/testnet4/api' && tn[1].pageSize === 25 &&
+      tn[1].backupOnly === true && tn[1].budgetLimited === true,
+    tn.map((p) => `${p.name} ${p.base}`).join(', '))
+  const built = buildProviders(CHAINS['btc-testnet'])
+  check('K1c the esplora providers carry the spec\'s backup and budget flags',
+    built[0].backupOnly === false && built[1].backupOnly === true && built[1].budgetLimited === true)
+  const btc = buildProviders(CHAINS.btc)
+  check('K1d mainnet Bitcoin: three mempool instances, then blockstream.info as a backup with an hourly budget (2026-10-29)',
+    btc.map((p) => p.providerName).join() === 'mempool.space,mempool.emzy.de,mempool.bitaroo.net,blockstream.info' &&
+      btc.slice(0, 3).every((p) => p.backupOnly === false && p.budgetLimited === false) &&
+      btc[3].backupOnly === true && btc[3].budgetLimited === true,
+    btc.map((p) => `${p.providerName}${p.backupOnly ? '(backup)' : ''}`).join())
+  check('K1b no testnet4 service that can\'t look up addresses (mempool.emzy.de)', !tn.some((p) => p.base.includes('emzy')))
+  check('K2 every practice Bitcoin service is on testnet4 (never testnet3\'s /testnet/api, another chain)',
+    tn.every((p) => /\/testnet4\/api$/.test(p.base) && p.broadcastBase === undefined))
+
+  // The real provider list behind a scripted network: `mode` says how
+  // mempool.space answers ('down': no response; 'busy': a visible 429), and
+  // `bs` how Blockstream does ('ok' or 'spent': its hourly cap's 429).
+  const realFetch = globalThis.fetch
+  const asked = []
+  const net = { mode: 'down', bs: 'ok' }
+  const STATS_JSON = { chain_stats: { funded_txo_sum: 5000, spent_txo_sum: 1000, tx_count: 3 }, mempool_stats: { funded_txo_sum: 0, spent_txo_sum: 0, tx_count: 0 } }
+  globalThis.fetch = async (url) => {
+    const u = String(url)
+    asked.push(u)
+    if (u.startsWith('https://mempool.space/')) {
+      if (net.mode === 'down') throw new TypeError('Load failed')
+      if (net.mode === 'busy') return new Response('Too Many Requests', { status: 429 })
+      if (u.includes('/address/')) return new Response(JSON.stringify(STATS_JSON), { status: 200 })
+    }
+    if (u.startsWith('https://blockstream.info/testnet4/api/')) {
+      if (net.bs === 'spent') return new Response('{"error":"Too Many Requests"}', { status: 429 })
+      if (u.endsWith('/blocks/tip/height')) return new Response('157951', { status: 200 })
+      if (u.includes('/address/')) return new Response(JSON.stringify(STATS_JSON), { status: 200 })
+    }
+    return new Response('not found', { status: 404 })
+  }
+  const A = 'tb1q6rz28mcfaxtmd6v789l9rrlrusdprr9pqcpvkl'
+  const c = createFailoverClient(buildProviders(CHAINS['btc-testnet']), undefined, TUNING)
+  let answer
+  const err = await rejects(async () => (answer = await c.getAddressStats(A)))
+  check('K3 with mempool.space unreachable, an address lookup is answered by blockstream.info',
+    err === null && answer?.balance.confirmed === 4000n && answer?.txCount === 3, err?.message)
+  check('K3b ...as a backup: the client says so (the card then polls every 10 minutes) and keeps mempool.space as its service',
+    c.onBackup() === true && c.activeProvider() === 'mempool.space')
+  let before = asked.length
+  await c.getAddressStats('tb1qother')
+  check('K3c while mempool.space cools down, the next lookup goes straight to the backup',
+    asked.slice(before)[0]?.startsWith('https://blockstream.info/testnet4/api/address/'), asked.slice(before).join(' '))
+
+  // Blockstream's 429 means this IP's hour is spent: never retried.
+  net.bs = 'spent'
+  before = asked.length
+  const spent = await timed(() => c.getAddressStats(A))
+  const bsAsked = asked.slice(before).filter((u) => u.startsWith('https://blockstream.info/')).length
+  check('K3d a 429 from blockstream.info fails the lookup at once, without retrying into a spent budget',
+    spent.err !== null && bsAsked === 1 && spent.ms < 1_000, `${bsAsked} request(s), ${spent.ms} ms`)
+
+  // A merely busy mempool.space (a visible 429) is waited for, not dodged
+  // through the backup's budget.
+  const c2 = createFailoverClient(buildProviders(CHAINS['btc-testnet']), undefined, TUNING)
+  net.mode = 'busy'
+  net.bs = 'ok'
+  before = asked.length
+  setTimeout(() => (net.mode = 'ok'), 30)
+  const waited = await rejects(() => c2.getAddressStats(A))
+  const hosts = asked.slice(before).map((u) => new URL(u).host)
+  check('K3e a rate-limited mempool.space is waited for and then answers; the backup is not spent on a mere rate limit',
+    waited === null && hosts.length >= 2 && hosts.every((h) => h === 'mempool.space') && c2.onBackup() === false, hosts.join(' '))
+  globalThis.fetch = realFetch
+
+  const { POLL_BACKOFF_MS, afterScanFailure, pollDue } = await import('../src/lib/pollbackoff.ts')
+  const t0 = 1_000_000
+  let b
+  const waits = []
+  for (let k = 0; k < 7; k++) {
+    b = afterScanFailure(b, t0)
+    waits.push((b.retryAt - t0) / 60_000)
+  }
+  check('K4 each failed scan in a row doubles the wait between background polls, from 1 to 10 minutes',
+    waits.join() === '1,2,4,8,10,10,10' && POLL_BACKOFF_MS.at(-1) === 600_000, waits.join())
+  const one = afterScanFailure(undefined, t0)
+  check('K4b no backoff → due; during the wait → not due; at its end → due',
+    pollDue(undefined, t0) && !pollDue(one, t0 + 59_999) && pollDue(one, t0 + 60_000))
+
+  // App.tsx wiring: only background polls wait; a success clears the wait.
+  const app = readFileSync('src/App.tsx', 'utf8')
+  const silentUtxo = [...app.matchAll(/^.*refresh(?:Chain|Hw)\((?:chain|hw), \{ silent: true.*$/gm)]
+  const pollFn = app.slice(app.indexOf('const poll = (cadence'), app.indexOf('const pollEvm ='))
+  check('K5 App: every background UTXO poll asks pollDue first, for seed chains and Ledger accounts alike',
+    silentUtxo.length === 2 && silentUtxo.every((m) => pollFn.includes(m[0])) &&
+      /due\(chain\.id\)\)/.test(pollFn) && /due\(hardwareSlotKey\(hw\.record\)\)\)/.test(pollFn) && /pollDue\(pollBackoffRef\.current\[key\]/.test(pollFn),
+    `${silentUtxo.length} silent UTXO refresh call(s)`)
+  check('K5b App: a failed scan records the backoff, a finished one clears it, and lock/erase forgets it',
+    /\.catch\(\(e: unknown\) => \{\s*if \(!isCurrent\(\)\) return\s*pollBackoffRef\.current\[key\] = afterScanFailure\(pollBackoffRef\.current\[key\], Date\.now\(\)\)/.test(app) &&
+      /\.then\(\(state\) => \{\s*if \(!isCurrent\(\)\) return\s*delete pollBackoffRef\.current\[key\]/.test(app) &&
+      /pendingManualScanRef\.current = \{\}\s*pollBackoffRef\.current = \{\}/.test(app))
+  check('K5c App: nothing but the background poll consults the backoff (a refresh, unlock or mode change never waits)',
+    (app.match(/pollDue\(/g) ?? []).length === 1)
+
+  // ChainCard: a test network's failed check is a calm note, a real one an alert.
+  const card = readFileSync('src/components/ChainCard.tsx', 'utf8')
+  const testNote = card.slice(card.indexOf('!loading && !chain.mainnet &&'), card.indexOf('<div className="chain-address">'))
+  const realAlert = card.slice(card.indexOf('!loading && chain.mainnet &&'), card.indexOf('!loading && !chain.mainnet &&'))
+  check('K6 a test network\'s failed check shows a calm status note that says Kailah keeps trying',
+    /className="chain-note" role="status"/.test(testNote) && !/role="alert"/.test(testNote) && /tries again on its own/.test(testNote) && /Get coins still work/.test(testNote))
+  check('K6b a real network\'s failed check is still an alert with the scan\'s own message',
+    /className="chain-error" role="alert"/.test(realAlert) && /\{error\}/.test(realAlert))
 }
 
 Date.now = realNow
