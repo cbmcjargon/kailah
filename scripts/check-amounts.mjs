@@ -8,6 +8,7 @@
 //      data fee is reserved (MAX leaves room for it, the fee shown includes
 //      it, a token send's ETH check counts it); native sends to 0x0 refused;
 //      fees from the RPC are held to 1,000 gwei a gas (100 priority) (A11);
+//      an explorer that never answers can't hold a lookup open (A12);
 //   B. TRON: USDT balance read from the token contract (a never-activated
 //      holder's USDT used to read 0); USDT fees at the chain's own energy
 //      price (100 sun, not 420) minus the account's spare energy, plus
@@ -162,6 +163,43 @@ console.log('--- A. EVM fees ---')
   const calm = await send(ethereum).catch((e) => e)
   check('A11c a market fee under the ceilings is used as quoted, with headroom (control)', calm?.request?.maxFeePerGas < 1_000n * GWEI && calm?.request?.maxPriorityFeePerGas === GWEI / 100n, calm?.message ?? String(calm?.request?.maxFeePerGas))
   net.baseFee = undefined; net.priority = undefined; net.balance = 10n ** 16n
+  // An explorer that never answers can't hold a lookup open (review 2026-10-30)
+  {
+    const realFetch = globalThis.fetch
+    const savedDeadline = evm.evmTuning.explorerTimeoutMs
+    evm.evmTuning.explorerTimeoutMs = 40
+    const asked = []
+    globalThis.fetch = (url, init) => {
+      asked.push(String(url))
+      return new Promise((_, reject) => {
+        init?.signal?.addEventListener('abort', () => reject(init.signal.reason))
+        setTimeout(() => reject(new Error('no deadline: the mock gave up')), 1_500)
+      })
+    }
+    const t0 = Date.now()
+    const h = await rejects(() => evm.fetchEvmHistory(base, key.address))
+    const d = await rejects(() => evm.fetchDetectedTokens(base, key.address))
+    const took = Date.now() - t0
+    check('A12 an explorer that never answers: the history and token lookups give up at their deadline, as failed lookups',
+      h !== null && d !== null && took < 1_000 && !/no deadline/.test(`${h.message} ${d.message}`) && asked.length === 3 && asked.every((u) => u.startsWith(base.blockscoutBase)),
+      `${took} ms: ${h?.message?.slice(0, 50)} / ${d?.message?.slice(0, 30)}`)
+    check('A12b the deadline is 20 seconds in the wallet', savedDeadline === 20_000)
+    // one list answers, the other hangs (Base's explorer, live 2026-10-30)
+    globalThis.fetch = (url, init) => {
+      if (String(url).includes('/token-transfers')) {
+        return new Promise((_, reject) => init?.signal?.addEventListener('abort', () => reject(init.signal.reason)))
+      }
+      return Promise.resolve(json({ items: [{ hash: '0x' + 'ab'.repeat(32), value: '5', from: { hash: key.address }, to: { hash: '0x' + '11'.repeat(20) }, timestamp: '2026-10-30T00:00:00Z', status: 'ok' }] }))
+    }
+    const half = await evm.fetchEvmHistory(base, key.address)
+    check('A12c when one of the explorer\'s two lists can\'t be read, the rows that could be are kept and the list is marked partial',
+      half.length === 1 && half.partial === true && half[0].hash === '0x' + 'ab'.repeat(32), `${half.length} rows, partial ${half.partial}`)
+    globalThis.fetch = (url) => Promise.resolve(json({ items: [] }))
+    const whole = await evm.fetchEvmHistory(base, key.address)
+    check('A12d a list read whole isn\'t', whole.partial === undefined)
+    evm.evmTuning.explorerTimeoutMs = savedDeadline
+    globalThis.fetch = realFetch
+  }
   key.zero()
 }
 
@@ -561,7 +599,7 @@ console.log('--- D. EVM: errors, history, display, alerts ---')
   const read = (f) => readFileSync(new URL(`../src/${f}`, import.meta.url), 'utf8')
   const app = read('App.tsx')
   check('D4 an EVM history is read again for a few polls after its balance changed (the explorer can lag; BL17)',
-    /if \(changed\) evmHistoryDueRef\.current\[chain\.id\] = 3/.test(app) && /prev\.txs\.length === 0 \|\| due > 0\)/.test(app))
+    /if \(changed\) evmHistoryDueRef\.current\[chain\.id\] = 3/.test(app) && /prev\.txs\.length === 0 \|\| due > 0 \|\| unread\)/.test(app))
   check('D5 payment alerts: the gas coin too, through lib/alerts.ts, practice marked (BL18)',
     /alertGrowth\(chain, chain\.gas\.symbol, prev\.gas, b\.gas/.test(app) && /receivedAmount\(alertBookRef\.current, `\$\{chain\.id\}:\$\{asset\}`, shown, now, Date\.now\(\)\)/.test(app) && /chain\.mainnet \? '' : ' \(practice\)'/.test(app))
   {

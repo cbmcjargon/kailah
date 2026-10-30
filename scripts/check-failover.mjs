@@ -604,6 +604,9 @@ console.log('\n--- K. practice Bitcoin: a second service, and polls that back of
   check('K4 each failed scan in a row doubles the wait between background polls, from 1 to 10 minutes',
     waits.join() === '1,2,4,8,10,10,10' && POLL_BACKOFF_MS.at(-1) === 600_000, waits.join())
   const one = afterScanFailure(undefined, t0)
+  const { pollMayStart, REFRESH_MAX_MS } = await import('../src/lib/pollbackoff.ts')
+  check('K7 a poll leaves an EVM, Solana or TRON refresh under way alone; one that never ended stops holding it after three minutes (review 2026-10-30)',
+    pollMayStart(undefined, t0) && !pollMayStart(t0, t0 + 59_000) && !pollMayStart(t0, t0 + REFRESH_MAX_MS - 1) && pollMayStart(t0, t0 + REFRESH_MAX_MS) && REFRESH_MAX_MS === 180_000)
   check('K4b no backoff → due; during the wait → not due; at its end → due',
     pollDue(undefined, t0) && !pollDue(one, t0 + 59_999) && pollDue(one, t0 + 60_000))
 

@@ -1373,6 +1373,10 @@ export interface TronUiState {
   /** the account exists on chain, so it has history even if none is listed */
   activated?: boolean
   txs: TronTx[]
+  /** the last refresh's history lookup failed, so the list may be out of date */
+  lookupFailed?: boolean
+  /** the balance above is fresh and its history is still being read: nothing can be concluded yet */
+  historyPending?: boolean
   loading: boolean
   error: string | null
 }

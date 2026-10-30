@@ -823,6 +823,13 @@ not exercised live.
 6. **Still accepted:** findings 19 (single-source activity feeds), 27 (EVM
    key held as a JS string), 31 (12-token detection cap) and 32
    (once-per-device real-mode acknowledgment).
+7. **Services that stop working quietly.** *2026-10-30:* Ethereum's second
+   RPC, cloudflare-eth.com, had come to answer only `eth_chainId`. It failed
+   safe, but it left no backup and turned every clean refusal of a send into a
+   hold ("may still go through"), since the record is dropped only when every
+   RPC refuses. Pocket Network's public gateway replaced it, and
+   `npm run check:health` now gives each service the calls the wallet makes,
+   before every release.
 
 ## Suggested fix order
 

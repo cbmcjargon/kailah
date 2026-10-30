@@ -38,7 +38,7 @@ export default function SolCard({
   onStake,
   onTxClick,
 }: SolCardProps) {
-  const { balance, usdcBalance, stakeAccounts, txs, loading, error } = state
+  const { balance, usdcBalance, stakeAccounts, txs, lookupFailed, loading, error } = state
   const stakedTotal = stakeAccounts.reduce((sum, a) => sum + a.lamports, 0n)
   const usd =
     balance !== null && price !== undefined && chain.mainnet
@@ -115,6 +115,13 @@ export default function SolCard({
             Retry
           </button>
         </div>
+      )}
+
+      {lookupFailed === true && !loading && (
+        <p className="zero-state" role="status">
+          Some activity couldn&rsquo;t load just now; the wallet will try again. The balance above
+          is current.
+        </p>
       )}
 
       <div className="chain-address">

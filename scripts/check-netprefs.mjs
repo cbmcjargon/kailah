@@ -389,5 +389,43 @@ console.log('--- I. what a store reviewer meets (review 2026-10-28) ---')
   check('I5 the welcome screen names more than Bitcoin, Dogecoin and Litecoin', /Ethereum, Solana, TRON/.test(welcome) && !/Dogecoin &amp; Litecoin/.test(welcome))
 }
 
+console.log('--- J. a balance shown before its history is read (review 2026-10-30) ---')
+{
+  const evmS = { token: 5n, gas: 0n, others: [], txs: [], loading: false, error: null }
+  const solS = { balance: 5n, usdcBalance: 0n, stakeAccounts: [], txs: [], loading: false, error: null }
+  const tronS = { balance: 5n, usdtBalance: 0n, staked: 0n, activated: false, txs: [], loading: false, error: null }
+  check('J1 while a history is still being read, a network decides nothing yet, funded or not',
+    np.evmActivity({ ...evmS, historyPending: true }) === 'pending' && np.solActivity({ ...solS, historyPending: true }) === 'pending' && np.tronActivity({ ...tronS, historyPending: true }) === 'pending' &&
+      np.evmActivity({ ...evmS, token: 0n, historyPending: true }) === 'pending')
+  check('J1b ...so an empty one can\'t be hidden before its history answers, and it decides as before once it has',
+    np.evmActivity({ ...evmS, token: 0n }) === 'unused' && np.evmActivity(evmS) === 'funded' && np.solActivity(solS) === 'funded' && np.tronActivity(tronS) === 'funded')
+
+  const app = await readFile(new URL('../src/App.tsx', import.meta.url), 'utf8')
+  const refresh = (name, next) => app.slice(app.indexOf(`const refresh${name} = useCallback`), app.indexOf(next))
+  const engines = [
+    ['Evm', refresh('Evm', 'const refreshSol = useCallback'), 'lib.fetchEvmHistory('],
+    ['Sol', refresh('Sol', 'const refreshTron = useCallback'), 'lib.fetchSolHistory('],
+    ['Tron', refresh('Tron', 'const refreshAll'), 'lib.fetchTronHistory('],
+  ]
+  for (const [name, body, history] of engines) {
+    check(`J2 ${name}: the balance is on the card before the history lookup is even asked`,
+      body.includes('historyPending: true') && body.indexOf('historyPending: true') < body.indexOf(history), `${body.length} chars`)
+    check(`J2b ${name}: a failed refresh doesn't leave a history "still being read", and the finished one replaces the state whole`,
+      /loading: false,\s*historyPending: false,/.test(body) && !/\.\.\.s\[chain\.id\],\s*(?:token: b\.token, gas: b\.gas, others|balance,\s*usd[ct]Balance[^}]*?txs)/.test(body))
+    check(`J3 ${name}: a lookup that failed, or that a poll replaced before it finished, is read again on the next poll`,
+      /const unread = prev\.lookupFailed === true \|\| prev\.historyPending === true/.test(body) && /\|\| unread\) \{/.test(body))
+    check(`J4 ${name}: a poll leaves a refresh under way alone, and a finished one frees it`,
+      /if \(opts\?\.silent === true && !pollMayStart\(accountRefreshAtRef\.current\[chain\.id\], Date\.now\(\)\)\) return/.test(body) &&
+        /\.finally\(\(\) => \{\s*if \(isCurrent\(\)\) delete accountRefreshAtRef\.current\[chain\.id\]/.test(body))
+  }
+  check('J4b locking forgets refreshes under way', /accountRefreshAtRef\.current = \{\}/.test(app))
+  check('J3b a history with rows missing counts as a failed lookup', /othersRes\.status === 'rejected' \|\| txsRes\.value\.partial === true/.test(app))
+  for (const card of ['EvmCard', 'SolCard', 'TronCard']) {
+    const src = await readFile(new URL(`../src/components/${card}.tsx`, import.meta.url), 'utf8')
+    check(`J5 ${card} says when activity couldn't load, and that the balance is current`,
+      /lookupFailed === true && !loading/.test(src) && /Some activity couldn&rsquo;t load just now/.test(src) && /balance above\s+is current/.test(src))
+  }
+}
+
 console.log(failures === 0 ? '\nAll networks-shown checks passed.' : `\n${failures} CHECK(S) FAILED.`)
 process.exit(failures === 0 ? 0 : 1)

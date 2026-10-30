@@ -258,13 +258,25 @@ try {
 if (quote !== null) {
   try {
     const prepared = await prepareSwap(MAINNET, BINANCE_HOT, quote)
+    // The swap's unwrap hands back any wrapped SOL the wallet already held, so
+    // this wallet's SOL can go UP: what must hold is the cost once that's taken
+    // off (someone sent it 1,330 wSOL on 2026-10-29, and "SOL went down" stopped
+    // being true of a swap the gate had rightly passed).
+    const wsolHeld = await solRpc(MAINNET, 'getAccountInfo', [
+      solLib.tokenAddress({ mint: 'So11111111111111111111111111111111111111112', owner: BINANCE_HOT, tokenProgram: solLib.TOKEN_PROGRAM }),
+      { encoding: 'base64', dataSlice: { offset: 0, length: 0 }, commitment: 'confirmed' },
+    ]).then((r) => BigInt(r.value?.lamports ?? 0))
+    const solCost = wsolHeld - prepared.simulatedSolDelta
     check(
       'prepareSwap gates pass on an honest V2 swap (simulated deltas returned)',
-      prepared.simulatedUsdcDelta >= prepared.minOutAmount && prepared.simulatedSolDelta < 0n,
+      prepared.simulatedUsdcDelta >= prepared.minOutAmount &&
+        solCost >= quote.inAmount &&
+        solCost <= quote.inAmount + prepared.feeLamports + prepared.accountDepositLamports + 1_000n,
       JSON.stringify({
         usdc: String(prepared.simulatedUsdcDelta),
         min: String(prepared.minOutAmount),
-        sol: String(prepared.simulatedSolDelta),
+        solCost: String(solCost),
+        wsolHeld: String(wsolHeld),
       }),
     )
     const gross = prepared.simulatedUsdcDelta + prepared.swapFee

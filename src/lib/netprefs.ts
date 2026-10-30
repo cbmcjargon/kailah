@@ -188,7 +188,7 @@ export function utxoActivity(s: UtxoSlice | undefined): NetworkActivity {
 }
 
 export function evmActivity(s: EvmUiState | undefined): NetworkActivity {
-  if (s === undefined || s.loading) return 'pending'
+  if (s === undefined || s.loading || s.historyPending === true) return 'pending'
   if (s.token === null || s.gas === null) return s.error !== null ? 'unknown' : 'pending'
   if (s.token > 0n || s.gas > 0n || s.others.some((t) => t.balance > 0n)) return 'funded'
   if (s.txs.length > 0) return 'used'
@@ -198,7 +198,7 @@ export function evmActivity(s: EvmUiState | undefined): NetworkActivity {
 }
 
 export function solActivity(s: SolUiState | undefined): NetworkActivity {
-  if (s === undefined || s.loading) return 'pending'
+  if (s === undefined || s.loading || s.historyPending === true) return 'pending'
   if (s.balance === null) return s.error !== null ? 'unknown' : 'pending'
   if (s.balance > 0n || (s.usdcBalance ?? 0n) > 0n || s.stakeAccounts.length > 0) return 'funded'
   // the USDC lookup is separate and may fail on its own (usdcBalance stays null)
@@ -210,7 +210,7 @@ export function solActivity(s: SolUiState | undefined): NetworkActivity {
 }
 
 export function tronActivity(s: TronUiState | undefined): NetworkActivity {
-  if (s === undefined || s.loading) return 'pending'
+  if (s === undefined || s.loading || s.historyPending === true) return 'pending'
   if (s.balance === null) return s.error !== null ? 'unknown' : 'pending'
   // staked or unstaking TRX is the holder's (BM8)
   if (s.balance > 0n || (s.usdtBalance ?? 0n) > 0n || (s.staked ?? 0n) > 0n) return 'funded'

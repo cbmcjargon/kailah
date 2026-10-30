@@ -5,6 +5,9 @@
 #   -v gzfile=…    a file of the managed gzip block
 #   -v managed=…   the managed header names: any add_header of these is dropped
 #                  and re-printed, so a header removed from _headers goes too
+#   -v var=…       the HTML cache map variable (default kailah_html_cache, the
+#                  wallet's); the marketing site's file uses its own name, since
+#                  two site files in the same nginx must not define one variable
 # (Files, not -v values: not every awk takes a newline in a -v value.)
 #
 # 1. Drops every managed add_header, every gzip directive, and every line
@@ -25,9 +28,10 @@ BEGIN {
   # an empty read would drop every security header from the site
   if (hdrs == "" || gz == "") { print "no headers or gzip block read from " hdrsfile ", " gzfile > "/dev/stderr"; exit 4 }
   n = split(managed, arr, " "); for (i = 1; i <= n; i++) if (arr[i] != "") m[arr[i]] = 1
-  cache = "    add_header Cache-Control $kailah_html_cache always; # kailah-html-cache"
+  if (var == "") var = "kailah_html_cache"
+  cache = "    add_header Cache-Control $" var " always; # kailah-html-cache"
   loc = "    " hdrs "\n" cache; gsub(/\n/, "\n    ", loc)
-  print "map $sent_http_content_type $kailah_html_cache { ~^text/html \"no-cache\"; default \"\"; } # kailah-html-cache"
+  print "map $sent_http_content_type $" var " { ~^text/html \"no-cache\"; default \"\"; } # kailah-html-cache"
 }
 {
   drop = 0

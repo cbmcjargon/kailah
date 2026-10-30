@@ -1,6 +1,6 @@
 # Kailah Wallet — maintenance notes
 
-Self-custody browser wallet, v2.7.8: four engines — UTXO (BTC/DOGE/LTC),
+Self-custody browser wallet, v2.7.9: four engines — UTXO (BTC/DOGE/LTC),
 EVM (USDC+ETH on Base/Ethereum/Arbitrum + BNB on BSC, no explorer API there),
 Solana (SOL + SPL USDC + Jupiter swaps + native staking via hand-built
 stake-program instructions in solstake.ts), TRON (TRX + USDT-TRC20 + Stake 2.0 via tron.ts/tronstake.ts — the node builds raw txs and the wallet DECODES the protobuf bytes
@@ -31,7 +31,10 @@ not feature building, unless the user asks for something new.
   security headers from public/_headers, so redeploy it whenever the CSP hosts
   change, and gives HTML "Cache-Control: no-cache" through
   deploy/nginx-site.awk, which check-headers C runs offline; verify:live
-  fails a page a browser may reuse). Site ID, host and access live in ops/infrastructure.md, which is
+  fails a page a browser may reuse). The marketing site (site/, a static
+  page with its own CSP; site/README.md) is a separate Netlify site and
+  mirrors to the same box with `deploy/site-redeploy.sh` as its own server
+  block, never through the wallet's. Site ID, host and access live in ops/infrastructure.md, which is
   private (see "Public repository" below): @ops/infrastructure.md
   The Netlify CLI rewrites .netlify/netlify.toml's `publish` to this Mac's
   absolute path on every deploy. Restore `publish = "dist"` before
@@ -45,6 +48,13 @@ not feature building, unless the user asks for something new.
   hand only when provider code changes (it burns BlockCypher's ~100/hr DOGE
   budget); check-sol/check-solswap do REAL devnet broadcasts, which is fine —
   devnet coins are worthless.
+- `npm run check:health [-- network-or-host]` — LIVE, by hand and before every
+  release: gives every host in connect-src the calls the wallet really makes
+  and a browser's permission check for both sites and the extension
+  (scripts/health-probes.mjs; check-headers E tests how it reads answers). Exit
+  1 means a service answers but can't do its job, or a job has nothing
+  answering. Busy, silent or bot-checked services are notes: that can be this
+  machine. It spends four of BlockCypher's ~100/hr.
 - `npm run verify:live [origin …]` — after `npm run build`, fetches every dist/
   file from both origins (or the ones given) and byte-compares it with the
   local build, plus all seven public/_headers headers on every response. Its
@@ -163,6 +173,22 @@ not feature building, unless the user asks for something new.
   App.tsx: Shell.tsx clears the provider preference through providerpref.ts,
   never by importing api.ts (that import put every provider in the
   first-load chunk until 2026-10-27).
+- A card's balance never waits for its explorer (EVM, Solana, TRON; review
+  2026-10-30): a refresh publishes the balance with historyPending before it
+  reads history, and netprefs reads that as "pending", never as "no history".
+  Explorer reads have a 20 s deadline (evm.ts explorerGet). A failed lookup, or
+  an EVM list with rows missing (`partial`), is lookupFailed: the card says so
+  and the next poll reads it again, as it does a read a poll replaced before it
+  finished (`unread`). A background poll leaves a refresh under way alone
+  (pollbackoff.ts pollMayStart, up to 3 minutes); a refresh the user asks for
+  replaces it at any time. A Solana RPC that gave no answer rests 60 s and is
+  asked last (sol.ts rpc), but the double-pay guard (rpcEach) asks every server.
+- Services rot quietly. Ethereum's second RPC, cloudflare-eth.com, came to
+  answer only eth_chainId, which left no backup and turned every clean refusal
+  of a send into "may still go through" (submitEvmTx needs every RPC to refuse).
+  eth.api.pocket.network replaced it (2026-10-30); check:health catches the
+  next one. Before adding an EVM RPC, check its refusals read as EVM_REFUSED: a
+  stale-nonce send from the test wallet shows them and can't land.
 - Networks shown (src/lib/netprefs.ts, kailah.sec.netprefs): hidden networks
   are never scanned or polled — every scan/poll/refresh loop in App.tsx goes
   through shownIn() (check-netprefs E1 enforces it) — and an engine chunk
@@ -242,7 +268,9 @@ not feature building, unless the user asks for something new.
   testnet4/mainnet accounts have real history useful for exercising the UI.
   Its mainnet Solana account was reassigned to another program by someone, so
   it can't pay fees: live swap tests simulate from a funded public wallet
-  (check-solswap's BINANCE_HOT) instead.
+  (check-solswap's BINANCE_HOT) instead. That wallet has held about 1,330 wSOL
+  of its own since 2026-10-29, and a swap's unwrap hands it back, so its
+  simulated SOL change is positive: measure the cost, never the sign.
 
 ## Verification habits
 After changes: typecheck + relevant check scripts + drive the affected flow in

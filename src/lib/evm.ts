@@ -121,7 +121,13 @@ export const EVM_CHAINS: Record<EvmChainId, EvmChainConfig> = {
       'Fees are paid in ETH on Ethereum mainnet and can run to several dollars when the network is busy — the exact cost shows before you confirm.',
     mainnet: true,
     chainId: 1,
-    rpcs: ['https://ethereum-rpc.publicnode.com', 'https://cloudflare-eth.com'],
+    // Pocket Network's public gateway replaced cloudflare-eth.com (2026-10-30),
+    // which by then answered only eth_chainId: as the second RPC it left
+    // Ethereum with no backup and turned the first RPC's clean refusal of a
+    // send into "may still go through" (submitEvmTx). Pocket answers every call
+    // the wallet makes, passes a node's refusal on in its own words, and allows
+    // both sites and the extension. npm run check:health catches the next one.
+    rpcs: ['https://ethereum-rpc.publicnode.com', 'https://eth.api.pocket.network'],
     blockscoutBase: 'https://eth.blockscout.com/api/v2',
     explorerTx: (h) => `https://eth.blockscout.com/tx/${h}`,
     explorerAddr: (a) => `https://eth.blockscout.com/address/${a}`,
@@ -260,7 +266,7 @@ export function deriveEvmKey(mnemonic: string): EvmKey {
 const clients = new Map<EvmChainId, PublicClient>()
 
 /** RPC deadlines, and how long an RPC that hung is passed over; tests shorten them. */
-export const evmTuning = { rpcTimeoutMs: 15_000, rpcDownMs: 60_000 }
+export const evmTuning = { rpcTimeoutMs: 15_000, rpcDownMs: 60_000, explorerTimeoutMs: 20_000 }
 const rpcDownUntil = new Map<string, number>()
 
 /**
@@ -389,6 +395,8 @@ export interface EvmUiState {
    * doesn't mean "nothing here" (bug audit 2026-10-27, BM8)
    */
   lookupFailed?: boolean
+  /** the balance above is fresh and its history is still being read: nothing can be concluded yet */
+  historyPending?: boolean
   loading: boolean
   error: string | null
 }
@@ -460,12 +468,27 @@ interface BsTokenHolding {
 
 const DETECTED_TOKEN_CAP = 12
 
+/**
+ * A read from the block explorer, with a deadline. Browsers can wait minutes
+ * on a host that accepts a request and never answers, which kept a card
+ * loading while Arbitrum's explorer crawled (review 2026-10-30). A lookup
+ * that times out reads as any other failed lookup: "couldn't tell" (BM8).
+ */
+function explorerGet(url: string): Promise<Response> {
+  return fetch(url, {
+    signal:
+      typeof AbortSignal !== 'undefined' && 'timeout' in AbortSignal
+        ? AbortSignal.timeout(evmTuning.explorerTimeoutMs)
+        : undefined,
+  })
+}
+
 export async function fetchDetectedTokens(
   chain: EvmChainConfig,
   address: Hex,
 ): Promise<DetectedToken[]> {
   if (chain.blockscoutBase === undefined) return []
-  const res = await fetch(`${chain.blockscoutBase}/addresses/${address}/tokens?type=ERC-20`)
+  const res = await explorerGet(`${chain.blockscoutBase}/addresses/${address}/tokens?type=ERC-20`)
   if (!res.ok) throw new Error(`token detection failed (${res.status})`)
   const body = (await res.json()) as { items?: BsTokenHolding[] }
   const seen = new Set<string>()
@@ -548,17 +571,20 @@ function toEpoch(ts: string | null | undefined): number | null {
   return Number.isFinite(ms) ? Math.floor(ms / 1000) : null
 }
 
-export async function fetchEvmHistory(chain: EvmChainConfig, address: Hex): Promise<EvmTx[]> {
+/** `partial`: one of the explorer's two lists couldn't be read, so rows may be missing. */
+export type EvmHistory = EvmTx[] & { partial?: true }
+
+export async function fetchEvmHistory(chain: EvmChainConfig, address: Hex): Promise<EvmHistory> {
   const base = blockscoutBase(chain)
   if (base === undefined) return []
   const me = address.toLowerCase()
   const out: EvmTx[] = []
 
   const [transfersRes, txsRes] = await Promise.allSettled([
-    fetch(`${base}/addresses/${address}/token-transfers?type=ERC-20`).then((r) =>
+    explorerGet(`${base}/addresses/${address}/token-transfers?type=ERC-20`).then((r) =>
       r.ok ? (r.json() as Promise<{ items?: BsTransferItem[] }>) : Promise.reject(new Error(String(r.status))),
     ),
-    fetch(`${base}/addresses/${address}/transactions`).then((r) =>
+    explorerGet(`${base}/addresses/${address}/transactions`).then((r) =>
       r.ok ? (r.json() as Promise<{ items?: BsTxItem[] }>) : Promise.reject(new Error(String(r.status))),
     ),
   ])
@@ -619,11 +645,16 @@ export async function fetchEvmHistory(chain: EvmChainConfig, address: Hex): Prom
   // An explorer that couldn't answer leaves no way to tell "no history"
   // from "history unread": say so instead of returning an empty list (bug
   // audit 2026-10-27, BM8: the first network pick hid a used network).
-  if (out.length === 0 && (transfersRes.status === 'rejected' || txsRes.status === 'rejected')) {
+  const partial = transfersRes.status === 'rejected' || txsRes.status === 'rejected'
+  if (out.length === 0 && partial) {
     throw new Error(`Couldn't read the ${chain.name} history right now.`)
   }
   out.sort((a, b) => (b.time ?? Number.MAX_SAFE_INTEGER) - (a.time ?? Number.MAX_SAFE_INTEGER))
-  return out.slice(0, 100)
+  const rows: EvmHistory = out.slice(0, 100)
+  // A list with rows missing is a failed lookup too: the card says so and the
+  // next poll tries again, rather than keeping it until the balance moves.
+  if (partial) rows.partial = true
+  return rows
 }
 
 // ---------------------------------------------------------------------------

@@ -28,7 +28,7 @@ import { CHAINS, chainsForMode } from './lib/networks'
 import { deriveAccount } from './lib/keys'
 import { expectCredit, newAlertBook, receivedAmount } from './lib/alerts'
 import { scanAccount } from './lib/scanner'
-import { afterScanFailure, pollDue, type PollBackoff } from './lib/pollbackoff'
+import { afterScanFailure, pollDue, pollMayStart, type PollBackoff } from './lib/pollbackoff'
 import {
   forgetStateSnapshot,
   loadStateSnapshot,
@@ -394,6 +394,8 @@ export default function App({ mnemonic, sessionRef, derivedKeys, onLock, onErase
   const escalatedRef = useRef<Partial<Record<string, boolean>>>({})
   // after a failed scan, background polls wait longer each time (pollbackoff.ts)
   const pollBackoffRef = useRef<Partial<Record<string, PollBackoff>>>({})
+  // when each EVM, Solana or TRON refresh under way started (pollMayStart)
+  const accountRefreshAtRef = useRef<Partial<Record<string, number>>>({})
 
   // Orphans every in-flight scan by advancing (never resetting) the per-chain
   // sequence numbers — a reset would let a pre-lock response reuse a fresh
@@ -417,6 +419,7 @@ export default function App({ mnemonic, sessionRef, derivedKeys, onLock, onErase
     escalatedRef.current = {}
     pendingManualScanRef.current = {}
     pollBackoffRef.current = {}
+    accountRefreshAtRef.current = {}
   }, [])
 
   // One UTXO account's scan, by slot key: a ChainId for the seed account,
@@ -606,6 +609,8 @@ export default function App({ mnemonic, sessionRef, derivedKeys, onLock, onErase
       const lib = evmRef.current
       const key = evmKeyRef.current
       if (lib === null || key === null) return
+      if (opts?.silent === true && !pollMayStart(accountRefreshAtRef.current[chain.id], Date.now())) return
+      accountRefreshAtRef.current[chain.id] = Date.now()
       const seq = (evmSeqRef.current[chain.id] ?? 0) + 1
       evmSeqRef.current[chain.id] = seq
       const isCurrent = () => evmSeqRef.current[chain.id] === seq
@@ -630,8 +635,17 @@ export default function App({ mnemonic, sessionRef, derivedKeys, onLock, onErase
           let txs = prev.txs
           let others = prev.others
           let lookupFailed = prev.lookupFailed
-          if (opts?.quick !== true || changed || prev.txs.length === 0 || due > 0) {
+          // a read that failed, or that a poll replaced before it finished, is
+          // read again: the balance it was for no longer counts as a change
+          const unread = prev.lookupFailed === true || prev.historyPending === true
+          if (opts?.quick !== true || changed || prev.txs.length === 0 || due > 0 || unread) {
             if (!changed && due > 0) evmHistoryDueRef.current[chain.id] = due - 1
+            // The balance is known: show it now, and let a slow explorer hold
+            // up only the activity under it (review 2026-10-30).
+            setEvmStates((s) => ({
+              ...s,
+              [chain.id]: { ...s[chain.id], token: b.token, gas: b.gas, historyPending: true, error: null },
+            }))
             const [txsRes, othersRes] = await Promise.allSettled([
               lib.fetchEvmHistory(chain, key.address),
               lib.fetchDetectedTokens(chain, key.address),
@@ -640,7 +654,8 @@ export default function App({ mnemonic, sessionRef, derivedKeys, onLock, onErase
             // is remembered: "nothing here" can't be told then (BM8)
             if (txsRes.status === 'fulfilled') txs = txsRes.value
             if (othersRes.status === 'fulfilled') others = othersRes.value
-            lookupFailed = txsRes.status === 'rejected' || othersRes.status === 'rejected'
+            lookupFailed =
+              txsRes.status === 'rejected' || othersRes.status === 'rejected' || txsRes.value.partial === true
           }
           if (!isCurrent()) return
           manualWaitingRef.current[chain.id] = false
@@ -658,9 +673,13 @@ export default function App({ mnemonic, sessionRef, derivedKeys, onLock, onErase
             [chain.id]: {
               ...s[chain.id],
               loading: false,
+              historyPending: false,
               error: opts?.silent === true && !manualFailed ? s[chain.id].error : errMessage(e),
             },
           }))
+        })
+        .finally(() => {
+          if (isCurrent()) delete accountRefreshAtRef.current[chain.id]
         })
     },
     [pushToast, alertGrowth],
@@ -673,6 +692,8 @@ export default function App({ mnemonic, sessionRef, derivedKeys, onLock, onErase
       // the key for THIS chain's mode, whatever mode the UI shows right now
       const key = chain.mainnet ? solKeysRef.current?.real : solKeysRef.current?.practice
       if (lib === null || key === undefined) return
+      if (opts?.silent === true && !pollMayStart(accountRefreshAtRef.current[chain.id], Date.now())) return
+      accountRefreshAtRef.current[chain.id] = Date.now()
       const seq = (solSeqRef.current[chain.id] ?? 0) + 1
       solSeqRef.current[chain.id] = seq
       const isCurrent = () => solSeqRef.current[chain.id] === seq
@@ -700,7 +721,19 @@ export default function App({ mnemonic, sessionRef, derivedKeys, onLock, onErase
           // a stake that is activating or winding down changes at an epoch's
           // end with no balance moving: keep its view current (BL26)
           const stakeMoving = prev.stakeAccounts.some((a) => a.state === 'activating' || a.state === 'deactivating')
-          if (opts?.quick !== true || changed || prev.txs.length === 0 || stakeMoving) {
+          const unread = prev.lookupFailed === true || prev.historyPending === true
+          if (opts?.quick !== true || changed || prev.txs.length === 0 || stakeMoving || unread) {
+            // the balance is known: show it now (see refreshEvm)
+            setSolStates((s) => ({
+              ...s,
+              [chain.id]: {
+                ...s[chain.id],
+                balance,
+                usdcBalance: usdcBalance ?? s[chain.id].usdcBalance,
+                historyPending: true,
+                error: null,
+              },
+            }))
             const [txsRes, stakeRes] = await Promise.allSettled([
               lib.fetchSolHistory(chain, key.address),
               lib.fetchStakeAccounts(chain, key.address),
@@ -735,9 +768,13 @@ export default function App({ mnemonic, sessionRef, derivedKeys, onLock, onErase
             [chain.id]: {
               ...s[chain.id],
               loading: false,
+              historyPending: false,
               error: opts?.silent === true && !manualFailed ? s[chain.id].error : errMessage(e),
             },
           }))
+        })
+        .finally(() => {
+          if (isCurrent()) delete accountRefreshAtRef.current[chain.id]
         })
     },
     [pushToast, alertGrowth],
@@ -749,6 +786,8 @@ export default function App({ mnemonic, sessionRef, derivedKeys, onLock, onErase
       const lib = tronRef.current
       const key = chain.mainnet ? tronKeysRef.current?.real : tronKeysRef.current?.practice
       if (lib === null || key === undefined) return
+      if (opts?.silent === true && !pollMayStart(accountRefreshAtRef.current[chain.id], Date.now())) return
+      accountRefreshAtRef.current[chain.id] = Date.now()
       const seq = (tronSeqRef.current[chain.id] ?? 0) + 1
       tronSeqRef.current[chain.id] = seq
       const isCurrent = () => tronSeqRef.current[chain.id] === seq
@@ -772,11 +811,28 @@ export default function App({ mnemonic, sessionRef, derivedKeys, onLock, onErase
           alertGrowth(chain, 'TRX', prev.balance, balance, lib.formatTron)
           alertGrowth(chain, chain.usdt.symbol, prev.usdtBalance, usdtBalance, (v) => lib.formatTronUsdt(chain, v))
           let txs = prev.txs
-          if (opts?.quick !== true || changed || prev.txs.length === 0) {
+          let lookupFailed = prev.lookupFailed
+          const unread = prev.lookupFailed === true || prev.historyPending === true
+          if (opts?.quick !== true || changed || prev.txs.length === 0 || unread) {
+            // the balance is known: show it now (see refreshEvm)
+            setTronStates((s) => ({
+              ...s,
+              [chain.id]: {
+                ...s[chain.id],
+                balance,
+                usdtBalance: usdtBalance ?? s[chain.id].usdtBalance,
+                staked,
+                activated,
+                historyPending: true,
+                error: null,
+              },
+            }))
             try {
               txs = await lib.fetchTronHistory(chain, key.address, prev.txs)
+              lookupFailed = false
             } catch {
-              // history is best-effort
+              // history is best-effort, but the card says it couldn't load
+              lookupFailed = true
             }
           }
           if (!isCurrent()) return
@@ -789,6 +845,7 @@ export default function App({ mnemonic, sessionRef, derivedKeys, onLock, onErase
               staked,
               activated,
               txs,
+              lookupFailed,
               loading: false,
               error: null,
             },
@@ -803,9 +860,13 @@ export default function App({ mnemonic, sessionRef, derivedKeys, onLock, onErase
             [chain.id]: {
               ...s[chain.id],
               loading: false,
+              historyPending: false,
               error: opts?.silent === true && !manualFailed ? s[chain.id].error : errMessage(e),
             },
           }))
+        })
+        .finally(() => {
+          if (isCurrent()) delete accountRefreshAtRef.current[chain.id]
         })
     },
     [pushToast, alertGrowth],

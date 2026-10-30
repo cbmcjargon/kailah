@@ -63,9 +63,11 @@ echo "site file: $SITE"
 echo "webroot:   $ROOT"
 
 # 1. Files: stream dist/ into a staging dir, then swap it into place.
+#    COPYFILE_DISABLE: macOS tar otherwise adds a ._name entry for every file
+#    with an extended attribute, and nginx would serve those as ordinary files.
 STAGE="$ROOT.new"
 PREV="$ROOT.prev"
-tar -C dist -cf - . | remote "rm -rf '$STAGE' && mkdir -p '$STAGE' && tar -C '$STAGE' -xf - 2>/dev/null \
+COPYFILE_DISABLE=1 tar -C dist -cf - . | remote "rm -rf '$STAGE' && mkdir -p '$STAGE' && tar -C '$STAGE' -xf - 2>/dev/null \
   && chmod -R a+rX '$STAGE' && rm -rf '$PREV' && mv '$ROOT' '$PREV' && mv '$STAGE' '$ROOT'"
 
 # 2. Headers + gzip: drop every managed add_header and gzip directive, print

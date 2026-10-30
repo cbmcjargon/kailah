@@ -17,6 +17,14 @@
         "scripts/serve-dist.mjs"
       ],
       "port": 4173
+    },
+    {
+      "name": "site-preview",
+      "runtimeExecutable": "node",
+      "runtimeArgs": [
+        "scripts/serve-site.mjs"
+      ],
+      "port": 4174
     }
   ]
 }

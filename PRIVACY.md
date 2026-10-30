@@ -49,9 +49,9 @@ which is why the builds are reproducible and the dependencies pinned (see
   - **Base, Ethereum, Arbitrum, BNB Chain:** mainnet.base.org,
     sepolia.base.org, base-rpc.publicnode.com, ethereum-rpc.publicnode.com,
     arbitrum-one-rpc.publicnode.com, bsc-rpc.publicnode.com,
-    cloudflare-eth.com, arb1.arbitrum.io, bsc-dataseed.bnbchain.org,
-    base.blockscout.com, base-sepolia.blockscout.com, eth.blockscout.com,
-    arbitrum.blockscout.com.
+    eth.api.pocket.network (Pocket Network, Ethereum's second server),
+    arb1.arbitrum.io, bsc-dataseed.bnbchain.org, base.blockscout.com,
+    base-sepolia.blockscout.com, eth.blockscout.com, arbitrum.blockscout.com.
   - **Solana:** solana-rpc.publicnode.com, solana.api.pocket.network
     (Pocket Network, a second server for when the first is unreachable,
     and asked alongside it before a held send is released),

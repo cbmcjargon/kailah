@@ -32,7 +32,7 @@ export default function TronCard({
   onStake,
   onTxClick,
 }: TronCardProps) {
-  const { balance, usdtBalance, txs, loading, error } = state
+  const { balance, usdtBalance, txs, lookupFailed, loading, error } = state
   // staked or unstaking TRX: the holder's, not spendable (bug audit 2026-10-27, BM9)
   const staked = state.staked ?? 0n
   const usd =
@@ -107,6 +107,13 @@ export default function TronCard({
             Retry
           </button>
         </div>
+      )}
+
+      {lookupFailed === true && !loading && (
+        <p className="zero-state" role="status">
+          Some activity couldn&rsquo;t load just now; the wallet will try again. The balance above
+          is current.
+        </p>
       )}
 
       <div className="chain-address">

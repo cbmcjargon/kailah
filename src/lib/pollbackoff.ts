@@ -30,3 +30,19 @@ export function afterScanFailure(prev: PollBackoff | undefined, now: number): Po
 export function pollDue(backoff: PollBackoff | undefined, now: number): boolean {
   return backoff === undefined || now >= backoff.retryAt
 }
+
+/**
+ * How long a background poll leaves an EVM, Solana or TRON refresh alone once
+ * it has started. A poll that replaced a refresh under way threw its work
+ * away, so behind a service slower than the 60 s cadence no refresh ever
+ * finished, and each one added requests to a struggling service (review
+ * 2026-10-30). Every lookup has its own deadline, so a refresh ends well
+ * before this; the limit only stops one that never settles from ending the
+ * polls for good. A refresh the user asks for replaces it at any time.
+ */
+export const REFRESH_MAX_MS = 180_000
+
+/** Whether a background poll may start a refresh, given when the last one started (undefined: it finished). */
+export function pollMayStart(startedAt: number | undefined, now: number): boolean {
+  return startedAt === undefined || now - startedAt >= REFRESH_MAX_MS
+}

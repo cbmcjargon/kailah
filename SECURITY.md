@@ -64,7 +64,7 @@ Out of scope:
 
 ## Supported versions
 
-Only the latest release (currently v2.7.8) and `main` receive fixes.
+Only the latest release (currently v2.7.9) and `main` receive fixes.
 
 ## Known open risks
 

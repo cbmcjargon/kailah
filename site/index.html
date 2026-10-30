@@ -1,0 +1,658 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; font-src 'self'; connect-src 'none'; base-uri 'none'; form-action 'none'; object-src 'none'; require-trusted-types-for 'script'; trusted-types default" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>Kailah Wallet — a self-custody browser wallet that checks every transaction before signing</title>
+    <meta name="description" content="Kailah Wallet is an open-source, self-custody wallet that runs in your browser. One recovery phrase for Bitcoin, Dogecoin, Litecoin, USDC and ETH on Base, Ethereum and Arbitrum, BNB, Solana and TRON. Every transaction is checked before it is signed. No servers, no accounts, no trackers." />
+    <meta name="theme-color" content="#0b0e14" />
+    <meta name="color-scheme" content="dark" />
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="Kailah Wallet" />
+    <meta property="og:description" content="A self-custody browser wallet that reads every transaction before you sign it. Nine networks, one recovery phrase, no servers, no trackers. Open source." />
+    <meta property="og:url" content="https://kailah.netlify.app/" />
+    <meta property="og:image" content="https://kailah.netlify.app/img/og.jpg" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <link rel="canonical" href="https://kailah.netlify.app/" />
+    <link rel="icon" type="image/svg+xml" href="icon.svg" />
+    <link rel="apple-touch-icon" href="icon-192.png" />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <a class="skip" href="#main">Skip to content</a>
+
+    <svg class="sprite" aria-hidden="true" focusable="false">
+      <symbol id="i-check" viewBox="0 0 24 24"><path d="M5 12.5l4.2 4.2L19 7.5" /></symbol>
+      <symbol id="i-x" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18" /></symbol>
+      <symbol id="i-arrow" viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6" /></symbol>
+      <symbol id="i-ext" viewBox="0 0 24 24"><path d="M14 4h6v6M20 4l-9 9M19 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1h5" /></symbol>
+      <symbol id="i-decode" viewBox="0 0 24 24"><path d="M8 4H6a2 2 0 0 0-2 2v4a2 2 0 0 1-2 2 2 2 0 0 1 2 2v4a2 2 0 0 0 2 2h2M16 4h2a2 2 0 0 1 2 2v4a2 2 0 0 0 2 2 2 2 0 0 0-2 2v4a2 2 0 0 1-2 2h-2M9 12h6" /></symbol>
+      <symbol id="i-swap" viewBox="0 0 24 24"><path d="M4 8h13M14 4l4 4-4 4M20 16H7M10 12l-4 4 4 4" /></symbol>
+      <symbol id="i-ban" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5" /><path d="M6 6l12 12" /></symbol>
+      <symbol id="i-layers" viewBox="0 0 24 24"><path d="M12 3l9 5-9 5-9-5 9-5zM3 13l9 5 9-5M3 17.5l9 5 9-5" /></symbol>
+      <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2.5 12s3.5-6.5 9.5-6.5 9.5 6.5 9.5 6.5-3.5 6.5-9.5 6.5S2.5 12 2.5 12z" /><circle cx="12" cy="12" r="3" /></symbol>
+      <symbol id="i-usb" viewBox="0 0 24 24"><rect x="7" y="2.5" width="10" height="7" rx="1.5" /><path d="M12 9.5v12M8 14l4 3 4-3M10 5.5h1M13 5.5h1" /></symbol>
+      <symbol id="i-flask" viewBox="0 0 24 24"><path d="M9.5 3h5M10 3v6l-5.5 9.2A2 2 0 0 0 6.2 21h11.6a2 2 0 0 0 1.7-2.8L14 9V3M7.5 15.5h9" /></symbol>
+      <symbol id="i-lock" viewBox="0 0 24 24"><rect x="4" y="11" width="16" height="10" rx="2" /><path d="M8 11V7a4 4 0 0 1 8 0v4" /></symbol>
+      <symbol id="i-server-off" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="6" rx="1.5" /><rect x="3" y="14" width="18" height="6" rx="1.5" /><path d="M7 7h.01M7 17h.01M2.5 2.5l19 19" /></symbol>
+      <symbol id="i-list" viewBox="0 0 24 24"><path d="M9 6h12M9 12h12M9 18h12M4 6h.01M4 12h.01M4 18h.01" /></symbol>
+      <symbol id="i-key" viewBox="0 0 24 24"><circle cx="8" cy="15" r="4.5" /><path d="M11.5 11.5L20 3M16 7l3 3M13.5 9.5l2 2" /></symbol>
+      <symbol id="i-github" viewBox="0 0 24 24"><path d="M9 19c-4.3 1.4-4.3-2.5-6-3m12 5v-3.5c0-1 .1-1.4-.5-2 2.8-.3 5.5-1.4 5.5-6a4.6 4.6 0 0 0-1.3-3.2 4.2 4.2 0 0 0-.1-3.2s-1.1-.3-3.5 1.3a12.3 12.3 0 0 0-6.2 0C6.5 2.8 5.4 3.1 5.4 3.1a4.2 4.2 0 0 0-.1 3.2A4.6 4.6 0 0 0 4 9.5c0 4.6 2.7 5.7 5.5 6-.6.6-.6 1.2-.5 2V21" /></symbol>
+      <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" /><path d="M12 11v5M12 8h.01" /></symbol>
+      <symbol id="i-warn" viewBox="0 0 24 24"><path d="M12 3.5l9.5 16.5h-19L12 3.5zM12 10v4M12 17h.01" /></symbol>
+      <symbol id="i-stake" viewBox="0 0 24 24"><path d="M4 20V10M10 20V4M16 20v-7M22 20V8M2 20h20" /></symbol>
+      <symbol id="i-qr" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1" /><rect x="14" y="3" width="7" height="7" rx="1" /><rect x="3" y="14" width="7" height="7" rx="1" /><path d="M14 14h3v3M21 14v3M17 21h4M14 21h.01M21 21h.01" /></symbol>
+      <symbol id="i-bell" viewBox="0 0 24 24"><path d="M6 16V11a6 6 0 0 1 12 0v5l1.5 2h-15L6 16zM10 21h4" /></symbol>
+      <symbol id="i-file" viewBox="0 0 24 24"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8l-5-5zM14 3v5h5M8.5 13h7M8.5 17h7" /></symbol>
+      <symbol id="i-finger" viewBox="0 0 24 24"><path d="M6.5 8.5A6.5 6.5 0 0 1 18 7M4.5 13a8 8 0 0 1 .3-3M19.5 11a8 8 0 0 1-.1 5.5M8 11.5a4 4 0 0 1 7.5-1.8M8.5 16.5A4 4 0 0 1 8 14M11 20.5a7 7 0 0 1-1.5-2.5M12 12v2.5a6 6 0 0 0 3.5 5.5M15.8 12.5a8 8 0 0 1-.3 4.5" /></symbol>
+      <symbol id="i-grid" viewBox="0 0 24 24"><rect x="3" y="3" width="7.5" height="7.5" rx="1.5" /><rect x="13.5" y="3" width="7.5" height="7.5" rx="1.5" /><rect x="3" y="13.5" width="7.5" height="7.5" rx="1.5" /><rect x="13.5" y="13.5" width="7.5" height="7.5" rx="1.5" /></symbol>
+      <symbol id="i-zap" viewBox="0 0 24 24"><path d="M13 2.5L4.5 13.5H12l-1 8 8.5-11H12l1-8z" /></symbol>
+      <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2" /></symbol>
+      <symbol id="i-cart" viewBox="0 0 24 24"><path d="M3 4h2l2.4 11.2a2 2 0 0 0 2 1.6h8.4a2 2 0 0 0 2-1.5L21.5 8H6.2" /><circle cx="10" cy="20.5" r="1" /><circle cx="17" cy="20.5" r="1" /></symbol>
+      <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 2.5l8 3v6c0 5-3.4 8.6-8 10-4.6-1.4-8-5-8-10v-6l8-3z" /><path d="M8.5 12l2.3 2.3L15.5 9.5" /></symbol>
+      <symbol id="i-hash" viewBox="0 0 24 24"><path d="M5 9h14M5 15h14M10 4L8 20M16 4l-2 16" /></symbol>
+      <symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" /><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18" /></symbol>
+      <symbol id="i-menu" viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16" /></symbol>
+    </svg>
+
+    <header class="nav" data-nav>
+      <div class="wrap nav-inner">
+        <a class="brand" href="#top" aria-label="Kailah Wallet, back to top">
+          <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true" focusable="false">
+            <circle cx="16" cy="16" r="14" stroke="#5eead4" stroke-width="2.25" fill="none" />
+            <path d="M12.2 9.5v13M20 9.5l-7.3 6.9M15 14.9l5.2 7.6" stroke="#5eead4" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round" fill="none" />
+          </svg>
+          <span class="brand-name">Kailah Wallet</span>
+        </a>
+        <button class="nav-toggle" type="button" aria-expanded="false" aria-controls="nav-menu" data-nav-toggle>
+          <svg class="ico" aria-hidden="true" focusable="false"><use href="#i-menu" /></svg>
+          <span>Menu</span>
+        </button>
+        <nav class="nav-menu" id="nav-menu" aria-label="Page sections">
+          <ul class="nav-links">
+            <li><a href="#networks">Networks</a></li>
+            <li><a href="#checks">Checks</a></li>
+            <li><a href="#practice">Practice</a></li>
+            <li><a href="#privacy">Privacy</a></li>
+            <li><a href="#verify">Verify</a></li>
+            <li><a href="#ledger">Ledger</a></li>
+            <li><a href="#faq">FAQ</a></li>
+          </ul>
+          <a class="btn btn-primary btn-small nav-cta" href="https://kailah-wallet.netlify.app">Use it now</a>
+        </nav>
+      </div>
+    </header>
+
+    <main id="main">
+      <!-- ============================== HERO ============================== -->
+      <section class="hero" id="top" aria-labelledby="hero-title">
+        <div class="hero-bg" aria-hidden="true">
+          <div class="rings">
+            <span class="ring r1"></span><span class="ring r2"></span><span class="ring r3"></span><span class="ring r4"></span>
+          </div>
+          <div class="glow"></div>
+          <div class="grid"></div>
+        </div>
+        <div class="wrap hero-inner">
+          <div class="hero-copy">
+            <p class="eyebrow-pill">
+              <span class="dot" aria-hidden="true"></span>
+              v2.7.9 · open source · no servers, no trackers
+            </p>
+            <h1 class="hero-title" id="hero-title">
+              The wallet that <span class="grad">reads every transaction</span> before you sign it.
+            </h1>
+            <p class="lead">
+              Kailah Wallet is a self-custody wallet that runs entirely in your browser. One 12-word recovery phrase
+              holds Bitcoin, Dogecoin, Litecoin, USDC and ETH on Base, Ethereum and Arbitrum, BNB, Solana and TRON.
+              Your keys are created and encrypted on your device and never leave it.
+            </p>
+            <div class="cta-row">
+              <a class="btn btn-primary btn-lg" href="https://kailah-wallet.netlify.app">
+                Use it now
+                <svg class="ico" aria-hidden="true" focusable="false"><use href="#i-arrow" /></svg>
+              </a>
+              <span class="btn btn-secondary btn-lg is-soon" role="status">
+                Chrome extension
+                <span class="soon-tag">coming soon</span>
+              </span>
+            </div>
+            <p class="honest">
+              Hobby-grade and maintained by one person. Its security reviews were AI-assisted, not a third-party
+              audit. Keep amounts small.
+            </p>
+          </div>
+
+          <div class="hero-visual" aria-hidden="true">
+            <div class="device-wrap">
+              <div class="device-clip">
+                <div class="device">
+                  <div class="device-screen">
+                    <img src="img/dashboard.webp" width="780" height="1688" alt="" fetchpriority="high" decoding="async" />
+                  </div>
+                </div>
+              </div>
+              <div class="chip chip-a">
+                <svg class="ico" aria-hidden="true" focusable="false"><use href="#i-check" /></svg>
+                Decoded before signing
+              </div>
+              <div class="chip chip-b">
+                <svg class="ico" aria-hidden="true" focusable="false"><use href="#i-check" /></svg>
+                No token approvals, ever
+              </div>
+              <div class="chip chip-c">
+                <svg class="ico ico-warn" aria-hidden="true" focusable="false"><use href="#i-eye" /></svg>
+                Lookalike address stopped
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="wrap">
+          <ul class="stats" aria-label="At a glance">
+            <li><strong>9</strong><span>networks</span></li>
+            <li><strong>1</strong><span>recovery phrase</span></li>
+            <li><strong>0</strong><span>servers of ours</span></li>
+            <li><strong>0</strong><span>trackers or accounts</span></li>
+            <li><strong>0.5%</strong><span>the only Kailah fee, on swaps</span></li>
+          </ul>
+        </div>
+      </section>
+
+      <!-- ============================== NETWORKS ============================== -->
+      <section class="section" id="networks" aria-labelledby="networks-title">
+        <div class="wrap">
+          <div class="section-head reveal">
+            <p class="eyebrow">Nine networks, one phrase</p>
+            <h2 class="h2" id="networks-title">Everything from a single, standard recovery phrase.</h2>
+            <p class="sub">
+              Twelve BIP39 words derive every account. Bitcoin, Litecoin and Dogecoin use the usual paths, so the same
+              phrase restores in Electrum, Sparrow or Cake Wallet; the Solana account restores in Phantom or Solflare.
+              Each network family has a practice twin on its test network.
+            </p>
+          </div>
+
+          <ul class="net-grid">
+            <li class="net reveal">
+              <span class="coin c-btc">BTC</span>
+              <h3>Bitcoin</h3>
+              <p>A fresh address for every payment, fee choice, Speed up (RBF) for stuck sends, Ledger accounts.</p>
+              <span class="twin">Practice: testnet4</span>
+            </li>
+            <li class="net reveal">
+              <span class="coin c-doge">DOGE</span>
+              <h3>Dogecoin</h3>
+              <p>Send, receive and history on the standard BIP44 path, read from two free data services.</p>
+              <span class="twin">Mainnet only</span>
+            </li>
+            <li class="net reveal">
+              <span class="coin c-ltc">LTC</span>
+              <h3>Litecoin</h3>
+              <p>Native segwit, Speed up (RBF) and Ledger accounts. MWEB addresses are recognised and explained, not mis-rejected.</p>
+              <span class="twin">Mainnet only</span>
+            </li>
+            <li class="net reveal">
+              <span class="coin c-base">BASE</span>
+              <h3>Base</h3>
+              <p>USDC and the ETH that pays its fees, which usually cost fractions of a cent here.</p>
+              <span class="twin">Practice: Base Sepolia</span>
+            </li>
+            <li class="net reveal">
+              <span class="coin c-eth">ETH</span>
+              <h3>Ethereum</h3>
+              <p>USDC and ETH on mainnet, with the fee truth on the form: it can cost dollars when the network is busy.</p>
+              <span class="twin">Same 0x address as Base</span>
+            </li>
+            <li class="net reveal">
+              <span class="coin c-arb">ARB</span>
+              <h3>Arbitrum One</h3>
+              <p>USDC and ETH, cheap fees, the same one address as every other Ethereum-style network here.</p>
+              <span class="twin">Same 0x address as Base</span>
+            </li>
+            <li class="net reveal">
+              <span class="coin c-bnb">BNB</span>
+              <h3>BNB Chain</h3>
+              <p>Hold and send BNB from the same account. Stated plainly: no keyless explorer exists, so this card has no activity feed.</p>
+              <span class="twin">Balances and sends only</span>
+            </li>
+            <li class="net reveal">
+              <span class="coin c-sol">SOL</span>
+              <h3>Solana</h3>
+              <p>SOL and USDC, swaps between them through Jupiter, native staking to a validator, Solana Pay QR codes.</p>
+              <span class="twin">Practice: devnet</span>
+            </li>
+            <li class="net reveal">
+              <span class="coin c-trx">TRX</span>
+              <h3>TRON</h3>
+              <p>TRX and USDT (TRC-20), with Stake 2.0 staking for rewards and cheaper USDT sends.</p>
+              <span class="twin">Practice: Nile</span>
+            </li>
+          </ul>
+        </div>
+      </section>
+
+      <!-- ============================== CHECKS ============================== -->
+      <section class="section section-checks" id="checks" aria-labelledby="checks-title">
+        <div class="wrap">
+          <div class="section-head reveal">
+            <p class="eyebrow">The difference</p>
+            <h2 class="h2" id="checks-title">Every transaction is checked before signing.</h2>
+            <p class="sub">
+              A wallet's one real job is to sign only what you meant. Kailah decodes what it is about to sign, compares
+              it with what you asked for, and refuses anything else. Nothing is signed blind.
+            </p>
+          </div>
+
+          <div class="checks-layout">
+            <figure class="console-fig reveal">
+              <div class="console" data-console>
+                <div class="console-head">
+                  <span class="console-title" data-c-title>Send USDT</span>
+                  <span class="console-net" data-c-net>TRON · practice</span>
+                </div>
+                <dl class="console-rows" data-c-rows>
+                  <div class="row"><dt>To</dt><dd>TUA78y…CxxcxK</dd></div>
+                  <div class="row"><dt>Amount</dt><dd>25 USDT</dd></div>
+                  <div class="row"><dt>Network cost</dt><dd>~12.45 TRX</dd></div>
+                </dl>
+                <ol class="checks" data-c-checks>
+                  <li class="check is-ok"><span class="check-ico"><svg aria-hidden="true" focusable="false"><use href="#i-check" /></svg></span><span class="check-text">Transaction built by the node, decoded field by field</span></li>
+                  <li class="check is-ok"><span class="check-ico"><svg aria-hidden="true" focusable="false"><use href="#i-check" /></svg></span><span class="check-text">Recipient and amount match what you typed</span></li>
+                  <li class="check is-ok"><span class="check-ico"><svg aria-hidden="true" focusable="false"><use href="#i-check" /></svg></span><span class="check-text">Token transfer is byte-identical to the one the wallet built</span></li>
+                  <li class="check is-ok"><span class="check-ico"><svg aria-hidden="true" focusable="false"><use href="#i-check" /></svg></span><span class="check-text">No field the wallet didn't ask for</span></li>
+                  <li class="check is-ok"><span class="check-ico"><svg aria-hidden="true" focusable="false"><use href="#i-check" /></svg></span><span class="check-text">No earlier send still waiting to land</span></li>
+                  <li class="check is-ok"><span class="check-ico"><svg aria-hidden="true" focusable="false"><use href="#i-check" /></svg></span><span class="check-text">Not a lookalike of an address you've paid</span></li>
+                </ol>
+                <div class="verdict is-ok" data-c-verdict>
+                  <svg class="ico" aria-hidden="true" focusable="false"><use href="#i-check" /></svg>
+                  <span data-c-verdict-text>Ready to sign</span>
+                </div>
+              </div>
+              <figcaption>An illustration of the checks the wallet runs. The real review screen is plainer, and the checks happen before it opens.</figcaption>
+            </figure>
+
+            <ul class="check-cards">
+              <li class="card reveal">
+                <span class="card-ico"><svg class="ico" aria-hidden="true" focusable="false"><use href="#i-decode" /></svg></span>
+                <h3>TRON: decoded field by field</h3>
+                <p>The network node builds the transaction. The wallet reads the bytes back with its own decoder and refuses to sign anything it didn't ask for. A USDT send must match the wallet's own call, byte for byte.</p>
+              </li>
+              <li class="card reveal">
+                <span class="card-ico"><svg class="ico" aria-hidden="true" focusable="false"><use href="#i-swap" /></svg></span>
+                <h3>Swaps: simulated before signed</h3>
+                <p>Jupiter's instructions must pass an allow-list, and an on-chain simulation must match the quote. A swap can only move the two coins on screen, never your other tokens.</p>
+              </li>
+              <li class="card reveal">
+                <span class="card-ico"><svg class="ico" aria-hidden="true" focusable="false"><use href="#i-ban" /></svg></span>
+                <h3>No token approvals, ever</h3>
+                <p>On Ethereum-style networks the wallet signs plain transfers only, so no contract is ever allowed to spend your USDC later. Every signature names its chain.</p>
+              </li>
+              <li class="card reveal">
+                <span class="card-ico"><svg class="ico" aria-hidden="true" focusable="false"><use href="#i-layers" /></svg></span>
+                <h3>A double-pay guard</h3>
+                <p>Every broadcast is recorded before it goes out. While an earlier send can't be confirmed, a new one is refused, and a send that failed but landed anyway is reported rather than paid twice.</p>
+              </li>
+              <li class="card reveal">
+                <span class="card-ico"><svg class="ico" aria-hidden="true" focusable="false"><use href="#i-eye" /></svg></span>
+                <h3>The lookalike-address warning</h3>
+                <p>An address that starts and ends like one you've paid, but isn't it, stops the send until you confirm you've checked it. That's the "address poisoning" scam, and only sends you signed can make an address trusted.</p>
+              </li>
+              <li class="card reveal">
+                <span class="card-ico"><svg class="ico" aria-hidden="true" focusable="false"><use href="#i-usb" /></svg></span>
+                <h3>Ledger: signatures verified twice</h3>
+                <p>Only signatures come back from the device. Each one is checked against the wallet's own digest of the transaction you reviewed before anything is broadcast.</p>
+              </li>
+            </ul>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============================== SCREENS ============================== -->
+      <section class="section section-screens" id="screens" aria-labelledby="screens-title">
+        <div class="wrap">
+          <div class="section-head reveal">
+            <p class="eyebrow">Seen in the wallet</p>
+            <h2 class="h2" id="screens-title">Plain screens. No surprises.</h2>
+            <p class="sub">Real screenshots of version 2.7.8, taken with the public test phrase. Every number you see before you confirm is the number the wallet checked.</p>
+          </div>
+          <ul class="screens">
+            <li class="reveal">
+              <div class="device device-xs">
+                <div class="device-screen">
+                  <img src="img/review.webp" width="780" height="1688" alt="A TRON send at the review step: recipient address, 5 TRX, the estimated network cost and a hard cost cap, with Back and Confirm and send buttons." loading="lazy" decoding="async" />
+                </div>
+              </div>
+              <h3>The review screen</h3>
+              <p>A send stopped at review: recipient, amount, the estimated network cost and the hard cap. On TRON it opens only after the node's bytes decoded to exactly this.</p>
+            </li>
+            <li class="reveal">
+              <div class="device device-xs">
+                <div class="device-screen">
+                  <img src="img/swap.webp" width="780" height="1688" alt="The swap form: 0.25 SOL to about 25 USDC, the rate, the route through several Solana exchanges, the minimum after slippage, and the 0.5% Kailah fee stated in USDC." loading="lazy" decoding="async" />
+                </div>
+              </div>
+              <h3>A swap quote</h3>
+              <p>The rate, the route Jupiter chose, the minimum you will receive after slippage, and the 0.5% Kailah fee itemised, all before you continue.</p>
+            </li>
+            <li class="reveal">
+              <div class="device device-xs">
+                <div class="device-screen">
+                  <img src="img/receive.webp" width="780" height="1688" alt="The Receive BTC screen: a QR code, the full bc1 address with a Copy button, and a note that a fresh address every time keeps your history more private." loading="lazy" decoding="async" />
+                </div>
+              </div>
+              <h3>Receiving</h3>
+              <p>A QR code and a fresh Bitcoin address for every payment. Old addresses keep working, and coins sent to any of them still land in the same wallet.</p>
+            </li>
+          </ul>
+        </div>
+      </section>
+
+      <!-- ============================== PRACTICE ============================== -->
+      <section class="section section-split" id="practice" aria-labelledby="practice-title">
+        <div class="wrap split">
+          <div class="split-copy reveal">
+            <p class="eyebrow">Practice mode</p>
+            <h2 class="h2" id="practice-title">Learn with worthless coins first.</h2>
+            <p class="sub">
+              One switch in the header moves every network family to its test network: Bitcoin testnet4, Base Sepolia,
+              Solana devnet and TRON Nile. Faucet links are built in, so you can receive, send and stake before a real
+              coin is involved.
+            </p>
+            <ul class="bullets">
+              <li>
+                <svg class="ico" aria-hidden="true" focusable="false"><use href="#i-key" /></svg>
+                <span>Practice networks sign with their own keys, so nothing signed in practice mode can ever spend real coins, whatever a test-network service returns.</span>
+              </li>
+              <li>
+                <svg class="ico" aria-hidden="true" focusable="false"><use href="#i-flask" /></svg>
+                <span>The banner, header and card colours change with the mode, and the first switch to real mode asks you to confirm.</span>
+              </li>
+            </ul>
+            <div class="mode-demo" aria-hidden="true">
+              <span class="mode-seg is-on">Practice</span><span class="mode-seg">Real</span>
+            </div>
+          </div>
+          <div class="split-visual reveal">
+            <div class="device device-sm">
+              <div class="device-screen">
+                <img src="img/practice.webp" width="780" height="1688" alt="The wallet in practice mode: the switch reads Practice, a banner says these are worthless test coins, and the Solana devnet card shows a small balance, a Stake SOL row, Get coins, Receive and Send buttons and recent activity, with the TRON Nile card below." loading="lazy" decoding="async" />
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============================== PRIVACY ============================== -->
+      <section class="section" id="privacy" aria-labelledby="privacy-title">
+        <div class="wrap">
+          <div class="section-head reveal">
+            <p class="eyebrow">Private by design</p>
+            <h2 class="h2" id="privacy-title">No servers of ours. No accounts. Nothing to collect.</h2>
+            <p class="sub">
+              There are no analytics, cookies, ads or trackers, in the wallet or on this page. To show balances and send
+              coins, the wallet talks straight from your browser to public blockchain and price services.
+            </p>
+          </div>
+          <ul class="feature-grid">
+            <li class="card reveal">
+              <span class="card-ico"><svg class="ico" aria-hidden="true" focusable="false"><use href="#i-list" /></svg></span>
+              <h3>The browser enforces the list</h3>
+              <p>The wallet may contact only a fixed list of public blockchain and price services, written into its Content Security Policy. The browser blocks everything else, and the same policy ships inside the page and the extension.</p>
+            </li>
+            <li class="card reveal">
+              <span class="card-ico"><svg class="ico" aria-hidden="true" focusable="false"><use href="#i-lock" /></svg></span>
+              <h3>An Argon2id vault</h3>
+              <p>Your recovery phrase is stored only as AES-256-GCM ciphertext under a key derived from your password with Argon2id, which is memory-hard. Cached addresses, balances and history are encrypted too. Everything locks after 15 minutes idle.</p>
+            </li>
+            <li class="card reveal">
+              <span class="card-ico"><svg class="ico" aria-hidden="true" focusable="false"><use href="#i-server-off" /></svg></span>
+              <h3>No server sees your wallet</h3>
+              <p>No sign-up, no e-mail, no push server. Payment alerts are generic, carry no amount and are made on your device while the wallet is open.</p>
+            </li>
+            <li class="card reveal">
+              <span class="card-ico"><svg class="ico" aria-hidden="true" focusable="false"><use href="#i-globe" /></svg></span>
+              <h3>What the services do see</h3>
+              <p>Blockchain services see the public addresses the wallet looks up, the transactions you choose to send, and your IP address, like any website request. The <a href="https://github.com/cbmcjargon/kailah/blob/main/PRIVACY.md">privacy policy</a> names every host.</p>
+            </li>
+          </ul>
+        </div>
+      </section>
+
+      <!-- ============================== VERIFY ============================== -->
+      <section class="section section-verify" id="verify" aria-labelledby="verify-title">
+        <div class="wrap split split-wide">
+          <div class="split-copy reveal">
+            <p class="eyebrow">Open source and verifiable</p>
+            <h2 class="h2" id="verify-title">Don't trust the site. Check the bytes.</h2>
+            <p class="sub">
+              The source is MIT-licensed on GitHub. Builds are reproducible: the same commit, built with the same
+              toolchain, gives byte-identical files, and CI prints the digests of every push.
+            </p>
+            <ul class="bullets">
+              <li>
+                <svg class="ico" aria-hidden="true" focusable="false"><use href="#i-hash" /></svg>
+                <span><code>npm run verify:live</code> fetches every file from both official sites and compares each one, byte for byte, with your own build, along with all seven security headers on every response.</span>
+              </li>
+              <li>
+                <svg class="ico" aria-hidden="true" focusable="false"><use href="#i-shield" /></svg>
+                <span>That proves what you were served just now, not what everyone gets. The guarantee that the code can't change between visits is what the store-signed extension is for.</span>
+              </li>
+              <li>
+                <svg class="ico" aria-hidden="true" focusable="false"><use href="#i-github" /></svg>
+                <span>The security review record is public too, including the regression one fix introduced and how it was caught.</span>
+              </li>
+            </ul>
+            <div class="cta-row">
+              <a class="btn btn-secondary" href="https://github.com/cbmcjargon/kailah">
+                <svg class="ico" aria-hidden="true" focusable="false"><use href="#i-github" /></svg>
+                Source on GitHub
+              </a>
+              <a class="btn btn-ghost" href="https://github.com/cbmcjargon/kailah/blob/main/SECURITY-REVIEW-2026-10-21.md">Read the review record</a>
+            </div>
+          </div>
+          <div class="split-visual reveal">
+            <figure class="terminal">
+              <figcaption class="terminal-bar"><span></span><span></span><span></span><em>verify a build</em></figcaption>
+<pre><code><span class="c"># exact versions from the lockfile; install scripts are off</span>
+git clone https://github.com/cbmcjargon/kailah.git
+cd kailah
+npm ci
+npm run typecheck &amp;&amp; npm run check:offline
+npm run build &amp;&amp; npm run build:extension
+
+<span class="c"># must equal the "Build digests" CI printed for this commit</span>
+npm run digest
+
+<span class="c"># is each official site serving exactly this build?</span>
+npm run verify:live</code></pre>
+            </figure>
+            <p class="official">
+              <svg class="ico" aria-hidden="true" focusable="false"><use href="#i-info" /></svg>
+              <span>The official Kailah Wallet comes only from the repository, <a href="https://kailah-wallet.netlify.app">kailah-wallet.netlify.app</a>, <a href="https://wallet.photoprompting.org">wallet.photoprompting.org</a> and, once approved, the Chrome Web Store listing. A copy under the same name from anywhere else is not the real one.</span>
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============================== LEDGER ============================== -->
+      <section class="section section-split" id="ledger" aria-labelledby="ledger-title">
+        <div class="wrap split split-rev">
+          <div class="split-visual reveal">
+            <div class="device device-sm">
+              <div class="device-screen">
+                <img src="img/ledger.webp" width="780" height="1688" alt="The Add a Ledger account dialog: it says your keys never leave the Ledger and the wallet keeps only the account's public key, offers Bitcoin or Litecoin, and asks you to plug in and unlock the device." loading="lazy" decoding="async" />
+              </div>
+            </div>
+          </div>
+          <div class="split-copy reveal">
+            <p class="eyebrow">Ledger accounts</p>
+            <h2 class="h2" id="ledger-title">Keep the key on the device. Keep the checks in the wallet.</h2>
+            <p class="sub">
+              Add a Ledger account for Bitcoin or Litecoin beside your seed accounts. The wallet keeps only the account's
+              public key, encrypted, and scans balances and history as usual. Every send or Speed up is signed on the
+              device after it shows the recipient, amount and fee.
+            </p>
+            <ul class="bullets">
+              <li>
+                <svg class="ico" aria-hidden="true" focusable="false"><use href="#i-shield" /></svg>
+                <span>Only signatures come back. Each is verified against the wallet's own digest of the reviewed transaction, and a different Ledger is refused.</span>
+              </li>
+              <li>
+                <svg class="ico" aria-hidden="true" focusable="false"><use href="#i-usb" /></svg>
+                <span>Written from Ledger's published protocols with no Ledger packages added. Chrome or Edge on a computer, or Chrome on Android over USB.</span>
+              </li>
+            </ul>
+            <p class="note-inline">
+              <svg class="ico" aria-hidden="true" focusable="false"><use href="#i-warn" /></svg>
+              <span>New, and tested against a device emulator so far, not yet on a physical Ledger. Start with small amounts in practice mode.</span>
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============================== MORE ============================== -->
+      <section class="section section-more" id="more" aria-labelledby="more-title">
+        <div class="wrap">
+          <div class="section-head reveal">
+            <p class="eyebrow">Also in the box</p>
+            <h2 class="h2" id="more-title">The rest of a complete wallet.</h2>
+          </div>
+          <ul class="more-grid">
+            <li class="reveal"><svg class="ico" aria-hidden="true" focusable="false"><use href="#i-stake" /></svg><h3>Staking</h3><p>Delegate SOL to a validator from a curated list, or stake TRX for rewards and cheaper USDT sends. Stake accounts come from your own key, so the 12 words recover them anywhere.</p></li>
+            <li class="reveal"><svg class="ico" aria-hidden="true" focusable="false"><use href="#i-swap" /></svg><h3>Swaps</h3><p>SOL to USDC and back through Jupiter, inside the wallet. Each swap carries a 0.5% Kailah fee, paid in USDC to a published account and shown before you confirm.</p></li>
+            <li class="reveal"><svg class="ico" aria-hidden="true" focusable="false"><use href="#i-cart" /></svg><h3>Buy</h3><p>Links to licensed onramps and exchange-withdrawal guides. Strike, Kraken and Gemini are the developer's referral links and are labelled "Invite link" in the app.</p></li>
+            <li class="reveal"><svg class="ico" aria-hidden="true" focusable="false"><use href="#i-finger" /></svg><h3>Face ID or fingerprint</h3><p>Unlock with a passkey where your device supports it. The password always works and is required to reveal the phrase.</p></li>
+            <li class="reveal"><svg class="ico" aria-hidden="true" focusable="false"><use href="#i-qr" /></svg><h3>QR codes</h3><p>Scan payment requests with the camera, decoded on your device, with wrong-network detection. Show your own address as a QR code.</p></li>
+            <li class="reveal"><svg class="ico" aria-hidden="true" focusable="false"><use href="#i-bell" /></svg><h3>Payment alerts</h3><p>A generic "payment received" notice, with no amount, while the wallet is open. There is deliberately no push server.</p></li>
+            <li class="reveal"><svg class="ico" aria-hidden="true" focusable="false"><use href="#i-file" /></svg><h3>CSV export</h3><p>Your history as a spreadsheet file, written so a cell can never run as a formula.</p></li>
+            <li class="reveal"><svg class="ico" aria-hidden="true" focusable="false"><use href="#i-grid" /></svg><h3>Networks shown</h3><p>Show only the networks you use. Hidden ones are never queried, and their code isn't even downloaded.</p></li>
+            <li class="reveal"><svg class="ico" aria-hidden="true" focusable="false"><use href="#i-zap" /></svg><h3>Speed up</h3><p>Replace a stuck Bitcoin or Litecoin send with a higher-fee version, with the replace-by-fee rules enforced in the wallet.</p></li>
+            <li class="reveal"><svg class="ico" aria-hidden="true" focusable="false"><use href="#i-download" /></svg><h3>Installable</h3><p>Add it to your home screen on Android or iPhone. The offline screen is the only thing ever cached: the wallet's code runs fresh every launch.</p></li>
+          </ul>
+        </div>
+      </section>
+
+      <!-- ============================== PLEASE NOTE ============================== -->
+      <section class="section section-note" id="note" aria-labelledby="note-title">
+        <div class="wrap">
+          <div class="note reveal">
+            <div class="note-head">
+              <svg class="ico" aria-hidden="true" focusable="false"><use href="#i-warn" /></svg>
+              <h2 class="h3" id="note-title">Please note</h2>
+            </div>
+            <ul class="note-list">
+              <li>Kailah is a hobby-grade wallet maintained by one person. Nobody can restore your funds, reverse a send or recover a lost recovery phrase.</li>
+              <li>It has had AI-assisted security reviews, not a third-party audit. Keep amounts small.</li>
+              <li>One phrase is the whole wallet. The 12 words on paper are the only backup.</li>
+              <li>Balances come from the pinned services, but activity feeds and received-coin alerts each trust a single data source. Confirm a large receipt on a second explorer.</li>
+              <li>Payment alerts fire only while the app is open. There is no push server, by design.</li>
+              <li>Ledger support has been proven against an emulator, not yet on a physical device.</li>
+              <li>Dogecoin reads from two free services with small request budgets, so its scans are deliberately frugal.</li>
+              <li>BNB Chain shows balances and sends but no activity feed, because no keyless explorer exists for it.</li>
+              <li>No MWEB or Monero: confidential-transaction cryptography has no trustworthy browser implementation today.</li>
+              <li>Buying happens on licensed third-party sites. A wallet cannot legally take card payments itself.</li>
+            </ul>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============================== FAQ ============================== -->
+      <section class="section" id="faq" aria-labelledby="faq-title">
+        <div class="wrap wrap-narrow">
+          <div class="section-head reveal">
+            <p class="eyebrow">Questions</p>
+            <h2 class="h2" id="faq-title">Short answers.</h2>
+          </div>
+          <div class="faq reveal">
+            <details>
+              <summary>Who holds my keys?</summary>
+              <p>You do. The wallet generates the recovery phrase on your device, encrypts it with your password and keeps it in your browser's storage for this site or extension. No server of ours exists to hold a copy, which also means nobody can recover it for you.</p>
+            </details>
+            <details>
+              <summary>Is it audited?</summary>
+              <p>No. The code has had AI-assisted adversarial reviews, and each finding was confirmed by reading the code or by a test. The review of 2026-10-21 recorded 35 findings, three of them fund-loss paths; every critical, high and medium finding is fixed, and the low tier is fixed or documented as accepted. No third-party firm has audited the code. The <a href="https://github.com/cbmcjargon/kailah/blob/main/SECURITY-REVIEW-2026-10-21.md">full record</a> is public.</p>
+            </details>
+            <details>
+              <summary>Why "keep amounts small"?</summary>
+              <p>Because one person maintains it, no independent audit has been done, and a browser is a weaker place for keys than a hardware device. Practice mode exists so you can learn with worthless coins, and Ledger accounts exist so a serious balance can keep its key on a device.</p>
+            </details>
+            <details>
+              <summary>How does the developer make money?</summary>
+              <p>Two ways, both disclosed. Swaps carry a 0.5% fee, paid in USDC to a published account and shown before you confirm. The Buy screens include three referral links, Strike, Kraken and Gemini, each labelled "Invite link"; a new account through one gets that exchange's current sign-up offer, and the developer gets a referral reward. No data is collected or sold.</p>
+            </details>
+            <details>
+              <summary>Where is the Chrome extension?</summary>
+              <p>In review at the Chrome Web Store. Until it is listed, you can build it from the source and load it unpacked, as the repository's extension guide describes. The extension is the safer way to run the wallet: its code is fixed by the signed store package, while a website can serve different code on any visit.</p>
+            </details>
+            <details>
+              <summary>Which browsers work?</summary>
+              <p>The web app runs in current browsers and can be installed on Android (Chrome's "Add to Home screen") and iPhone (Safari's "Add to Home Screen"). Ledger accounts need WebHID or WebUSB: Chrome or Edge on a computer, or Chrome on Android with a USB cable. Safari and Firefox have neither, and the wallet says so instead of offering a button.</p>
+            </details>
+            <details>
+              <summary>What happens if this website disappears?</summary>
+              <p>Your coins are on their blockchains, not on the site, and your phrase is a standard BIP39 phrase. Bitcoin, Litecoin and Dogecoin restore in any BIP84- or BIP44-capable wallet, the Solana account in Phantom or Solflare. The source stays on GitHub under the MIT license, and the extension carries its code with it.</p>
+            </details>
+            <details>
+              <summary>Can I fork it?</summary>
+              <p>Yes, the code is MIT-licensed. The name "Kailah Wallet" and the logo follow a separate rule: a build distributed under that name must keep the referral links and the swap fee unchanged, and a build that changes them must use a different name and logo, so people can tell an official build from a lookalike. The <a href="https://github.com/cbmcjargon/kailah/blob/main/TRADEMARK.md">name and logo policy</a> has the details.</p>
+            </details>
+            <details>
+              <summary>How do I report a security problem?</summary>
+              <p>Privately, through <a href="https://github.com/cbmcjargon/kailah/security/advisories/new">GitHub's vulnerability reporting</a>, never in a public issue. Expect an acknowledgement within 14 days. There is no paid bounty, and good-faith research on test networks that follows the <a href="https://github.com/cbmcjargon/kailah/blob/main/SECURITY.md">security policy</a> will not be pursued legally.</p>
+            </details>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============================== FINAL CTA ============================== -->
+      <section class="section section-cta" aria-labelledby="cta-title">
+        <div class="wrap">
+          <div class="cta-panel reveal">
+            <div class="cta-rings" aria-hidden="true"><span></span><span></span><span></span></div>
+            <h2 class="h2" id="cta-title">Try it with worthless coins first.</h2>
+            <p class="sub">Open the wallet, flip the switch to practice mode and send yourself something from a faucet. Nothing real is at stake until you decide it is.</p>
+            <div class="cta-row cta-center">
+              <a class="btn btn-primary btn-lg" href="https://kailah-wallet.netlify.app">
+                Use it now
+                <svg class="ico" aria-hidden="true" focusable="false"><use href="#i-arrow" /></svg>
+              </a>
+              <span class="btn btn-secondary btn-lg is-soon" role="status">
+                Chrome extension
+                <span class="soon-tag">coming soon</span>
+              </span>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <div class="wrap footer-inner">
+        <div class="footer-brand">
+          <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true" focusable="false">
+            <circle cx="16" cy="16" r="14" stroke="#5eead4" stroke-width="2.25" fill="none" />
+            <path d="M12.2 9.5v13M20 9.5l-7.3 6.9M15 14.9l5.2 7.6" stroke="#5eead4" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round" fill="none" />
+          </svg>
+          <div>
+            <p class="footer-name">Kailah Wallet</p>
+            <p class="footer-tag">Self-custody, in your browser. MIT-licensed. v2.7.9.</p>
+          </div>
+        </div>
+        <nav class="footer-links" aria-label="Policies and source">
+          <a href="https://github.com/cbmcjargon/kailah/blob/main/PRIVACY.md">Privacy policy</a>
+          <a href="https://github.com/cbmcjargon/kailah/blob/main/SECURITY.md">Security policy</a>
+          <a href="https://github.com/cbmcjargon/kailah/blob/main/TRADEMARK.md">Name and logo</a>
+          <a href="https://github.com/cbmcjargon/kailah">GitHub</a>
+          <a href="https://wallet.photoprompting.org">Mirror</a>
+        </nav>
+      </div>
+      <div class="wrap footer-fine">
+        <p>This page sets no cookies, loads nothing from third parties and runs no analytics. The wallet collects no data either.</p>
+        <p>Nothing here is financial advice. Keep amounts small.</p>
+      </div>
+    </footer>
+
+    <script src="main.js" defer></script>
+  </body>
+</html>

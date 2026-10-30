@@ -31,7 +31,9 @@
 //   M. two Solana servers (review 2026-10-29): a read fails over to the
 //      second; the hold ends on the LOWER of their block heights, and
 //      "landed" or "never seen" counts only when every server that answers
-//      agrees; a refusal after the first server went quiet keeps the record.
+//      agrees; a refusal after the first server went quiet keeps the record;
+//      a server that gave no answer rests for a minute instead of costing
+//      every call its deadline (review 2026-10-30).
 const store = new Map()
 globalThis.localStorage = {
   getItem: (k) => (store.has(k) ? store.get(k) : null),
@@ -985,7 +987,7 @@ console.log('--- K. the Solana stake view (bug audit 2026-10-27, BL26) ---')
   check('K2b ...and refuses when the fresh read says it is still cooling down', /cooling down/.test(early?.message ?? ''), early?.message?.slice(0, 60))
   const { readFileSync } = await import('node:fs')
   const app = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8')
-  check('K3 a stake that is activating or winding down is re-read on quick polls (its state changes at the epoch, no balance moving)', /prev\.txs\.length === 0 \|\| stakeMoving\)/.test(app))
+  check('K3 a stake that is activating or winding down is re-read on quick polls (its state changes at the epoch, no balance moving)', /prev\.txs\.length === 0 \|\| stakeMoving \|\| unread\)/.test(app))
   net.sol = {}
   skey.zero()
 }
@@ -1242,6 +1244,9 @@ console.log('--- M. two Solana servers: either can serve a read, neither alone e
     }
   }
   const clearMain = () => { for (const p of ledger.pendingSol(MAIN.id)) ledger.dropPending(p) }
+  // these checks ask about each moment on its own; M6 turns the rest back on
+  const savedRest = sol.solRpcTuning.restMs
+  sol.solRpcTuning.restMs = 0
   const rec = (sig, lvbh, extra = {}) => {
     const p = { kind: 'sol', chainId: MAIN.id, signature: sig, ts: Date.now() - 30_000, lastValidBlockHeight: lvbh, ...extra }
     ledger.recordPending(p)
@@ -1298,6 +1303,63 @@ console.log('--- M. two Solana servers: either can serve a read, neither alone e
   const second = await sol.submitSolTx(MAIN, 'M5c', 'AAAA', entry3).catch((e) => e)
   check('M5c the first server refuses (a lagging node, say) and the second takes it: sent', second === 'M5c', String(second?.message ?? second))
   clearMain()
+
+  // a server that gave no answer rests, so it doesn't cost every call its deadline
+  sol.solRpcTuning.restMs = 60
+  const ADDR = 'HAgk14JpMQLgt6rVgv7cBQFJWFto5Dqxi472uT3DKpqk'
+  const callsSince = (n, who) => asked.slice(n).filter((c) => c.startsWith(`${who}:`)).length
+  const wake = () => new Promise((r) => setTimeout(r, 70))
+  reset(); await wake()
+  srv[A].down = true
+  await sol.getSolBalance(MAIN, ADDR)
+  let mark = asked.length
+  const rested = await sol.getSolBalance(MAIN, ADDR).catch((e) => e)
+  check('M6 once the first server gave no answer, the next call goes straight to the second',
+    rested === 4_200_000n && callsSince(mark, 'A') === 0 && callsSince(mark, 'B') === 1, `${callsSince(mark, 'A')} / ${callsSince(mark, 'B')}`)
+  srv[A].down = false; await wake()
+  mark = asked.length
+  await sol.getSolBalance(MAIN, ADDR)
+  check('M6b ...and when its rest is over it is asked first again', callsSince(mark, 'A') === 1 && callsSince(mark, 'B') === 0)
+  reset(); await wake()
+  srv[A].down = true
+  await sol.getSolBalance(MAIN, ADDR)
+  srv[A].down = false
+  srv[B].send = 'refused'
+  mark = asked.length
+  const entry4 = rec('M6c', 9_999_999)
+  const refusedAwake = await rejects(() => sol.submitSolTx(MAIN, 'M6c', 'AAAA', entry4))
+  check('M6c a refusal from the server that is awake is final when the resting one was never asked: "Nothing was sent", and it isn\'t woken for nothing',
+    /Nothing was sent/.test(refusedAwake?.message ?? '') && callsSince(mark, 'A') === 0, refusedAwake?.message?.slice(0, 60))
+  clearMain()
+  reset(); await wake()
+  srv[A].down = true
+  await sol.getSolBalance(MAIN, ADDR)
+  srv[A].down = false; srv[B].down = true
+  mark = asked.length
+  const lastResort = await sol.getSolBalance(MAIN, ADDR).catch((e) => e)
+  check('M6d if the awake server goes quiet too, the resting one is still asked', lastResort === 4_200_000n && callsSince(mark, 'A') === 1, String(lastResort?.message ?? lastResort))
+  reset(); await wake()
+  srv[A].down = true; srv[B].down = true
+  const allQuiet = await rejects(() => sol.getSolBalance(MAIN, ADDR))
+  check('M6e nobody answering still reads as "couldn\'t reach the network"', /Couldn't reach/.test(allQuiet?.message ?? ''), allQuiet?.message?.slice(0, 60))
+  // the rest is for reads: one server must never end a hold, so the guard asks both
+  sol.solRpcTuning.restMs = 60_000
+  reset(); clearMain(); await wake()
+  srv[A].down = true
+  await sol.getSolBalance(MAIN, ADDR)
+  srv[A].down = false
+  mark = asked.length
+  await sol.getSolBalance(MAIN, ADDR)
+  const stillResting = callsSince(mark, 'A') === 0
+  rec('M6f', 1500)
+  srv[A].height = 1490; srv[B].height = 1600
+  mark = asked.length
+  const heldByResting = await guard()
+  check('M6f the double-pay guard still asks a resting server, so it can hold a send the other server would release',
+    stillResting && callsSince(mark, 'A') > 0 && /may still go through/.test(heldByResting?.message ?? ''), heldByResting?.message?.slice(0, 60) ?? 'released!')
+  clearMain()
+  sol.solRpcTuning.restMs = savedRest
+  await wake()
   globalThis.fetch = mockRpc
 }
 

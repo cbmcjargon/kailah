@@ -35,7 +35,7 @@ export default function EvmCard({
   onBuy,
   onTxClick,
 }: EvmCardProps) {
-  const { token, gas, others, txs, loading, error } = state
+  const { token, gas, others, txs, lookupFailed, loading, error } = state
   const usd =
     token !== null && tokenPrice !== undefined ? evmToUsd(token, chain.token.decimals, tokenPrice) : null
   const gasUsd = gas !== null && gasPrice !== undefined ? evmToUsd(gas, 18, gasPrice) : null
@@ -125,6 +125,13 @@ export default function EvmCard({
             Retry
           </button>
         </div>
+      )}
+
+      {lookupFailed === true && !loading && (
+        <p className="zero-state" role="status">
+          Some activity couldn&rsquo;t load just now; the wallet will try again. The balance above
+          is current.
+        </p>
       )}
 
       <div className="chain-address">

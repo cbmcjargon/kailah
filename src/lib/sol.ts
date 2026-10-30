@@ -229,15 +229,29 @@ function unreachableError(chain: SolChainConfig): Error {
   )
 }
 
+/** How long an RPC that gave no answer rests; tests shorten it. */
+export const solRpcTuning = { restMs: 60_000 }
+const rpcRestUntil = new Map<string, number>()
+
 async function rpc<T>(chain: SolChainConfig, method: string, params: unknown[]): Promise<T> {
   let lastErr: unknown
   let silent = false
-  for (const url of chain.rpcs) {
+  // An RPC that gave no answer rests: a hanging first RPC otherwise cost every
+  // call its full deadline, as it once did on the EVM side (BL22). It is asked
+  // last, and only if no other RPC answered at all.
+  const now = Date.now()
+  const awake = chain.rpcs.filter((url) => (rpcRestUntil.get(url) ?? 0) <= now)
+  const resting = chain.rpcs.filter((url) => (rpcRestUntil.get(url) ?? 0) > now)
+  for (const url of [...awake, ...resting]) {
+    if (lastErr instanceof RpcAnswerError && resting.includes(url)) break
     try {
       return await rpcAt<T>(chain, url, method, params)
     } catch (e) {
       lastErr = e
-      if (!(e instanceof RpcAnswerError)) silent = true
+      if (!(e instanceof RpcAnswerError)) {
+        silent = true
+        rpcRestUntil.set(url, Date.now() + solRpcTuning.restMs)
+      }
     }
   }
   if (!(lastErr instanceof RpcAnswerError)) throw unreachableError(chain)
@@ -1236,6 +1250,8 @@ export interface SolUiState {
   txs: SolTx[]
   /** the last refresh's history or stake lookup failed (bug audit 2026-10-27, BM8) */
   lookupFailed?: boolean
+  /** the balance above is fresh and its history is still being read: nothing can be concluded yet */
+  historyPending?: boolean
   loading: boolean
   error: string | null
 }
