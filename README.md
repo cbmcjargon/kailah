@@ -29,6 +29,12 @@ worthless coins before using real ones.
   A new version can reach the store a few days after the website, while Google
   reviews it. You can also build it (below) and load `dist-extension/` unpacked,
   as [docs/extension.md](docs/extension.md) describes.
+  If Chrome's Enhanced protection is on, you'll see "This extension is not
+  trusted by Enhanced Safe Browsing" with a "Continue to install" button. Google
+  shows this for extensions from new developers, and says it generally takes a
+  few months to become trusted. You don't have to take our word for the
+  extension's safety: you can compare the store's copy with the public source
+  file by file ([how](docs/extension.md#build)).
 
 The extension is the safer way to run the wallet. Its code is fixed by the
 signed store package, while a website can serve different code on any visit.

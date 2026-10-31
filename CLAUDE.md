@@ -8,7 +8,8 @@ and refuses to sign on any mismatch; TronGrid keyless, Nile practice twin).
 Ledger hardware accounts for BTC/LTC (docs/hardware-signing.md): xpub-only
 accounts beside the seed ones, signed on the device — Bitcoin app via PSBT
 (src/lib/ledger/btcapp.ts), Litecoin via the legacy protocol (legacyapp.ts);
-no Ledger npm packages. Live: https://kailah-wallet.netlify.app
+no Ledger npm packages. Live: https://kailah-wallet.netlify.app and the Chrome
+Web Store (since 2026-10-31; the owner uploads; docs/extension.md).
 Read README.md first; contracts live in src/lib/types.ts (header comments are
 the module API docs). The project is COMPLETE — sessions here are maintenance,
 not feature building, unless the user asks for something new.
@@ -275,4 +276,6 @@ not feature building, unless the user asks for something new.
 ## Verification habits
 After changes: typecheck + relevant check scripts + drive the affected flow in
 the browser (restore test wallet → exercise → erase). After every deploy, run
-`npm run verify:live` on the deployed commit: both origins must MATCH.
+`npm run verify:live` on the deployed commit: both origins must MATCH. After
+a new version goes live on the store, compare its package with the tag
+(docs/extension.md); before an upload, run the reviewer walk on the exact zip.

@@ -235,6 +235,14 @@ Live since 2026-10-31:
 https://chromewebstore.google.com/detail/kailah-wallet/nlcefhomhhohcegbacldomjpamambmac
 (extension ID `nlcefhomhhohcegbacldomjpamambmac`).
 
+**The warning some users see.** If Chrome's Enhanced protection is on, you'll see
+"This extension is not trusted by Enhanced Safe Browsing" with a "Continue to
+install" button. [Google](https://support.google.com/chrome_webstore/answer/2664769)
+shows this for extensions from new developers, and says it generally takes a few
+months to become trusted. You don't have to take our word for the extension's
+safety: you can compare the store's copy with the public source file by file
+([Build](#build) has the commands).
+
 - **Package.** Zip the contents of `dist-extension/` (not the folder itself):
   `cd dist-extension && zip -qrX ../kailah-wallet-extension.zip .`. The version
   must increase with every upload; it comes from `package.json`.

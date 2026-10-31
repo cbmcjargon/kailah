@@ -586,6 +586,10 @@ npm run verify:live</code></pre>
               <p><a href="https://chromewebstore.google.com/detail/kailah-wallet/nlcefhomhhohcegbacldomjpamambmac">On the Chrome Web Store</a>. You can also build it from the source and load it unpacked, as the repository's extension guide describes. The extension is the safer way to run the wallet: its code is fixed by the signed store package, while a website can serve different code on any visit. It keeps its own wallet, separate from the website's, so restore your 12 words there to use the same coins. A new version can reach the store a few days after the website, while Google reviews it.</p>
             </details>
             <details>
+              <summary>Why does Chrome say the extension isn't trusted?</summary>
+              <p>If Chrome's Enhanced protection is on, you'll see "This extension is not trusted by Enhanced Safe Browsing" with a "Continue to install" button. <a href="https://support.google.com/chrome_webstore/answer/2664769">Google</a> shows this for extensions from new developers, and says it generally takes a few months to become trusted. You don't have to take our word for the extension's safety: you can <a href="https://github.com/cbmcjargon/kailah/blob/main/docs/extension.md#build">compare the store's copy with the public source file by file</a>.</p>
+            </details>
+            <details>
               <summary>Which browsers work?</summary>
               <p>The web app runs in current browsers and can be installed on Android (Chrome's "Add to Home screen") and iPhone (Safari's "Add to Home Screen"). Ledger accounts need WebHID or WebUSB: Chrome or Edge on a computer, or Chrome on Android with a USB cable. Safari and Firefox have neither, and the wallet says so instead of offering a button.</p>
             </details>
