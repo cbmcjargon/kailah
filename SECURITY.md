@@ -38,8 +38,8 @@ In scope:
 - The web build and browser extension made from it, including their CSP and
   headers.
 - The official deployments: https://kailah-wallet.netlify.app,
-  https://wallet.photoprompting.org and the Chrome Web Store listing
-  (coming soon).
+  https://wallet.photoprompting.org and the
+  [Chrome Web Store listing](https://chromewebstore.google.com/detail/kailah-wallet/nlcefhomhhohcegbacldomjpamambmac).
 
 Out of scope:
 

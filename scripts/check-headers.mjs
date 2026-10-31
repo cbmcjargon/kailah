@@ -199,10 +199,10 @@ console.log('--- C. the mirror\'s nginx rewrite (deploy/nginx-site.awk) ---')
   writeFileSync(join(sdir, 'headers.conf'), shdrs + '\n')
   writeFileSync(join(sdir, 'gzip.conf'), '    # kailah-gzip: managed by deploy/site-redeploy.sh\n    gzip on;\n')
   const tpl = read('deploy/nginx-site-marketing.conf').replace(/@SITE_HOST@/g, 'site.example').replace(/@ROOT@/g, '/var/www/site')
-  const srewrite = (conf) => {
+  const srewrite = (conf, extra = ['-v', 'nolog=1']) => {
     const f = join(sdir, 'site.conf')
     writeFileSync(f, conf)
-    return spawnSync('awk', ['-v', `hdrsfile=${join(sdir, 'headers.conf')}`, '-v', `gzfile=${join(sdir, 'gzip.conf')}`, '-v', `managed=${smanaged}`, '-v', 'var=kailah_site_html_cache', '-f', 'deploy/nginx-site.awk', f], { encoding: 'utf8' })
+    return spawnSync('awk', ['-v', `hdrsfile=${join(sdir, 'headers.conf')}`, '-v', `gzfile=${join(sdir, 'gzip.conf')}`, '-v', `managed=${smanaged}`, '-v', 'var=kailah_site_html_cache', ...extra, '-f', 'deploy/nginx-site.awk', f], { encoding: 'utf8' })
   }
   const sonce = srewrite(tpl)
   const sout = sonce.stdout
@@ -239,6 +239,22 @@ console.log('--- C. the mirror\'s nginx rewrite (deploy/nginx-site.awk) ---')
     `${smembers.length} entries, ${sjunk.length} of them metadata`)
   check('C15 the wallet deploy\'s archive leaves out macOS metadata too (COPYFILE_DISABLE on its tar): nginx would serve those ._* entries, and verify:live only fetches dist/\'s own files',
     /^COPYFILE_DISABLE=1 tar -C dist -cf - \. \|/m.test(read('deploy/vps-redeploy.sh')))
+  // The live file's shape: certbot's TLS lines and redirect block, and the log
+  // line the mirror had when it first went live.
+  const certbotShape = tpl.replace('access_log off;', 'access_log /var/log/nginx/site.access.log;').replace(/\n\s*listen 80;\n\}\s*$/,
+    '\n    listen 443 ssl; # managed by Certbot\n    ssl_certificate /etc/letsencrypt/live/site.example/fullchain.pem; # managed by Certbot\n}\n' +
+    'server {\n    if ($host = site.example) {\n        return 301 https://$host$request_uri;\n    } # managed by Certbot\n\n    server_name site.example;\n    listen 80;\n    return 404; # managed by Certbot\n}\n')
+  const nolog = srewrite(certbotShape)
+  const noLogBlocks = nolog.stdout.split(/^server \{$/m).slice(1)
+  const keptLog = srewrite(certbotShape, []).stdout
+  check('C16 the site keeps no access log: after the rewrite every server block, certbot\'s redirect too, has "access_log off;" and no other log line, a second run changes nothing, and the deploy passes nolog and proves it live; without nolog, as the wallet\'s deploy runs it, the rewrite leaves log lines alone',
+    nolog.status === 0 && noLogBlocks.length === 2 && /listen 80;/.test(noLogBlocks[1]) && /return 301/.test(noLogBlocks[1]) &&
+      noLogBlocks.every((b) => /^\s*access_log off;$/m.test(b) && b.match(/^\s*access_log\s/gm).length === 1) &&
+      srewrite(nolog.stdout).stdout === nolog.stdout &&
+      /-v var=\$VAR -v nolog=1 /.test(siteScript) && /grep -ls -- '\$MARK' \/var\/log\/nginx\/\*\.log/.test(siteScript) &&
+      !/nolog/.test(read('deploy/vps-redeploy.sh')) &&
+      keptLog.includes('access_log /var/log/nginx/site.access.log;') && !keptLog.includes('access_log off;'),
+    nolog.stderr.trim() || `${noLogBlocks.length} server blocks`)
   rmSync(sdir, { recursive: true, force: true })
 }
 

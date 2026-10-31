@@ -64,9 +64,17 @@ The build checks its own output and fails if any of these breaks:
 The build is deterministic. Two consecutive builds produce byte-identical
 files, and a clean Linux build in CI has matched a macOS build of the same
 commit. CI prints the digests of every push (`npm run digest` prints yours).
-Anyone can rebuild a tagged commit and compare it with the store package.
-The store adds a `_metadata/` folder and its signature; every other file should
-match.
+Anyone can rebuild a tagged commit and compare it with the store package:
+
+```bash
+curl -L -o kailah.crx 'https://clients2.google.com/service/update2/crx?response=redirect&prodversion=130.0.0.0&acceptformat=crx3&x=id%3Dnlcefhomhhohcegbacldomjpamambmac%26uc'
+unzip kailah.crx -d store-copy    # warns about the signature bytes at the start
+diff -r store-copy dist-extension  # built from the tag of the version in store-copy
+```
+
+The store adds a `_metadata/` folder with its signature and an `update_url` line
+in `manifest.json`; Chrome adds a `key` line when it installs. Every other file
+should match, and on the store's 2.7.7 package (2026-10-31) every other file did.
 
 CI (`.github/workflows/ci.yml`) runs `npm run build:extension` on every push, so
 the checks above run there too.
@@ -221,7 +229,11 @@ DevTools protocol with no new dependencies. The camera was faked with
 Not verified: a real platform passkey (see above), the real camera permission
 prompt, a click on an OS notification, and the store's own install flow.
 
-## Chrome Web Store listing: what it will need
+## Chrome Web Store listing: what it needs
+
+Live since 2026-10-31:
+https://chromewebstore.google.com/detail/kailah-wallet/nlcefhomhhohcegbacldomjpamambmac
+(extension ID `nlcefhomhhohcegbacldomjpamambmac`).
 
 - **Package.** Zip the contents of `dist-extension/` (not the folder itself):
   `cd dist-extension && zip -qrX ../kailah-wallet-extension.zip .`. The version

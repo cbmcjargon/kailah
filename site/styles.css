@@ -289,29 +289,6 @@ code {
   color: var(--text);
 }
 
-.btn.is-soon {
-  cursor: default;
-  color: var(--text-2);
-  border-style: dashed;
-  border-color: var(--hairline-strong);
-  background: transparent;
-}
-
-.btn.is-soon:hover {
-  transform: none;
-  background: transparent;
-}
-
-.soon-tag {
-  padding: 3px 8px;
-  border-radius: 999px;
-  background: var(--accent-soft);
-  color: var(--accent);
-  font-size: 12px;
-  font-weight: 700;
-  letter-spacing: 0.02em;
-}
-
 .cta-row {
   display: flex;
   flex-wrap: wrap;

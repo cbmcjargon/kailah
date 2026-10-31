@@ -792,7 +792,10 @@ not exercised live.
 1. **Web delivery trust.** Whoever controls Netlify, DNS or the VPS can still
    ship code to web users. Hardening those accounts, DNS and the server
    reduces this. It is closed only for users of the store-signed extension,
-   once that is published.
+   once that is published. *2026-10-31:* published, as 2.7.7. Its package was
+   compared with tag `v2.7.7`: every file is byte-identical except
+   `manifest.json`, where the store added `update_url`, plus the store's own
+   `_metadata/` signature file.
 2. **Solana swaps.** Simulation runs on a single RPC. (The route's on-chain
    slippage floor, finding 2's other residual, is decoded since 2026-10-25;
    see "Swaps on Jupiter Swap V2".) *2026-10-29:* mainnet now has a second

@@ -32,10 +32,12 @@ server block and webroot, so the wallet's config is never touched. It
 applies every header in `_headers` the way the wallet's deploy applies
 `public/_headers` (`deploy/nginx-site.awk`, under the site's own cache
 variable), makes browsers re-check the page on every visit, serves a 404 for
-unknown paths, and checks all of that live afterwards. First time: add an
-A record for the chosen name pointing at the box (DNS only, not proxied),
-then run it with `--install`, which also obtains the certificate through
-certbot. Later deploys are the same command without the flag:
+unknown paths, and checks all of that live afterwards. The mirror keeps no
+access log, its http redirect included: the deploy turns it off in every
+server block and checks with marked requests that nothing was logged. First
+time: add an A record for the chosen name pointing at the box (DNS only, not
+proxied), then run it with `--install`, which also obtains the certificate
+through certbot. Later deploys are the same command without the flag:
 
 ```bash
 SITE_HOST=<hostname> WALLET_VPS=<user@host> deploy/site-redeploy.sh --install
@@ -52,8 +54,8 @@ mirror is a second copy of the same page, not a second identity.
   image address.
 - **Version:** the page names v2.7.9 in the hero and the footer. Update
   both on a release, or drop the number.
-- **Store link:** replace the two "Chrome extension · coming soon" pills
-  with a link once the Chrome Web Store listing is approved.
+- **Store link:** the two "Chrome extension" buttons, the official-sources
+  line and the FAQ link to the Chrome Web Store listing.
 - **Screenshots:** retake after a UI change. The capture used the public
   test wallet in headless Chrome against the live site; the dashboard shot
   shows only Solana and TRON (Settings › Networks shown) because the test

@@ -8,6 +8,11 @@
 #   -v var=…       the HTML cache map variable (default kailah_html_cache, the
 #                  wallet's); the marketing site's file uses its own name, since
 #                  two site files in the same nginx must not define one variable
+#   -v nolog=1     keep no access log (the marketing site's file): every
+#                  access_log line goes and "access_log off;" follows each
+#                  server_name, so it also reaches the redirect block certbot
+#                  added, which would otherwise inherit the http-level log. The
+#                  wallet's deploy doesn't pass it: PRIVACY.md discloses its log.
 # (Files, not -v values: not every awk takes a newline in a -v value.)
 #
 # 1. Drops every managed add_header, every gzip directive, and every line
@@ -41,7 +46,9 @@ BEGIN {
   }
   if ($0 ~ /^[[:space:]]*gzip(_[a-z_]+)?[[:space:]]/ || $0 ~ /kailah-gzip/) drop = 1
   if ($0 ~ /kailah-html-cache/) drop = 1
+  if (nolog != "" && $0 ~ /^[[:space:]]*access_log[[:space:]]/) drop = 1
   if (!drop) print
+  if (nolog != "" && $0 ~ /^[[:space:]]*server_name[[:space:]]/) print "    access_log off;"
   if (!done && $0 ~ /^[[:space:]]*root[[:space:]]/) { print hdrs; print cache; print gz; done = 1 }
   if ($0 ~ /^[[:space:]]*location[[:space:]]/) {
     if ($0 !~ /\{[[:space:]]*(#.*)?$/) { print "location without { on its line: " $0 > "/dev/stderr"; exit 3 }

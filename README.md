@@ -25,9 +25,10 @@ worthless coins before using real ones.
 **Get it.**
 
 - **Web:** the live app above, installable as an app.
-- **Chrome extension:** coming to the Chrome Web Store.
-  Until then, build it (below) and load `dist-extension/` unpacked, as
-  [docs/extension.md](docs/extension.md) describes.
+- **Chrome extension:** [on the Chrome Web Store](https://chromewebstore.google.com/detail/kailah-wallet/nlcefhomhhohcegbacldomjpamambmac).
+  A new version can reach the store a few days after the website, while Google
+  reviews it. You can also build it (below) and load `dist-extension/` unpacked,
+  as [docs/extension.md](docs/extension.md) describes.
 
 The extension is the safer way to run the wallet. Its code is fixed by the
 signed store package, while a website can serve different code on any visit.
@@ -57,9 +58,11 @@ npm run verify:live   # is each official site serving exactly this build?
   allows is the fixed HTML comment Netlify adds to HTML pages, and it says
   when it removed one. It proves what you were served just now, not what
   anyone else gets; that guarantee needs the store-signed extension.
-- **The extension.** Compare `dist-extension/` file by file with the
-  extension Chrome installed from the store, which adds only a `_metadata/`
-  folder.
+- **The extension.** Compare the store's extension file by file with
+  `dist-extension/` built from the tag of the version the store shows. Only a
+  `_metadata/` folder and `manifest.json` should differ: the store adds an
+  `update_url` line, and Chrome adds a `key` line when it installs. (Checked
+  on the store's 2.7.7 package, 2026-10-31.)
 
 **Privacy.** The developer collects no data. [PRIVACY.md](PRIVACY.md) lists
 exactly what stays on your device and which services see what.

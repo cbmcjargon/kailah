@@ -18,11 +18,13 @@
 #      block and in every location block, through deploy/nginx-site.awk (the
 #      wallet's deploy does the same from public/_headers), plus
 #      "Cache-Control: no-cache" on HTML and the gzip block, under the site's
-#      own map variable so the two site files never define the same one;
+#      own map variable so the two site files never define the same one, and
+#      turns the access log off in every server block, certbot's redirect too;
 #   3. checks the live result: every managed header on the page, the
 #      stylesheet and an image; the page re-checked on every visit; a 404 for
 #      an unknown path and for /_headers; index.html byte-identical to site/;
-#      the webroot holding exactly the files of site/ and nothing else.
+#      the webroot holding exactly the files of site/ and nothing else; marked
+#      requests over https and plain http leaving no line in nginx's logs.
 # Auth: your ssh-agent, as for deploy/vps-redeploy.sh. Nothing credential-
 # related lives in this file.
 set -euo pipefail
@@ -120,7 +122,7 @@ COPYFILE_DISABLE=1 tar -C site --exclude='./_headers' --exclude='./README.md' --
 
 # 2. Headers + HTML no-cache + gzip, rewritten the way the wallet's are
 #    (see deploy/vps-redeploy.sh): back up the real file, rewrite, syntax-check,
-#    reload. The map variable is the site's own.
+#    reload. The map variable is the site's own, and nolog is the site's alone.
 scp "${SSH_OPTS[@]}" "$HEADERS_FILE" "$WALLET_VPS:/tmp/kailah-site-headers.conf"
 scp "${SSH_OPTS[@]}" "$GZIP_FILE" "$WALLET_VPS:/tmp/kailah-site-gzip.conf"
 scp "${SSH_OPTS[@]}" deploy/nginx-site.awk "$WALLET_VPS:/tmp/kailah-site.awk"
@@ -129,7 +131,7 @@ remote "
   set -e
   real=\$(readlink -f '$SITE')
   cp -p \"\$real\" \"\$real.bak-\$(date +%Y%m%d-%H%M%S)\"
-  awk -v hdrsfile=/tmp/kailah-site-headers.conf -v gzfile=/tmp/kailah-site-gzip.conf -v managed='$MANAGED' -v var=$VAR \\
+  awk -v hdrsfile=/tmp/kailah-site-headers.conf -v gzfile=/tmp/kailah-site-gzip.conf -v managed='$MANAGED' -v var=$VAR -v nolog=1 \\
     -f /tmp/kailah-site.awk \"\$real\" > /tmp/kailah-site.new
   cat /tmp/kailah-site.new > \"\$real\"
   rm -f /tmp/kailah-site.new /tmp/kailah-site-headers.conf /tmp/kailah-site-gzip.conf /tmp/kailah-site.awk
@@ -172,3 +174,15 @@ else
   echo "the webroot on the box differs from site/" >&2
   exit 1
 fi
+# No access log: marked requests over https and plain http, a 404 among them,
+# leave no line in any of nginx's logs. Only file names ever come back.
+MARK="site-nolog-check-$(date +%s)-$$"
+curl -sS -o /dev/null "$U/?$MARK"
+curl -sS -o /dev/null "$U/nope-$MARK"
+curl -sS -o /dev/null "http://$SITE_HOST/?$MARK"
+LOGGED=$(remote "grep -ls -- '$MARK' /var/log/nginx/*.log || true")
+if [ -n "$LOGGED" ]; then
+  echo "a marked request was logged in: $LOGGED" >&2
+  exit 1
+fi
+echo "access logs: marked requests over https and plain http left no line"
