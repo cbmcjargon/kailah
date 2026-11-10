@@ -1,6 +1,6 @@
 # Kailah Wallet — maintenance notes
 
-Self-custody browser wallet, v2.7.9: four engines — UTXO (BTC/DOGE/LTC),
+Self-custody browser wallet, v2.7.10: four engines — UTXO (BTC/DOGE/LTC),
 EVM (USDC+ETH on Base/Ethereum/Arbitrum + BNB on BSC, no explorer API there),
 Solana (SOL + SPL USDC + Jupiter swaps + native staking via hand-built
 stake-program instructions in solstake.ts), TRON (TRX + USDT-TRC20 + Stake 2.0 via tron.ts/tronstake.ts — the node builds raw txs and the wallet DECODES the protobuf bytes
@@ -118,7 +118,16 @@ not feature building, unless the user asks for something new.
   four send forms. An address is trusted ("sent") only when the wallet's own
   send log says it paid it; history rows never make one trusted (a lying
   data service could plant a "sent" row). It reads only the history the
-  form already has (no extra requests).
+  form already has (no extra requests). It warns on three matching characters
+  at BOTH ends, or on ONE end alone when that end matches for some 22 bits:
+  4 base58 characters (Solana, TRON after its T), 5 bech32, 6 hex, and 5 at a
+  legacy base58 start, whose first character is the same for every address of
+  its kind (ONE_END_* in lookalike.ts). Fakes copy one end at a time, since
+  wallets show "first four … last four": on the owner's own wallet, three at
+  both ends caught 6 of the 10 fakes that imitated an address it deals with
+  (review 2026-11-10). Don't lower a figure without measuring chance matches
+  (check-lookalike G), and build fixtures from made-up addresses: a real
+  wallet's counterparties never go into a public test or doc.
 - Practice-mode keys are separate: Solana devnet and TRON Nile derive at
   coin type 1 (SOL_PRACTICE_PATH / TRON_PRACTICE_PATH), the UTXO testnet
   already did. A chain's binding comes from the node (Solana's blockhash,

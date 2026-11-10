@@ -833,6 +833,16 @@ not exercised live.
    RPC refuses. Pocket Network's public gateway replaced it, and
    `npm run check:health` now gives each service the calls the wallet makes,
    before every release.
+8. **Lookalikes that copy one end.** *2026-11-10:* the lookalike warning
+   needed three matching characters at both ends. Two weeks of dust on a real
+   Solana wallet showed fakes that match four characters at one end and as few
+   as none at the other, one fake per end, sent within minutes of a real
+   transfer. Of the ten that imitated an address the wallet deals with, the
+   rule caught six. No payment went to one. The warning now also fires on one end
+   alone when it matches for some 22 bits (4 base58 characters, 5 bech32, 6
+   hex), measured at under one chance match in three million pairs of
+   unrelated addresses (check-lookalike G). A fake that copies less than that
+   still passes; the review screen shows the whole address.
 
 ## Suggested fix order
 

@@ -45,8 +45,9 @@ function AddressDiff({ address, start, end }: { address: string; start: number; 
 
 /**
  * Shown on a send form when the destination starts and ends like an address
- * from this account's history but isn't it (address poisoning, lookalike.ts).
- * Continue stays disabled until the user says they've checked the address.
+ * from this account's history, or matches one end of it for long enough, but
+ * isn't it (address poisoning, lookalike.ts). Continue stays disabled until
+ * the user says they've checked the address.
  */
 export default function LookalikeWarning({ address, match, checked, onCheckedChange }: LookalikeWarningProps) {
   const knownLabel =
@@ -61,16 +62,25 @@ export default function LookalikeWarning({ address, match, checked, onCheckedCha
       : match.relation === 'own'
         ? 'one of your own addresses'
         : 'another address in your history'
+  // say which part matches: the fakes seen in the wild copy one end at a time
+  const how =
+    match.ends === 'both'
+      ? 'start and end the same way'
+      : match.ends === 'start'
+        ? 'start the same way'
+        : 'end the same way'
   return (
     <div className="warning-box lookalike-warning" role="alert">
       <IconWarning size={20} />
       <div>
         <strong>This looks like {whom}, but it’s a different address</strong>
         <p>
-          Scammers make addresses that start and end the same way as one you use
+          Scammers make addresses that {how} as one you use
           {match.seenIncoming
             ? ', then send you a tiny amount so theirs shows up in your history. This address sent you something.'
-            : ', hoping you won’t check the middle.'}
+            : match.ends === 'both'
+              ? ', hoping you won’t check the middle.'
+              : ', hoping you won’t check the rest.'}
         </p>
         <dl className="lookalike-pair">
           <dt>You entered</dt>

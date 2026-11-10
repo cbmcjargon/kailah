@@ -12,7 +12,15 @@
 //
 // So the send form warns when the address typed or pasted shares its start
 // and end with an address from this account's history (or one of its own
-// addresses) but isn't it. What makes an address TRUSTED (never warned about)
+// addresses) but isn't it. One end alone is enough when it matches for long
+// enough: on the same wallet, two weeks later, every fake matched four
+// characters at one end and anything from none to four at the other, one
+// fake per end, since wallets show "first four … last four" and a Solana key
+// is slow to grind (review 2026-11-10; a rule of three at BOTH ends missed 4
+// of the 10 fakes that imitated an address the wallet deals with, one of
+// them copying nothing but the first four characters).
+//
+// What makes an address TRUSTED (never warned about)
 // is only the wallet's own send log (sentlog.ts): a history row, whatever its
 // direction, never does, because the data service that serves the history
 // could plant a "sent" row to silence the warning (audit 2026-10-26). A
@@ -37,19 +45,49 @@ export interface AddressFormat {
   foldCase?: (address: string) => boolean
   /** characters at the start that carry no identity (0x, bc1q, T), or none */
   fixedPrefix: (address: string) => number
+  /** matching characters at ONE end that warn by themselves (see ONE_END) */
+  oneEnd: (address: string) => OneEnd
 }
+
+/** How many characters must match at the start alone, or at the end alone. */
+export interface OneEnd {
+  start: number
+  end: number
+}
+
+// One end alone warns when a chance match is rarer than about one pair of
+// addresses in three million (some 22 bits), so that a long history stays
+// quiet: 4 base58 characters, 5 bech32, 6 hex. The first characters of an
+// address say less than the rest (nearly every Solana address starts with one
+// of 17 characters, and the one after TRON's T is one of about 25), which the
+// base58 figure allows for; a legacy base58 address also keeps its version
+// character at the start, where every address of its kind has the same one,
+// so its start needs 5. Measured on 6,000 made-up addresses of each kind, a
+// chance match came once in 3.6 million pairs at the worst (a legacy start)
+// and under once in 18 million at the best (bech32); one character fewer
+// would bring it to once in 58,000 to 1.2 million. A user with 600 known
+// addresses sees a chance warning on about one new address in 4,000, and it
+// costs a tick. check-lookalike G holds each figure: one character fewer must
+// not warn.
+const ONE_END_BASE58: OneEnd = { start: 4, end: 4 }
+const ONE_END_BASE58_VERSIONED: OneEnd = { start: 5, end: 4 }
+const ONE_END_BECH32: OneEnd = { start: 5, end: 5 }
+const ONE_END_HEX: OneEnd = { start: 6, end: 6 }
 
 export const EVM_FORMAT: AddressFormat = {
   caseInsensitive: true,
   fixedPrefix: (a) => (/^0x/i.test(a) ? 2 : 0),
+  oneEnd: () => ONE_END_HEX,
 }
 export const TRON_FORMAT: AddressFormat = {
   caseInsensitive: false,
   fixedPrefix: (a) => (a.startsWith('T') ? 1 : 0),
+  oneEnd: () => ONE_END_BASE58,
 }
 export const SOL_FORMAT: AddressFormat = {
   caseInsensitive: false,
   fixedPrefix: () => 0,
+  oneEnd: () => ONE_END_BASE58,
 }
 // bech32 (bc1q…, tb1p…, ltc1q…): human-readable part, separator and witness
 // version are shared by every address of that kind, and bech32 is
@@ -65,6 +103,7 @@ export const UTXO_FORMAT: AddressFormat = {
   caseInsensitive: false,
   foldCase: (a) => BECH32.test(a),
   fixedPrefix: (a) => (BECH32.test(a) ? (BECH32_HEAD.exec(a)?.[0].length ?? 0) : 0),
+  oneEnd: (a) => (BECH32.test(a) ? ONE_END_BECH32 : ONE_END_BASE58_VERSIONED),
 }
 
 /** Matching start and end both at least this long (after the fixed prefix). */
@@ -79,6 +118,8 @@ export interface Lookalike {
   /** raw characters at the candidate's start and end that match `known` */
   sameStart: number
   sameEnd: number
+  /** which part made it a lookalike: both ends, or one end alone */
+  ends: 'both' | 'start' | 'end'
 }
 
 function normalize(address: string, format: AddressFormat): string {
@@ -86,10 +127,10 @@ function normalize(address: string, format: AddressFormat): string {
   return format.caseInsensitive || format.foldCase?.(a) === true ? a.toLowerCase() : a
 }
 
-function body(address: string, format: AddressFormat): { text: string; skip: number } {
+function body(address: string, format: AddressFormat): { text: string; skip: number; one: OneEnd } {
   const n = normalize(address, format)
   const skip = format.fixedPrefix(n)
-  return { text: n.slice(skip), skip }
+  return { text: n.slice(skip), skip, one: format.oneEnd(n) }
 }
 
 /** Common start and end lengths of two different bodies (non-overlapping). */
@@ -125,13 +166,15 @@ export function findLookalike(
     const kb = body(k.address, format)
     if (kb.text === cand.text) continue
     const { start, end } = overlap(cand.text, kb.text)
-    if (start < LOOKALIKE_MIN || end < LOOKALIKE_MIN) continue
+    const both = start >= LOOKALIKE_MIN && end >= LOOKALIKE_MIN
+    if (!both && start < cand.one.start && end < cand.one.end) continue
     const match: Lookalike = {
       known: k.address,
       relation: k.relation,
       seenIncoming,
       sameStart: cand.skip + start,
       sameEnd: end,
+      ends: both ? 'both' : start >= cand.one.start ? 'start' : 'end',
     }
     if (
       best === null ||

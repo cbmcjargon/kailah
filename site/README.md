@@ -52,10 +52,12 @@ mirror is a second copy of the same page, not a second identity.
   https://kailah.netlify.app (the site's own Netlify site). Change all
   three when a custom domain is added; link previews need the absolute
   image address.
-- **Version:** the page names v2.7.9 in the hero and the footer. Update
+- **Version:** the page names v2.7.10 in the hero and the footer. Update
   both on a release, or drop the number.
 - **Store link:** the two "Chrome extension" buttons, the official-sources
   line and the FAQ link to the Chrome Web Store listing.
+- **Search Console:** the `google-site-verification` tag proves this site is the
+  owner's, for the store listing's Official URL. Google re-checks it, so it stays.
 - **Screenshots:** retake after a UI change. The capture used the public
   test wallet in headless Chrome against the live site; the dashboard shot
   shows only Solana and TRON (Settings › Networks shown) because the test
