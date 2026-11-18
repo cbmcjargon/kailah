@@ -24,7 +24,7 @@ const { CHAINS } = await import('../src/lib/networks.ts')
 const { EVM_CHAINS } = await import('../src/lib/evm.ts')
 const { SOL_CHAINS } = await import('../src/lib/sol.ts')
 const { TRON_CHAINS, tronAddressToHex } = await import('../src/lib/tron.ts')
-const { WALLET_ORIGINS, classifyAnswer, classifyNoAnswer, markLagging, preflightProblem, servicesFor, verdictOf } =
+const { WALLET_ORIGINS, classifyAnswer, classifyNoAnswer, markHistory, markLagging, preflightProblem, servicesFor, verdictOf } =
   await import('./health-probes.mjs')
 
 const TIMEOUT_MS = 12_000
@@ -116,6 +116,7 @@ async function probe(service) {
     }
   }
   if (ctx.height !== undefined) r.height = ctx.height
+  if (ctx.historyHours !== undefined) r.historyHours = ctx.historyHours
   return r
 }
 
@@ -140,6 +141,7 @@ const results = (
   )
 ).flat()
 markLagging(results)
+markHistory(results)
 
 const place = (r) => services.findIndex((s) => s.network === r.network && s.name === r.name && s.role === r.role)
 results.sort((a, b) => place(a) - place(b))

@@ -203,9 +203,15 @@ export function solActivity(s: SolUiState | undefined): NetworkActivity {
   if (s.balance > 0n || (s.usdcBalance ?? 0n) > 0n || s.stakeAccounts.length > 0) return 'funded'
   // the USDC lookup is separate and may fail on its own (usdcBalance stays null)
   if (s.usdcBalance === null) return 'unknown'
+  // rows the servers list now, or that this device remembers (solhistory.ts)
   if (s.txs.length > 0) return 'used'
   // nor can a history or stake lookup that failed (BM8)
   if (s.lookupFailed === true) return 'unknown'
+  // Solana's keyless servers keep only a few days of history (2026-11-18), so
+  // "no rows" can be an account last used a week ago on another device. It
+  // still reads as unused: with no SOL, no USDC and no stake, hiding it hides
+  // no funds, and "couldn't tell" would show Solana on every restored wallet
+  // for good. Settings shows it again in one tap.
   return s.error !== null ? 'unknown' : 'unused'
 }
 

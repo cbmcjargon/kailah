@@ -26,6 +26,18 @@ const TEST = {
   tron: 'TAUN6FwrnwwmaEqYcckffC7wYmbaS6cBiX',
 }
 
+/**
+ * Hours of history the wallet needs from at least ONE server of a chain. Solana's
+ * keyless servers prune (found 2026-11-18: one kept 2.8 days, the other 8 to 40
+ * hours). The wallet remembers the activity it has seen (solhistory.ts), but a
+ * late retry of a send that got no clear answer is told "it went through after
+ * all" only while some server still knows the transaction: pending.ts keeps
+ * such a record for 24 hours (FAILED_KEEP_MS).
+ */
+export const MIN_HISTORY_HOURS = { sol: 24 }
+/** A Solana slot, in seconds; close enough to turn a slot span into hours. */
+const SOL_SLOT_SECONDS = 0.4
+
 /** Blocks a service may trail the chain's leader by (about two minutes' worth; half an hour on Bitcoin). */
 const LAG_BLOCKS = {
   btc: 3,
@@ -54,6 +66,16 @@ function rpcResult(text, test) {
   if (j === null || typeof j !== 'object') return `not an answer: ${short(text)}`
   if (j.error !== undefined && j.error !== null) return short(j.error.message ?? JSON.stringify(j.error))
   return test(j.result)
+}
+
+/** A JSON-RPC answer whose result is a whole number, or null for anything else. */
+function rpcNumber(text) {
+  try {
+    const r = JSON.parse(text)?.result
+    return typeof r === 'number' && Number.isSafeInteger(r) && r >= 0 ? r : null
+  } catch {
+    return null
+  }
 }
 
 const HEX = /^0x[0-9a-f]+$/i
@@ -163,6 +185,30 @@ function solRpc(chain, url) {
             ctx.height = r.blockHeight
             return true
           }),
+      },
+      // How far back this server goes. Not calls the wallet makes, and a server
+      // that won't say isn't failed for it: its depth is just not known.
+      {
+        label: 'oldest block kept',
+        url,
+        init: post('getFirstAvailableBlock', []),
+        check: (text, ctx) => {
+          const first = rpcNumber(text)
+          if (first !== null) ctx.firstBlock = first
+          return true
+        },
+      },
+      {
+        label: 'newest block',
+        url,
+        init: post('getSlot', [{ commitment: 'confirmed' }]),
+        check: (text, ctx) => {
+          const slot = rpcNumber(text)
+          if (slot !== null && ctx.firstBlock !== undefined && slot >= ctx.firstBlock) {
+            ctx.historyHours = ((slot - ctx.firstBlock) * SOL_SLOT_SECONDS) / 3600
+          }
+          return true
+        },
       },
       call('balance', 'getBalance', [a, { commitment: 'confirmed' }]),
       call('account', 'getAccountInfo', [a, { encoding: 'base64', commitment: 'confirmed' }]),
@@ -395,6 +441,17 @@ export function markLagging(results) {
   return results
 }
 
+const hoursText = (h) => (h < 48 ? `${Math.round(h)} hours` : `${(h / 24).toFixed(1)} days`)
+const answering = (r) => r.state === 'ok' || r.state === 'slow' || r.state === 'lagging'
+
+/** Says on a working service's line how much history it keeps, where that was measured. */
+export function markHistory(results) {
+  for (const r of results) {
+    if (r.state === 'ok' && r.historyHours !== undefined && !r.detail) r.detail = `keeps about ${hoursText(r.historyHours)} of history`
+  }
+  return results
+}
+
 /**
  * The verdict. A service that answers but can't do the job fails the check, and
  * so does a job nothing answered for. The rest is reported and passes: a busy
@@ -419,6 +476,21 @@ export function verdictOf(results) {
   }
   for (const [job, list] of jobs) {
     if (list.every((r) => r.state === 'down')) fails.push(`${job}: nothing answered.`)
+  }
+  // History depth: a note for each server that keeps too little, a failure when
+  // no answering server of the chain keeps enough (MIN_HISTORY_HOURS).
+  for (const [chainId, need] of Object.entries(MIN_HISTORY_HOURS)) {
+    const measured = results.filter((r) => r.chainId === chainId && r.role === 'node' && answering(r) && r.historyHours !== undefined)
+    if (measured.length === 0) continue
+    const short = measured.filter((r) => r.historyHours < need)
+    if (short.length === measured.length) {
+      fails.push(
+        `${measured[0].network}: no server keeps ${need} hours of history (${measured.map((r) => `${r.name} ${hoursText(r.historyHours)}`).join(', ')}), ` +
+          `so a late retry can't be told that the first send went through.`,
+      )
+    } else {
+      for (const r of short) warns.push(`${r.network}: ${r.name} keeps only about ${hoursText(r.historyHours)} of history; another server covers the ${need} hours the wallet needs.`)
+    }
   }
   return { fails, warns, exitCode: fails.length > 0 ? 1 : 0 }
 }

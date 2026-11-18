@@ -5,7 +5,7 @@ import { formatUsd, shortAddress } from '../lib/format'
 import type { PricePoint } from '../lib/types'
 import Sparkline from './Sparkline'
 import CopyButton from './CopyButton'
-import { IconArrowDown, IconArrowUp, IconCard, IconRefresh, IconSwap, Spinner } from './Icons'
+import { IconArrowDown, IconArrowUp, IconCard, IconExternal, IconRefresh, IconSwap, Spinner } from './Icons'
 
 interface SolCardProps {
   chain: SolChainConfig
@@ -40,6 +40,10 @@ export default function SolCard({
 }: SolCardProps) {
   const { balance, usdcBalance, stakeAccounts, txs, lookupFailed, loading, error } = state
   const stakedTotal = stakeAccounts.reduce((sum, a) => sum + a.lamports, 0n)
+  // An account that holds or has done anything gets the Activity block, even
+  // with no rows: the servers keep only a few days, so an empty list there is
+  // not "nothing ever happened", and the explorer link is how to see the rest.
+  const hasFunds = (balance ?? 0n) > 0n || (usdcBalance ?? 0n) > 0n || stakedTotal > 0n
   const usd =
     balance !== null && price !== undefined && chain.mainnet
       ? evmToUsd(balance, chain.decimals, price)
@@ -169,69 +173,80 @@ export default function SolCard({
         </button>
       </div>
 
-      {txs.length > 0 && (
+      {(txs.length > 0 || hasFunds) && (
         <div className="chain-activity">
           <h3 className="chain-activity-label">Activity</h3>
-          <div className="tx-list">
-            {txs.slice(0, 3).map((t) => (
-              <button
-                key={t.signature}
-                type="button"
-                className="tx-row"
-                onClick={() => onTxClick(t)}
-              >
-                <span className={`tx-icon tx-icon-${t.swap ? 'self' : t.direction}`} aria-hidden="true">
+          {txs.length > 0 && (
+            <div className="tx-list">
+              {txs.slice(0, 3).map((t) => (
+                <button
+                  key={t.signature}
+                  type="button"
+                  className="tx-row"
+                  onClick={() => onTxClick(t)}
+                >
+                  <span className={`tx-icon tx-icon-${t.swap ? 'self' : t.direction}`} aria-hidden="true">
+                    {t.swap ? (
+                      <IconSwap size={14} />
+                    ) : t.direction === 'in' ? (
+                      <IconArrowDown size={14} />
+                    ) : (
+                      <IconArrowUp size={14} />
+                    )}
+                  </span>
+                  <div className="tx-main">
+                    <span className="tx-title">
+                      {t.failed
+                        ? 'Failed'
+                        : t.swap
+                          ? t.amount < 0n
+                            ? `Swapped SOL → ${chain.usdc.symbol}`
+                            : `Swapped ${chain.usdc.symbol} → SOL`
+                          : t.direction === 'in'
+                            ? 'Received'
+                            : t.direction === 'out'
+                              ? 'Sent'
+                              : 'Self'}
+                    </span>
+                    <span className="tx-sub">
+                      {t.swap &&
+                        (t.amount < 0n
+                          ? `${formatSol(-t.amount)} SOL · `
+                          : `${formatSolUsdc(chain, -t.usdcAmount)} ${chain.usdc.symbol} · `)}
+                      {t.time !== null ? new Date(t.time * 1000).toLocaleDateString() : ''}
+                    </span>
+                  </div>
                   {t.swap ? (
-                    <IconSwap size={14} />
-                  ) : t.direction === 'in' ? (
-                    <IconArrowDown size={14} />
+                    // what the swap brought in; what it took is on the line above
+                    <span className="tx-amount tnum tx-amount-in">
+                      {t.amount < 0n
+                        ? `+${formatSolUsdc(chain, t.usdcAmount)} ${chain.usdc.symbol}`
+                        : `+${formatSol(t.amount)} SOL`}
+                    </span>
+                  ) : t.usdcAmount !== 0n ? (
+                    <span className={`tx-amount tnum ${t.usdcAmount > 0n ? 'tx-amount-in' : ''}`}>
+                      {t.usdcAmount > 0n ? '+' : ''}
+                      {formatSolUsdc(chain, t.usdcAmount)} {chain.usdc.symbol}
+                    </span>
                   ) : (
-                    <IconArrowUp size={14} />
+                    <span className={`tx-amount tnum ${t.amount > 0n ? 'tx-amount-in' : ''}`}>
+                      {t.amount > 0n ? '+' : ''}
+                      {formatSol(t.amount)} SOL
+                    </span>
                   )}
-                </span>
-                <div className="tx-main">
-                  <span className="tx-title">
-                    {t.failed
-                      ? 'Failed'
-                      : t.swap
-                        ? t.amount < 0n
-                          ? `Swapped SOL → ${chain.usdc.symbol}`
-                          : `Swapped ${chain.usdc.symbol} → SOL`
-                        : t.direction === 'in'
-                          ? 'Received'
-                          : t.direction === 'out'
-                            ? 'Sent'
-                            : 'Self'}
-                  </span>
-                  <span className="tx-sub">
-                    {t.swap &&
-                      (t.amount < 0n
-                        ? `${formatSol(-t.amount)} SOL · `
-                        : `${formatSolUsdc(chain, -t.usdcAmount)} ${chain.usdc.symbol} · `)}
-                    {t.time !== null ? new Date(t.time * 1000).toLocaleDateString() : ''}
-                  </span>
-                </div>
-                {t.swap ? (
-                  // what the swap brought in; what it took is on the line above
-                  <span className="tx-amount tnum tx-amount-in">
-                    {t.amount < 0n
-                      ? `+${formatSolUsdc(chain, t.usdcAmount)} ${chain.usdc.symbol}`
-                      : `+${formatSol(t.amount)} SOL`}
-                  </span>
-                ) : t.usdcAmount !== 0n ? (
-                  <span className={`tx-amount tnum ${t.usdcAmount > 0n ? 'tx-amount-in' : ''}`}>
-                    {t.usdcAmount > 0n ? '+' : ''}
-                    {formatSolUsdc(chain, t.usdcAmount)} {chain.usdc.symbol}
-                  </span>
-                ) : (
-                  <span className={`tx-amount tnum ${t.amount > 0n ? 'tx-amount-in' : ''}`}>
-                    {t.amount > 0n ? '+' : ''}
-                    {formatSol(t.amount)} SOL
-                  </span>
-                )}
-              </button>
-            ))}
-          </div>
+                </button>
+              ))}
+            </div>
+          )}
+          <p className="activity-note">
+            {txs.length > 0
+              ? 'Older activity may be missing here.'
+              : 'No recent activity. Earlier activity isn\u2019t listed here.'}{' '}
+            <a href={chain.explorerAddr(address)} target="_blank" rel="noopener noreferrer">
+              See all of it on the explorer
+              <IconExternal size={12} />
+            </a>
+          </p>
         </div>
       )}
     </section>

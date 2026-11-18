@@ -1736,6 +1736,20 @@ textarea.input {
   flex-direction: column;
 }
 
+/* under a card's rows: what the list can't show, and where the rest is */
+.activity-note {
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--text-3);
+}
+
+.activity-note a {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+}
+
 .tx-empty {
   padding: 2px 0 4px;
 }

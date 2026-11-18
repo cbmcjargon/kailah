@@ -43,6 +43,11 @@
 //      is caught before anything is simulated, rebuilt ONCE with Jupiter's
 //      maxAccounts, and the smaller route passes the whole gate again (a
 //      tampered one is still refused); still too large ends in plain words.
+//   Q. Solana activity is remembered on the device (2026-11-18: the keyless
+//      servers prune after hours to days): a finalized row seen once stays
+//      when the servers no longer list it and is never fetched again; it is
+//      ciphertext at rest, gone on erase, never written by a read that a lock
+//      or erase overtook, and never trusted beyond display.
 //   N. Solana activity reads version-1 transactions (a real one, recorded
 //      2026-10-29: solana-history-v1-tx.json), which it used to skip, and
 //      still skips what it can't read safely: a version the node refuses, a
@@ -1034,6 +1039,162 @@ console.log('--- P. a route too large for one transaction asks once for a smalle
   check('P5 Jupiter busy when asked for the smaller route: plain words, nothing signed', /too large to fit|busy/i.test(busy.err?.message ?? ''), busy.err?.message?.slice(0, 80))
   const form = readFileSync(new URL('../src/components/SolSwapModal.tsx', import.meta.url), 'utf8')
   check('P6 the review says when the route is the simpler one', /step\.prepared\.simplerRoute &&/.test(form) && /too large to fit in one Solana transaction/.test(form))
+}
+
+console.log('--- Q. Solana activity is remembered on the device ---')
+{
+  const { fetchSolHistory, rememberedSolHistory } = await import('../src/lib/sol.ts')
+  const { rememberedSolTxs, rememberSolTxs, mergeSolHistory, SOL_HISTORY_KEEP } = await import('../src/lib/solhistory.ts')
+  const sec = await import('../src/lib/securestore.ts')
+  const MN = 'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about'
+  // made-up addresses and signatures: base58, the right lengths
+  const ME = base58.encode(createHash('sha256').update('kailah check-swapgate Q: a made-up owner').digest())
+  const PAYER = '9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM'
+  const ATA = solUsdcAta(MAINNET, ME)
+  const sig = (c, n = 88) => c.repeat(n)
+  const T0 = 1_790_000_000
+  const payment = (lamports, t) => ({
+    version: 'legacy', blockTime: t,
+    meta: { err: null, fee: 5000, preBalances: [1_000_000_000, 100], postBalances: [1_000_000_000 - lamports - 5000, 100 + lamports], preTokenBalances: [], postTokenBalances: [] },
+    transaction: { message: { accountKeys: [{ pubkey: PAYER, signer: true }, { pubkey: ME, signer: false }] } },
+  })
+  // the server's state: which signatures it lists (newest first) and their details
+  let listed = []
+  const details = new Map()
+  let asked = []
+  let down = false
+  let gate = null
+  const realFetch = globalThis.fetch
+  globalThis.fetch = async (url, init) => {
+    const { method, params } = JSON.parse(init.body)
+    if (down) throw new TypeError('Load failed')
+    const answer = (result) => new Response(JSON.stringify({ jsonrpc: '2.0', id: 1, result }), { status: 200 })
+    if (method === 'getSignaturesForAddress') {
+      asked.push(`list:${params[0] === ME ? 'me' : params[0] === ATA ? 'ata' : 'other'}`)
+      return answer(params[0] === ME ? listed : [])
+    }
+    if (method === 'getTransaction') {
+      asked.push(`tx:${params[0].slice(0, 1)}`)
+      if (gate !== null) await gate
+      return answer(details.get(params[0]) ?? null)
+    }
+    throw new Error(`unexpected RPC ${method}`)
+  }
+  const row = (c, t, status = 'finalized') => ({ signature: sig(c), blockTime: t, err: null, confirmationStatus: status })
+  const settle = async () => { for (let i = 0; i < 40 && !store.has('kailah.sec.solhistory'); i++) await new Promise((r) => setTimeout(r, 10)); await new Promise((r) => setTimeout(r, 20)) }
+  sec.clearSecureStore()
+  await sec.unlockSecureStore(MN)
+
+  // 1. first read: two finalized payments and one only confirmed
+  details.set(sig('A'), payment(1_000, T0)); details.set(sig('B'), payment(2_000, T0 + 60)); details.set(sig('C'), payment(3_000, T0 + 120))
+  listed = [row('C', T0 + 120, 'confirmed'), row('B', T0 + 60), row('A', T0)]
+  const first = await fetchSolHistory(MAINNET, ME)
+  await settle()
+  const blob = store.get('kailah.sec.solhistory') ?? ''
+  check('Q1 a first read shows all three payments, newest first', first.map((t) => t.signature.slice(0, 1)).join('') === 'CBA' && first[0].amount === 3_000n && first[0].counterparty === PAYER)
+  check('Q2 the two the chain has finalized are remembered; the one it could still drop is not',
+    rememberedSolTxs('sol', ME).map((t) => t.signature.slice(0, 1)).join('') === 'BA')
+  check('Q3 at rest it is ciphertext: no address, signature or amount in the clear', blob !== '' && !blob.includes(ME) && !blob.includes('AAAA') && !blob.includes(PAYER) && !/"s":|2000/.test(blob), blob.slice(0, 24))
+
+  // 2. days later the servers have pruned: they list nothing at all
+  listed = []; asked = []
+  const pruned = await fetchSolHistory(MAINNET, ME)
+  check('Q4 the servers list nothing any more (pruned): the two remembered payments are still in Activity, with the same amounts',
+    pruned.map((t) => t.signature.slice(0, 1)).join('') === 'BA' && pruned[0].amount === 2_000n && pruned[1].amount === 1_000n && pruned[1].direction === 'in' && pruned[1].time === T0)
+  check('Q5 ...and nothing was fetched for them', asked.join() === 'list:me,list:ata', asked.join())
+
+  // 3. a new payment arrives; the servers list it beside one they still have
+  details.set(sig('D'), payment(4_000, T0 + 180))
+  listed = [row('D', T0 + 180), row('B', T0 + 60)]; asked = []
+  const next = await fetchSolHistory(MAINNET, ME)
+  check('Q6 a remembered row the servers still list costs no request; only the new one is fetched',
+    asked.filter((a) => a.startsWith('tx:')).join() === 'tx:D' && next.map((t) => t.signature.slice(0, 1)).join('') === 'DBA', asked.join())
+  check('Q7 the earlier unfinalized payment (C), now gone from every list, is not shown: it was never kept', !next.some((t) => t.signature === sig('C')))
+
+  // 4. the detail budget: 12 unseen rows cost 8 requests now, the rest next time
+  const many = 'EFGHJKLMNPQR'.split('')
+  many.forEach((c, k) => details.set(sig(c), payment(10 + k, T0 + 1000 + k)))
+  listed = many.map((c, k) => row(c, T0 + 1000 + k)).reverse(); asked = []
+  await fetchSolHistory(MAINNET, ME)
+  const firstPass = asked.filter((a) => a.startsWith('tx:')).length
+  asked = []
+  const filled = await fetchSolHistory(MAINNET, ME)
+  check('Q8 twelve unseen rows: eight detail requests on one refresh, the other four on the next, none twice',
+    firstPass === 8 && asked.filter((a) => a.startsWith('tx:')).length === 4 && filled.length === 15, `${firstPass} then ${asked.filter((a) => a.startsWith('tx:')).length}, ${filled.length} rows`)
+
+  // 5. the servers can't be reached: the wallet still has its own list
+  down = true
+  const failed = await rejects(() => fetchSolHistory(MAINNET, ME))
+  down = false
+  check('Q9 with every server down the read fails as before (the card says so), and the wallet\'s own list is there to show',
+    failed !== null && rememberedSolHistory(MAINNET, ME).length === 15 && rememberedSolHistory(MAINNET, ME)[0].signature === sig('R'))
+  const app = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8')
+  check('Q9b App shows that list when the history read fails on a card with none yet', /else if \(txs\.length === 0\) txs = lib\.rememberedSolHistory\(chain, key\.address\)/.test(app))
+
+  // 6. it is this account's alone
+  check('Q10 another address, and the practice network, see none of it',
+    rememberedSolTxs('sol', PAYER).length === 0 && rememberedSolTxs('sol-devnet', ME).length === 0)
+
+  // 7. merge rules and the cap
+  const mk = (c, t, lamports) => ({ signature: sig(c), direction: 'in', amount: lamports, usdcAmount: 0n, time: t, counterparty: PAYER, failed: false, swap: false })
+  const merged = mergeSolHistory([mk('A', 5, 9n), mk('Z', null, 1n)], [mk('A', 5, 1n), mk('B', 7, 2n)])
+  check('Q11 one list by signature: the fresh answer wins, a row with no time yet is the newest, then by time',
+    merged.map((t) => t.signature.slice(0, 1)).join('') === 'ZBA' && merged[2].amount === 9n)
+  const lots = Array.from({ length: SOL_HISTORY_KEEP + 30 }, (_, k) => mk('1', 1_000 + k, BigInt(k))).map((t, k) => ({ ...t, signature: base58.encode(createHash('sha512').update(String(k)).digest()) }))
+  rememberSolTxs('sol', PAYER, lots, sec.storeSession())
+  const capped = rememberedSolTxs('sol', PAYER)
+  check('Q12 at most 100 rows an account are kept: the oldest fall off', SOL_HISTORY_KEEP === 100 && capped.length === 100 && capped[0].time === 1_000 + 129 && capped[99].time === 1_000 + 30)
+
+  // 8. what is stored is checked on the way back in: nothing but a well-formed row gets through
+  const good = { s: sig('A'), d: 'in', a: '5', u: '0', t: 9, c: PAYER }
+  sec.secureSet('solhistory', { [`sol:${PAYER}`]: [good, { ...good, s: 'javascript:alert(1)' }, { ...good, s: sig('B'), d: 'sideways' }, { ...good, s: sig('C'), a: '1e9' }, { ...good, s: sig('D'), c: '<img>' }, { ...good, s: sig('E'), t: 'now' }, null, 'x', good] })
+  const clean = rememberedSolTxs('sol', PAYER)
+  check('Q13 a stored row with a bad signature, direction, amount, address or time is dropped, and so is a duplicate',
+    clean.length === 1 && clean[0].signature === sig('A') && clean[0].amount === 5n)
+  sec.secureSet('solhistory', 'not a map')
+  check('Q13b a blob of the wrong shape reads as nothing', rememberedSolTxs('sol', ME).length === 0)
+
+  // 9. a read that a lock or an erase overtook writes nothing (BL9)
+  sec.clearSecureStore(); store.clear()
+  await sec.unlockSecureStore(MN)
+  details.set(sig('S'), payment(7_000, T0 + 5000))
+  listed = [row('S', T0 + 5000)]
+  let open; gate = new Promise((r) => { open = r })
+  const inFlight = fetchSolHistory(MAINNET, ME)
+  await new Promise((r) => setTimeout(r, 20))
+  sec.clearSecureStore() // erase
+  await sec.unlockSecureStore('legal winner thank year wave sausage worth useful legal winner thank yellow') // the next wallet
+  open(); gate = null
+  const lateRows = await inFlight
+  await new Promise((r) => setTimeout(r, 60))
+  check('Q14 a history read still in flight when the wallet is erased and another unlocked writes nothing into the new wallet\'s store',
+    lateRows.length === 1 && !store.has('kailah.sec.solhistory') && rememberedSolTxs('sol', ME).length === 0)
+
+  // 10. erase removes it
+  sec.clearSecureStore(); store.clear()
+  await sec.unlockSecureStore(MN)
+  await fetchSolHistory(MAINNET, ME)
+  await settle()
+  const had = store.has('kailah.sec.solhistory')
+  sec.lockSecureStore()
+  const lockedBlob = store.get('kailah.sec.solhistory') ?? ''
+  check('Q15 locked: only ciphertext remains, and nothing can be read', had && lockedBlob !== '' && rememberedSolTxs('sol', ME).length === 0)
+  await sec.unlockSecureStore(MN)
+  check('Q15b unlocked again: the list is back', rememberedSolTxs('sol', ME).length === 1 && rememberedSolTxs('sol', ME)[0].signature === sig('S'))
+  sec.clearSecureStore()
+  check('Q16 erase removes kailah.sec.solhistory', !store.has('kailah.sec.solhistory') && rememberedSolTxs('sol', ME).length === 0)
+
+  // 11. display only: the lookalike check still trusts nothing but the send log
+  const send = readFileSync(new URL('../src/components/SolSendModal.tsx', import.meta.url), 'utf8')
+  const hist = readFileSync(new URL('../src/lib/solhistory.ts', import.meta.url), 'utf8')
+  check('Q17 remembered rows reach the send form only as history counterparties, never as addresses the wallet paid; solhistory.ts imports no send log and calls no network',
+    /knownAddresses\(\[solKey\.address\], state\.txs\.map\(\(t\) => t\.counterparty\), sentToAddresses\(chain\.id\)\)/.test(send) && !/from '\.\/sentlog'|fetch\(/.test(hist) && /from '\.\/securestore'/.test(hist))
+  const card = readFileSync(new URL('../src/components/SolCard.tsx', import.meta.url), 'utf8')
+  check('Q18 the card says the list may miss older activity and links the account on the explorer, also when it has no rows but holds funds',
+    /Older activity may be missing here\./.test(card) && /href=\{chain\.explorerAddr\(address\)\}/.test(card) && /rel="noopener noreferrer"/.test(card) && /\(txs\.length > 0 \|\| hasFunds\)/.test(card))
+
+  globalThis.fetch = realFetch
+  await sec.unlockSecureStore(MN)
 }
 
 console.log(failures === 0 ? '\nAll swap-gate checks passed.' : `\n${failures} CHECK(S) FAILED.`)

@@ -347,11 +347,27 @@ export function evmReplacementFloor(
 }
 
 /**
+ * A lookup that asked several servers and got both answers: at least one
+ * shows the transaction, at least one doesn't. Inside an attempt's window
+ * that settles nothing (one server may lag, or lie). Outside it, it does:
+ * see seenBlock.
+ */
+export class SeenBySome extends Error {}
+
+/**
  * Seen-or-not entries. Inside its window (`blocking`): seen → dropped, or
  * 'landed' if its broadcast had failed; unseen → blocks; a failed lookup
  * blocks. Outside its window: a clean attempt is forgotten without asking; a
  * failed one is asked about once more — seen → 'landed', unseen → forgotten
  * (it isn't coming), lookup failure → kept for the next check.
+ *
+ * Outside its window, servers that disagree (SeenBySome) count as seen. The
+ * attempt can no longer land, so the only question left is whether it did,
+ * and a server that prunes after a few hours answers "never seen" for a
+ * payment that went through: one Solana server did for 11 of 24 asks about a
+ * confirmed, 16-hour-old transaction (2026-11-18), and the late retry this
+ * record exists for went ahead without a word. A server that wrongly shows
+ * it costs a notice to dismiss; believing the one that doesn't can pay twice.
  */
 async function seenBlock<P extends Pending>(
   entries: P[],
@@ -368,8 +384,10 @@ async function seenBlock<P extends Pending>(
     let wasSeen: boolean
     try {
       wasSeen = await seen(idOf(p))
-    } catch {
+    } catch (e) {
       if (inWindow) return { entry: p, reason: 'unreachable' }
+      // only a failed attempt is asked about out here (see above)
+      if (e instanceof SeenBySome) return { entry: p, reason: 'landed' }
       continue
     }
     if (wasSeen) {

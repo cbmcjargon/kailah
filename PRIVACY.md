@@ -20,7 +20,10 @@ Stored in your browser's local storage for this site or extension:
   unencrypted.
 - **Encrypted caches:** addresses, balances, history, in-flight sends, the
   networks you chose to show, and the public keys of any Ledger accounts.
-  They are encrypted with a key derived from your recovery phrase.
+  They are encrypted with a key derived from your recovery phrase. On Solana
+  this includes the activity the wallet has already shown you (up to 100
+  entries per account), because the network's public servers drop payments
+  from their lists after a few days.
 - **A record of the addresses you have sent to,** per network, also
   encrypted. The lookalike-address warning compares new destinations with
   it; it never leaves your device.

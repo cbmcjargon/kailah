@@ -1283,6 +1283,48 @@ console.log('--- M. two Solana servers: either can serve a read, neither alone e
   reset()
   check('M4d the status lookups and the height ask both servers', ['A:getSignatureStatuses', 'B:getSignatureStatuses'].every((m) => asked.includes(m)) && ['A:getEpochInfo', 'B:getEpochInfo'].every((m) => asked.includes(m)))
 
+  // Pruning servers (2026-11-18): Pocket said "never seen" for 11 of 24 asks
+  // about a confirmed, 16-hour-old transaction that publicnode showed every
+  // time. A failed attempt past its window can no longer land, so one server
+  // showing it is the answer: it went through.
+  const late = (sig) => rec(sig, 500, { ts: Date.now() - 6 * 3600 * 1000, failed: true, to: '11111111111111111111111111111112' })
+  reset(); clearMain(); late('M4e')
+  srv[A].status = 'ok'; srv[B].status = 'unseen'
+  const lateA = await guard()
+  check('M4e a send that got no clear answer, retried hours later: one server still shows it, the other has pruned it → "went through after all" (it went ahead unsaid before)',
+    lateA instanceof ledger.EarlierSendLanded && /went through after all/.test(lateA.message) && ledger.pendingSol(MAIN.id).length === 1, lateA?.message?.slice(0, 70) ?? 'went ahead!')
+  reset(); clearMain(); late('M4f')
+  srv[A].status = 'unseen'; srv[B].status = 'ok'
+  const lateB = await guard()
+  check('M4f ...whichever server is the one that still has it', lateB instanceof ledger.EarlierSendLanded && lateB.entry.signature === 'M4f', lateB?.message?.slice(0, 70) ?? 'went ahead!')
+  ledger.dismissLanded(lateB.entry)
+  check('M4g ...and once dismissed, the next send goes ahead', (await guard()) === null && ledger.pendingSol(MAIN.id).length === 0)
+  reset(); clearMain(); late('M4h')
+  const neither = await guard()
+  check('M4h no server shows it: it never landed, and is forgotten', neither === null && ledger.pendingSol(MAIN.id).length === 0, neither?.message)
+  reset(); clearMain(); rec('M4i', 5000, { ts: Date.now(), failed: true })
+  srv[A].status = 'ok'; srv[B].status = 'unseen'
+  const young = await guard()
+  check('M4i inside its window nothing changed: servers that disagree settle nothing, and the send is held',
+    !(young instanceof ledger.EarlierSendLanded) && /Couldn't check whether your send/.test(young?.message ?? '') && ledger.pendingSol(MAIN.id).length === 1, young?.message?.slice(0, 60))
+  reset(); clearMain(); late('M4j')
+  srv[A].down = true; srv[B].status = 'unseen'
+  const oneQuiet = await guard()
+  check('M4j one server down and the other without it: "never seen" needs every server\'s word, so the record is kept for the next check',
+    oneQuiet === null && ledger.pendingSol(MAIN.id).some((p) => p.signature === 'M4j' && p.failed === true), oneQuiet?.message)
+  srv[A].down = false; srv[A].status = 'ok'
+  const backUp = await guard()
+  check('M4j2 ...and when the quiet server is back and shows it, the retry is told', backUp instanceof ledger.EarlierSendLanded && backUp.entry.signature === 'M4j', backUp?.message?.slice(0, 60) ?? 'went ahead!')
+  {
+    // the ledger's own rule, whatever the engine: only SeenBySome counts, only outside the window
+    clearMain(); late('M4k')
+    const other = await ledger.solInFlightBlock(MAIN.id, async () => { throw new Error('rpc down') }, async () => 1000)
+    const some = await ledger.solInFlightBlock(MAIN.id, async () => { throw new ledger.SeenBySome('servers disagree') }, async () => 1000)
+    check('M4k a lookup that simply failed still decides nothing (kept for the next check); SeenBySome reads as landed',
+      other === null && some?.reason === 'landed' && some.entry.signature === 'M4k' && ledger.pendingSol(MAIN.id).length === 1)
+    clearMain()
+  }
+
   // a refusal after the first server went quiet proves nothing
   reset(); clearMain()
   srv[A].down = true; srv[B].send = 'refused'

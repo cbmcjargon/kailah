@@ -52,7 +52,7 @@ mirror is a second copy of the same page, not a second identity.
   https://kailah.netlify.app (the site's own Netlify site). Change all
   three when a custom domain is added; link previews need the absolute
   image address.
-- **Version:** the page names v2.7.10 in the hero and the footer. Update
+- **Version:** the page names v2.7.11 in the hero and the footer. Update
   both on a release, or drop the number.
 - **Store link:** the two "Chrome extension" buttons, the official-sources
   line and the FAQ link to the Chrome Web Store listing.

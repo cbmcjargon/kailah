@@ -26,6 +26,7 @@ import * as solLib from 'micro-sol-signer'
 import { formatEvmAmount } from './units'
 import { formatCoin } from './format'
 import {
+  SeenBySome,
   agoText,
   dropPending,
   dismissLanded,
@@ -39,6 +40,8 @@ import {
   type PendingSol,
 } from './pending'
 import { recordSentTo } from './sentlog'
+import { storeSession } from './securestore'
+import { mergeSolHistory, rememberSolTxs, rememberedSolTxs } from './solhistory'
 import type { NetMode } from './types'
 
 export type SolChainId = 'sol' | 'sol-devnet'
@@ -401,6 +404,8 @@ interface SigInfo {
   signature: string
   blockTime: number | null
   err: unknown
+  /** 'processed', 'confirmed' or 'finalized' */
+  confirmationStatus?: unknown
 }
 
 interface TokenBalanceEntry {
@@ -424,7 +429,10 @@ interface ParsedTxResult {
   transaction?: { message?: { accountKeys?: { pubkey?: string }[] } }
 }
 
-/** Bounded per-refresh: 1 signatures call + up to this many detail fetches. */
+/**
+ * Bounded per-refresh: the signature lists + up to this many detail fetches.
+ * A row the wallet already remembers (solhistory.ts) costs none.
+ */
 const HISTORY_DETAIL_LIMIT = 8
 
 /**
@@ -450,7 +458,19 @@ function usdcDeltaFor(meta: ParsedTxMeta | null | undefined, mint: string, owner
   return sum(meta?.postTokenBalances) - sum(meta?.preTokenBalances)
 }
 
+/**
+ * The account's activity, newest first: what the servers list now, joined
+ * with what this wallet has been shown before (solhistory.ts). The keyless
+ * servers prune after hours to days (2026-11-18), so their list alone loses a
+ * payment a few days after it arrives; a row seen once is kept on the device.
+ * Rows the chain has finalized are remembered, and a remembered row is not
+ * fetched again.
+ */
 export async function fetchSolHistory(chain: SolChainConfig, address: string): Promise<SolTx[]> {
+  // the unlock this read belongs to: nothing is remembered once it has ended
+  const session = storeSession()
+  const remembered = rememberedSolTxs(chain.id, address)
+  const known = new Map(remembered.map((t) => [t.signature, t]))
   // USDC transfers touch the token account, not necessarily the wallet address
   // (incoming ones touch only the ATA) — so gather signatures from both.
   const ata = solUsdcAta(chain, address)
@@ -476,7 +496,16 @@ export async function fetchSolHistory(chain: SolChainConfig, address: string): P
   sigs.sort((a, b) => (b.blockTime ?? Number.MAX_SAFE_INTEGER) - (a.blockTime ?? Number.MAX_SAFE_INTEGER))
 
   const out: SolTx[] = []
-  for (const s of sigs.slice(0, HISTORY_DETAIL_LIMIT)) {
+  const finalized: SolTx[] = []
+  let detailsLeft = HISTORY_DETAIL_LIMIT
+  for (const s of sigs) {
+    const kept = known.get(s.signature)
+    if (kept !== undefined) {
+      out.push(kept)
+      continue
+    }
+    if (detailsLeft <= 0) continue
+    detailsLeft -= 1
     try {
       const tx = await rpc<ParsedTxResult | null>(chain, 'getTransaction', [
         s.signature,
@@ -524,7 +553,7 @@ export async function fetchSolHistory(chain: SolChainConfig, address: string): P
         }
       }
       const main = usdcDelta !== 0n ? usdcDelta : delta
-      out.push({
+      const row: SolTx = {
         signature: s.signature,
         direction: main === 0n ? 'self' : main < 0n ? 'out' : 'in',
         amount: delta,
@@ -537,12 +566,21 @@ export async function fetchSolHistory(chain: SolChainConfig, address: string): P
           viaJupiter: keys.some((k) => k.pubkey === JUPITER_V6_PROGRAM),
           otherTokenMoved: otherTokenMoved(tx?.meta, chain.usdc.mint, address),
         }),
-      })
+      }
+      out.push(row)
+      // only what the chain can no longer drop is kept for good
+      if (s.confirmationStatus === 'finalized') finalized.push(row)
     } catch {
       // one unparseable tx never blocks the list
     }
   }
-  return out
+  rememberSolTxs(chain.id, address, finalized, session)
+  return mergeSolHistory(out, remembered)
+}
+
+/** What this wallet remembers of the account's activity, for when the servers can't be read. */
+export function rememberedSolHistory(chain: SolChainConfig, address: string): SolTx[] {
+  return rememberedSolTxs(chain.id, address)
 }
 
 // ---------------------------------------------------------------------------
@@ -1061,8 +1099,12 @@ export const SOL_LANDED_FAILED =
 
 /**
  * True once the network reports the signature at any confirmation level.
- * Like solTxStatus, every RPC is asked and they must agree (seen or not);
- * RPCs that disagree throw, and the guard keeps holding.
+ * Like solTxStatus, every RPC is asked and they must agree (seen or not),
+ * and "not seen" counts only when every one of them answered;
+ * RPCs that disagree throw SeenBySome, and the guard keeps holding while the
+ * attempt could still land. Once it can't, the ledger reads SeenBySome as
+ * seen (pending.ts seenBlock): these servers prune, and one that has already
+ * dropped a transaction says "never seen" for a payment that went through.
  */
 export async function solTxSeen(chain: SolChainConfig, signature: string): Promise<boolean> {
   const answers = await rpcEach<{ value?: (object | null)[] }>(chain, 'getSignatureStatuses', [
@@ -1071,7 +1113,14 @@ export async function solTxSeen(chain: SolChainConfig, signature: string): Promi
   ])
   const seen = answers.map((r) => (r?.value?.[0] ?? null) !== null)
   if (!seen.every((v) => v === seen[0])) {
-    throw new Error(`The ${chain.networkName} servers disagree about this transaction right now.`)
+    throw new SeenBySome(`The ${chain.networkName} servers disagree about this transaction right now.`)
+  }
+  // "Never seen" needs every server's word: the one that didn't answer may be
+  // the only one that still has it (the other prunes within hours). A lookup
+  // that failed keeps a hold while the attempt could land, and keeps a failed
+  // attempt's record for the next check after that.
+  if (seen[0] === false && answers.length < chain.rpcs.length) {
+    throw new Error(`Couldn't reach every ${chain.networkName} server to check this transaction.`)
   }
   return seen[0]!
 }

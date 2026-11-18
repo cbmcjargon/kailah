@@ -271,7 +271,7 @@ console.log('--- E. the health check ---')
   const { EVM_CHAINS } = await import('../src/lib/evm.ts')
   const { SOL_CHAINS } = await import('../src/lib/sol.ts')
   const { TRON_CHAINS, tronAddressToHex } = await import('../src/lib/tron.ts')
-  const { servicesFor, classifyAnswer, classifyNoAnswer, preflightProblem, markLagging, verdictOf, WALLET_ORIGINS } = await import('./health-probes.mjs')
+  const { servicesFor, classifyAnswer, classifyNoAnswer, preflightProblem, markLagging, markHistory, verdictOf, MIN_HISTORY_HOURS, WALLET_ORIGINS } = await import('./health-probes.mjs')
   const services = servicesFor({ CHAINS, EVM_CHAINS, SOL_CHAINS, TRON_CHAINS, tronAddressToHex })
   const probed = new Set(services.map((s) => `https://${s.host}`))
   const unprobed = [...connect].filter((h) => !probed.has(h))
@@ -323,6 +323,34 @@ console.log('--- E. the health check ---')
       v(svc({}), svc({ state: 'down', detail: 'x' })).exitCode === 0 && v(svc({}), svc({ state: 'down', detail: 'x' })).warns.length === 1)
   check('E6b busy, a bot check, lagging and slow are notes, never a failure',
     v(svc({ state: 'busy', detail: 'x' }), svc({ state: 'bot-check', detail: 'x' }), svc({ state: 'lagging', detail: 'x' }), svc({ state: 'slow' })).exitCode === 0)
+  // History depth (2026-11-18: Solana's keyless servers prune after hours to days)
+  const solNodes = services.filter((s) => s.chainId === 'sol' && s.role === 'node')
+  const depth = (first, slot) => {
+    const ctx = {}
+    const calls = solNodes[0].calls
+    const a = calls.find((c) => c.label === 'oldest block kept').check(first, ctx)
+    const b = calls.find((c) => c.label === 'newest block').check(slot, ctx)
+    return { ok: a === true && b === true, hours: ctx.historyHours }
+  }
+  const d1 = depth(rpc(null, 1_000_000), rpc(null, 1_000_000 + 9_000 * 30))
+  const d2 = depth(rpc('Method not found'), rpc(null, 5))
+  const d3 = depth('<html>busy</html>', rpc(null, 5))
+  check('E8 every Solana server is asked how far back it goes: 270,000 slots are 30 hours',
+    solNodes.length === SOL_CHAINS.sol.rpcs.length && solNodes.every((s) => s.calls.some((c) => c.label === 'oldest block kept') && s.calls.some((c) => c.label === 'newest block')) &&
+      d1.ok && Math.abs(d1.hours - 30) < 0.01, JSON.stringify(d1))
+  check('E8b a server that won\'t say isn\'t failed for it: its depth is just unknown', d2.ok && d2.hours === undefined && d3.ok && d3.hours === undefined)
+  const node = (over) => ({ network: 'Solana', chainId: 'sol', role: 'node', name: 'x', state: 'ok', detail: '', ms: 100, ...over })
+  const one = v(node({ name: 'a', historyHours: 67 }), node({ name: 'b', historyHours: 8.5 }))
+  const none = v(node({ name: 'a', historyHours: 20 }), node({ name: 'b', historyHours: 8.5 }))
+  check('E8c one server keeping a day is enough: the short one is a note (the 2026-11-18 state)',
+    MIN_HISTORY_HOURS.sol === 24 && one.exitCode === 0 && one.warns.length === 1 && /b keeps only about 9 hours/.test(one.warns[0]), one.warns.join(' | '))
+  check('E8d no server keeping a day fails the check, and says what that costs',
+    none.exitCode === 1 && /no server keeps 24 hours/.test(none.fails[0]) && /late retry/.test(none.fails[0]), none.fails.join(' | '))
+  check('E8e a server that is down or unmeasured decides nothing; another chain is never held to it',
+    v(node({ name: 'a', historyHours: 67 }), node({ name: 'b', state: 'down', detail: 'x', historyHours: 1 })).exitCode === 0 &&
+      v(node({ name: 'a' }), node({ name: 'b' })).exitCode === 0 && v(node({ chainId: 'sol-devnet', network: 'Solana devnet', historyHours: 1 })).exitCode === 0)
+  const shown = markHistory([node({ historyHours: 67.2 }), node({ historyHours: 8.5 }), node({ state: 'broken', detail: 'x', historyHours: 5 })])
+  check('E8f a working server\'s line says how much it keeps', shown[0].detail === 'keeps about 2.8 days of history' && shown[1].detail === 'keeps about 9 hours of history' && shown[2].detail === 'x')
   const pkg = JSON.parse(read('package.json'))
   check('E7 npm run check:health runs it, and it stays out of the offline suite CI runs (it needs the network)',
     /check-health\.mjs/.test(pkg.scripts['check:health']) && !/\bhealth\b/.test(pkg.scripts['check:offline']))

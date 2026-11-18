@@ -23,7 +23,7 @@ import { mnemonicToSeedSync } from '@scure/bip39'
 import { base64 } from '@scure/base'
 
 const PREFIX = 'kailah.sec.'
-const KNOWN_NAMES = ['addrmap', 'statecache', 'pending', 'hwaccounts', 'netprefs', 'sentto'] as const
+const KNOWN_NAMES = ['addrmap', 'statecache', 'pending', 'hwaccounts', 'netprefs', 'sentto', 'solhistory'] as const
 export type SecureName = (typeof KNOWN_NAMES)[number]
 
 let aesKey: CryptoKey | null = null

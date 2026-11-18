@@ -1,6 +1,6 @@
 # Kailah Wallet — maintenance notes
 
-Self-custody browser wallet, v2.7.10: four engines — UTXO (BTC/DOGE/LTC),
+Self-custody browser wallet, v2.7.11: four engines — UTXO (BTC/DOGE/LTC),
 EVM (USDC+ETH on Base/Ethereum/Arbitrum + BNB on BSC, no explorer API there),
 Solana (SOL + SPL USDC + Jupiter swaps + native staking via hand-built
 stake-program instructions in solstake.ts), TRON (TRX + USDT-TRC20 + Stake 2.0 via tron.ts/tronstake.ts — the node builds raw txs and the wallet DECODES the protobuf bytes
@@ -9,7 +9,8 @@ Ledger hardware accounts for BTC/LTC (docs/hardware-signing.md): xpub-only
 accounts beside the seed ones, signed on the device — Bitcoin app via PSBT
 (src/lib/ledger/btcapp.ts), Litecoin via the legacy protocol (legacyapp.ts);
 no Ledger npm packages. Live: https://kailah-wallet.netlify.app and the Chrome
-Web Store (since 2026-10-31; the owner uploads; docs/extension.md).
+Web Store (since 2026-10-31; the owner uploads a CRX signed with their upload
+key, never a zip, since 2026-11-13; docs/extension.md).
 Read README.md first; contracts live in src/lib/types.ts (header comments are
 the module API docs). The project is COMPLETE — sessions here are maintenance,
 not feature building, unless the user asks for something new.
@@ -193,6 +194,25 @@ not feature building, unless the user asks for something new.
   (pollbackoff.ts pollMayStart, up to 3 minutes); a refresh the user asks for
   replaces it at any time. A Solana RPC that gave no answer rests 60 s and is
   asked last (sol.ts rpc), but the double-pay guard (rpcEach) asks every server.
+- Solana's keyless servers prune (found 2026-11-18: publicnode kept 2.8 days,
+  Pocket 8 to 40 hours, differently per answer; no keyless server fit to rely
+  on keeps more, and Solana's own refuses browsers). So the wallet remembers
+  the activity it has seen (lib/solhistory.ts, kailah.sec.solhistory: rows the
+  chain has FINALIZED, 100 per account, written only by the unlock that read
+  them, storeSession). fetchSolHistory returns the servers' list joined with
+  it and never fetches a remembered row again. Remembered rows are display
+  state like a fresh answer: they never make an address trusted and never
+  feed a send. An empty Solana list is not "no history": the card says older
+  activity may be missing and links the explorer. netprefs still reads a
+  Solana account with no funds, no stake and no row the servers or this
+  device know as unused (hiding it hides no funds; "couldn't tell" would show
+  Solana on every restored wallet for good). The double-pay guard: while an
+  attempt can still land, servers that disagree settle nothing (as before);
+  once it can't, one server showing a failed attempt means it went through
+  (pending.ts SeenBySome: Pocket said "never seen" for 11 of 24 asks about a
+  confirmed 16-hour-old transaction), and "never seen" needs every server's
+  answer (solTxSeen). check:health measures each server's depth; none keeping
+  24 hours (FAILED_KEEP_MS) fails it (health-probes MIN_HISTORY_HOURS).
 - Services rot quietly. Ethereum's second RPC, cloudflare-eth.com, came to
   answer only eth_chainId, which left no backup and turned every clean refusal
   of a send into "may still go through" (submitEvmTx needs every RPC to refuse).
@@ -223,7 +243,8 @@ not feature building, unless the user asks for something new.
   held until the chain's block height passes the blockhash's last valid
   height — mainnet has two RPCs (publicnode, then Pocket Network) and the
   guard asks both (rpcEach): the LOWER height counts, and "landed" or
-  "never seen" only when every RPC that answers agrees, so one server alone
+  "never seen" only when every RPC that answers agrees ("never seen" only
+  when every RPC answered; the pruning rule above), so one server alone
   can't end a hold; a refusal after one RPC went quiet keeps the record
   (afterNetworkError) — and a failed broadcast is retried with the SAME
   bytes; TRON: until
@@ -287,4 +308,5 @@ After changes: typecheck + relevant check scripts + drive the affected flow in
 the browser (restore test wallet → exercise → erase). After every deploy, run
 `npm run verify:live` on the deployed commit: both origins must MATCH. After
 a new version goes live on the store, compare its package with the tag
-(docs/extension.md); before an upload, run the reviewer walk on the exact zip.
+(docs/extension.md); before an upload, run the reviewer walk on the exact
+build the signed CRX carries (ops/public-release.md).

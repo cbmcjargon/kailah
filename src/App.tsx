@@ -741,6 +741,9 @@ export default function App({ mnemonic, sessionRef, derivedKeys, onLock, onErase
             // both are best-effort; balances stand on their own, but a failure
             // is remembered: "nothing here" can't be told then (BM8)
             if (txsRes.status === 'fulfilled') txs = txsRes.value
+            // the servers couldn't be read: show what this wallet has seen
+            // before, rather than nothing (they prune after a few days anyway)
+            else if (txs.length === 0) txs = lib.rememberedSolHistory(chain, key.address)
             if (stakeRes.status === 'fulfilled') stakeAccounts = stakeRes.value
             lookupFailed = txsRes.status === 'rejected' || stakeRes.status === 'rejected'
           }

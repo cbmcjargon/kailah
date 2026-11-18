@@ -74,7 +74,7 @@ diff -r store-copy dist-extension  # built from the tag of the version in store-
 
 The store adds a `_metadata/` folder with its signature and an `update_url` line
 in `manifest.json`; Chrome adds a `key` line when it installs. Every other file
-should match, and on the store's 2.7.7 and 2.7.9 packages every other file did.
+should match, and on the store's 2.7.7, 2.7.9 and 2.7.10 packages every other file did.
 
 CI (`.github/workflows/ci.yml`) runs `npm run build:extension` on every push, so
 the checks above run there too.
@@ -243,9 +243,18 @@ months to become trusted. You don't have to take our word for the extension's
 safety: you can compare the store's copy with the public source file by file
 ([Build](#build) has the commands).
 
-- **Package.** Zip the contents of `dist-extension/` (not the folder itself):
-  `cd dist-extension && zip -qrX ../kailah-wallet-extension.zip .`. The version
-  must increase with every upload; it comes from `package.json`.
+- **Package.** Since 2026-11-13 the item is opted in to
+  [Verified CRX Uploads](https://developer.chrome.com/docs/webstore/update#protect-package-updates):
+  the store accepts only a CRX signed with the developer's own upload key, so
+  someone who took over the Google account couldn't simply upload a new
+  version, and a zip is refused. Build `dist-extension/` from the release tag
+  and sign it with that key:
+  `google-chrome --pack-extension=dist-extension --pack-extension-key=<upload key>.pem`
+  writes `dist-extension.crx` beside the folder, for "Upload New Package". The
+  store re-signs what it accepts with the item's own key, so the extension ID
+  and every user's storage stay the same; the signed upload itself is no
+  download for users, since Chrome installs only store-signed CRX files. The
+  version must increase with every upload; it comes from `package.json`.
 - **Images.** Ready to upload, in `extension/store/` (24-bit PNG, no alpha):
   - Five 1280×800 screenshots, in listing order: `screenshot-1-dashboard`,
     `-2-send-review` (USDT on TRON, stopped at review), `-3-receive-btc`,
