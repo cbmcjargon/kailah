@@ -2,7 +2,8 @@
 //
 // Contract:
 //   findLookalike(candidate, known, format): Lookalike | null
-//   knownAddresses(own, counterparties, sentTo): KnownAddress[]
+//   findKnown(candidate, known, format): KnownAddress | null
+//   knownAddresses(own, counterparties, sentTo, contacts?): KnownAddress[]
 //
 // The scam: right after you pay someone, an attacker sends you a tiny amount
 // from an address that starts and ends like the one you paid (observed on the
@@ -21,21 +22,25 @@
 // them copying nothing but the first four characters).
 //
 // What makes an address TRUSTED (never warned about)
-// is only the wallet's own send log (sentlog.ts): a history row, whatever its
-// direction, never does, because the data service that serves the history
-// could plant a "sent" row to silence the warning (audit 2026-10-26). A
-// match against an untrusted address still warns, and says when the typed
-// address is one that appears in the history.
+// is only the wallet's own send log (sentlog.ts) and the user's own contact
+// book (contacts.ts), which nothing but the user's hand writes: a history
+// row, whatever its direction, never does, because the data service that
+// serves the history could plant a "sent" row to silence the warning (audit
+// 2026-10-26). A match against an untrusted address still warns, and says
+// when the typed address is one that appears in the history. An address that
+// imitates a contact warns under the contact's name.
 //
 // Pure: no engine imports, so any send modal can use it without pulling an
 // engine chunk forward.
 
-/** How an address is known: ours, paid by this wallet, or merely seen in history. */
-export type Relation = 'own' | 'sent' | 'other'
+/** How an address is known: a saved contact, ours, paid by this wallet, or merely seen in history. */
+export type Relation = 'contact' | 'own' | 'sent' | 'other'
 
 export interface KnownAddress {
   address: string
   relation: Relation
+  /** a contact's name */
+  name?: string
 }
 
 /** Per-network normalization: case and the fixed prefix every address shares. */
@@ -113,6 +118,8 @@ export interface Lookalike {
   /** the known address the candidate resembles */
   known: string
   relation: Relation
+  /** the contact's name, when it resembles a contact */
+  name?: string
   /** the candidate itself appears in this account's history (never paid by it) */
   seenIncoming: boolean
   /** raw characters at the candidate's start and end that match `known` */
@@ -143,12 +150,12 @@ function overlap(a: string, b: string): { start: number; end: number } {
   return { start, end }
 }
 
-const PRIORITY: Record<Relation, number> = { sent: 0, own: 1, other: 2 }
+const PRIORITY: Record<Relation, number> = { contact: 0, sent: 1, own: 2, other: 3 }
 
 /**
- * The known address `candidate` imitates, or null. An address this wallet
- * has paid before (its own send log), or one of its own, is trusted and never
- * warns.
+ * The known address `candidate` imitates, or null. A saved contact, an
+ * address this wallet has paid before (its own send log), or one of its own,
+ * is trusted and never warns.
  */
 export function findLookalike(
   candidate: string,
@@ -171,6 +178,7 @@ export function findLookalike(
     const match: Lookalike = {
       known: k.address,
       relation: k.relation,
+      ...(k.name !== undefined && { name: k.name }),
       seenIncoming,
       sameStart: cand.skip + start,
       sameEnd: end,
@@ -189,18 +197,56 @@ export function findLookalike(
 }
 
 /**
- * The address set a send form checks against: the account's own addresses
- * ('own'), the addresses the wallet itself has sent to ('sent', from
- * sentlog.ts), and every counterparty its history shows, in either direction
- * ('other'). Trust never comes from the history.
+ * How the wallet already knows `candidate`, when it is exactly a trusted
+ * address: a contact (with its name), one of the account's own, or one the
+ * send log says it paid. Null for a new address and for one that is merely
+ * in the history. The send form says which, so a payment the user believes
+ * goes to someone they've paid before, and doesn't, shows as new.
+ */
+export function findKnown(
+  candidate: string,
+  known: KnownAddress[],
+  format: AddressFormat,
+): KnownAddress | null {
+  const cand = body(candidate, format)
+  if (cand.text === '') return null
+  let best: KnownAddress | null = null
+  for (const k of known) {
+    if (k.relation === 'other' || body(k.address, format).text !== cand.text) continue
+    if (best === null || SAYS_FIRST[k.relation] < SAYS_FIRST[best.relation]) best = k
+  }
+  return best
+}
+
+// What to say about an address known in more than one way: the name the user
+// gave it, then that it is their own, then that they have paid it.
+const SAYS_FIRST: Record<Relation, number> = { contact: 0, own: 1, sent: 2, other: 3 }
+
+/**
+ * The address set a send form checks against: the user's saved contacts
+ * ('contact', from contacts.ts), the account's own addresses ('own'), the
+ * addresses the wallet itself has sent to ('sent', from sentlog.ts), and
+ * every counterparty its history shows, in either direction ('other').
+ * Trust never comes from the history.
  */
 export function knownAddresses(
   own: string[],
   counterparties: (string | null)[],
   sentTo: string[],
+  contacts: readonly { address: string; name: string }[] = [],
 ): KnownAddress[] {
-  const out: KnownAddress[] = own.map((address) => ({ address, relation: 'own' as const }))
-  const taken = new Set(own)
+  const out: KnownAddress[] = []
+  const taken = new Set<string>()
+  for (const c of contacts) {
+    if (taken.has(c.address)) continue
+    taken.add(c.address)
+    out.push({ address: c.address, relation: 'contact', name: c.name })
+  }
+  for (const address of own) {
+    if (taken.has(address)) continue
+    taken.add(address)
+    out.push({ address, relation: 'own' })
+  }
   for (const address of sentTo) {
     if (taken.has(address)) continue
     taken.add(address)

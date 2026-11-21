@@ -16,9 +16,14 @@ import { formatUsd, readTypedAmount } from '../lib/format'
 import Modal from './Modal'
 import CopyButton from './CopyButton'
 import QrScanner from './LazyQrScanner'
-import { IconBack, IconCheck, IconExternal, IconQrScan, IconWarning, Spinner } from './Icons'
+import { IconBack, IconCheck, IconContacts, IconExternal, IconQrScan, IconWarning, Spinner } from './Icons'
 import { errMessage } from './ui'
 import LookalikeWarning, { useLookalike } from './LookalikeWarning'
+import ContactPicker from './ContactPicker'
+import ContactName from './ContactName'
+import RecipientNote from './RecipientNote'
+import SaveContact from './SaveContact'
+import { useContactsFor } from './useContacts'
 import { knownAddresses, TRON_FORMAT } from '../lib/lookalike'
 import { sentToAddresses } from '../lib/sentlog'
 import { EarlierSendLanded, type Pending } from '../lib/pending'
@@ -55,6 +60,7 @@ export default function TronSendModal({
   const [step, setStep] = useState<Step>({ kind: 'form' })
   const sentRef = useRef<PreparedTronSend | null>(null)
   const [scanOpen, setScanOpen] = useState(false)
+  const [pickOpen, setPickOpen] = useState(false)
   const [asset, setAsset] = useState<TronAsset>('trx')
   const [dest, setDest] = useState('')
   const [amountStr, setAmountStr] = useState('')
@@ -75,9 +81,10 @@ export default function TronSendModal({
 
   const destTrimmed = dest.trim()
   const destValid = destTrimmed !== '' && isValidTronAddress(destTrimmed)
+  const contacts = useContactsFor(chain.id)
   const known = useMemo(
-    () => knownAddresses([tronKey.address], state.txs.map((t) => t.counterparty), sentToAddresses(chain.id)),
-    [tronKey.address, state.txs, chain.id],
+    () => knownAddresses([tronKey.address], state.txs.map((t) => t.counterparty), sentToAddresses(chain.id), contacts),
+    [tronKey.address, state.txs, chain.id, contacts],
   )
   const lookalike = useLookalike(destValid ? destTrimmed : '', known, TRON_FORMAT)
 
@@ -150,7 +157,20 @@ export default function TronSendModal({
         <QrScanner onDecoded={handleScanDecoded} onClose={() => setScanOpen(false)} />
       )}
 
-      {step.kind === 'form' && !scanOpen && (
+      {step.kind === 'form' && pickOpen && (
+        <ContactPicker
+          chainId={chain.id}
+          networkName={chain.name}
+          sentTo={sentToAddresses(chain.id)}
+          onPick={(address) => {
+            setDest(address)
+            setPickOpen(false)
+          }}
+          onClose={() => setPickOpen(false)}
+        />
+      )}
+
+      {step.kind === 'form' && !scanOpen && !pickOpen && (
         <form
           className="stack"
           noValidate
@@ -216,6 +236,14 @@ export default function TronSendModal({
               <button
                 type="button"
                 className="icon-btn dest-scan-btn"
+                aria-label="Choose from your contacts"
+                onClick={() => setPickOpen(true)}
+              >
+                <IconContacts />
+              </button>
+              <button
+                type="button"
+                className="icon-btn dest-scan-btn"
                 aria-label="Scan a QR code"
                 onClick={() => setScanOpen(true)}
               >
@@ -230,6 +258,16 @@ export default function TronSendModal({
               </span>
             )}
           </label>
+
+          {destValid && lookalike.match === null && (
+            <RecipientNote
+              chainId={chain.id}
+              networkName={chain.name}
+              address={destTrimmed}
+              known={known}
+              format={TRON_FORMAT}
+            />
+          )}
 
           {lookalike.match !== null && (
             <LookalikeWarning
@@ -305,7 +343,10 @@ export default function TronSendModal({
           <dl className="review-list">
             <div className="review-row">
               <dt>To</dt>
-              <dd className="mono review-addr">{step.prepared.to}</dd>
+              <dd className="review-to">
+                <ContactName chainId={chain.id} address={step.prepared.to} className="review-contact" />
+                <span className="mono review-addr">{step.prepared.to}</span>
+              </dd>
             </div>
             <div className="review-row">
               <dt>Amount</dt>
@@ -389,6 +430,7 @@ export default function TronSendModal({
             <div className="mono address-full">{step.txId}</div>
             <CopyButton text={step.txId} label="Copy transaction id" withText />
           </div>
+          <SaveContact chainId={chain.id} address={step.prepared.to} existingLabel="Sent to your contact" />
           <a
             className="btn btn-secondary"
             href={chain.explorerTx(step.txId)}

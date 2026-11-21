@@ -20,9 +20,14 @@ import { formatCoin, formatTypedAmount, formatUsd, readTypedAmount } from '../li
 import Modal from './Modal'
 import CopyButton from './CopyButton'
 import QrScanner from './LazyQrScanner'
-import { IconBack, IconCheck, IconExternal, IconQrScan, IconWarning, Spinner } from './Icons'
+import { IconBack, IconCheck, IconContacts, IconExternal, IconQrScan, IconWarning, Spinner } from './Icons'
 import { errMessage } from './ui'
 import LookalikeWarning, { useLookalike } from './LookalikeWarning'
+import ContactPicker from './ContactPicker'
+import ContactName from './ContactName'
+import RecipientNote from './RecipientNote'
+import SaveContact from './SaveContact'
+import { useContactsFor } from './useContacts'
 import { knownAddresses, SOL_FORMAT } from '../lib/lookalike'
 import { sentToAddresses } from '../lib/sentlog'
 import { EarlierSendLanded, type Pending } from '../lib/pending'
@@ -58,6 +63,7 @@ export default function SolSendModal({
 }: SolSendModalProps) {
   const [step, setStep] = useState<Step>({ kind: 'form' })
   const [scanOpen, setScanOpen] = useState(false)
+  const [pickOpen, setPickOpen] = useState(false)
   const [asset, setAsset] = useState<SolAsset>('sol')
   const [dest, setDest] = useState('')
   const [amountStr, setAmountStr] = useState('')
@@ -83,9 +89,10 @@ export default function SolSendModal({
 
   const destTrimmed = dest.trim()
   const destValid = destTrimmed !== '' && isValidSolAddress(destTrimmed)
+  const contacts = useContactsFor(chain.id)
   const known = useMemo(
-    () => knownAddresses([solKey.address], state.txs.map((t) => t.counterparty), sentToAddresses(chain.id)),
-    [solKey.address, state.txs, chain.id],
+    () => knownAddresses([solKey.address], state.txs.map((t) => t.counterparty), sentToAddresses(chain.id), contacts),
+    [solKey.address, state.txs, chain.id, contacts],
   )
   const lookalike = useLookalike(destValid ? destTrimmed : '', known, SOL_FORMAT)
 
@@ -247,7 +254,20 @@ export default function SolSendModal({
         <QrScanner onDecoded={handleScanDecoded} onClose={() => setScanOpen(false)} />
       )}
 
-      {step.kind === 'form' && !scanOpen && (
+      {step.kind === 'form' && pickOpen && (
+        <ContactPicker
+          chainId={chain.id}
+          networkName={chain.name}
+          sentTo={sentToAddresses(chain.id)}
+          onPick={(address) => {
+            setDest(address)
+            setPickOpen(false)
+          }}
+          onClose={() => setPickOpen(false)}
+        />
+      )}
+
+      {step.kind === 'form' && !scanOpen && !pickOpen && (
         <form
           className="stack"
           noValidate
@@ -313,6 +333,14 @@ export default function SolSendModal({
               <button
                 type="button"
                 className="icon-btn dest-scan-btn"
+                aria-label="Choose from your contacts"
+                onClick={() => setPickOpen(true)}
+              >
+                <IconContacts />
+              </button>
+              <button
+                type="button"
+                className="icon-btn dest-scan-btn"
                 aria-label="Scan a QR code"
                 onClick={() => setScanOpen(true)}
               >
@@ -323,10 +351,22 @@ export default function SolSendModal({
               <span className="field-hint field-hint-error">
                 {/^0x/i.test(destTrimmed)
                   ? "That's an Ethereum-style address — Solana addresses don't start with 0x."
-                  : 'Not a valid Solana address'}
+                  : /^(bc1|tb1|ltc1)/i.test(destTrimmed)
+                    ? 'That looks like a Bitcoin-family address, not a Solana address.'
+                    : 'Not a valid Solana address'}
               </span>
             )}
           </label>
+
+          {destValid && lookalike.match === null && (
+            <RecipientNote
+              chainId={chain.id}
+              networkName={chain.name}
+              address={destTrimmed}
+              known={known}
+              format={SOL_FORMAT}
+            />
+          )}
 
           {lookalike.match !== null && (
             <LookalikeWarning
@@ -405,7 +445,10 @@ export default function SolSendModal({
           <dl className="review-list">
             <div className="review-row">
               <dt>To</dt>
-              <dd className="mono review-addr">{step.prepared.to}</dd>
+              <dd className="review-to">
+                <ContactName chainId={chain.id} address={step.prepared.to} className="review-contact" />
+                <span className="mono review-addr">{step.prepared.to}</span>
+              </dd>
             </div>
             <div className="review-row">
               <dt>Amount</dt>
@@ -488,6 +531,7 @@ export default function SolSendModal({
             <div className="mono address-full">{step.signature}</div>
             <CopyButton text={step.signature} label="Copy transaction signature" withText />
           </div>
+          <SaveContact chainId={chain.id} address={step.prepared.to} existingLabel="Sent to your contact" />
           <a
             className="btn btn-secondary"
             href={chain.explorerTx(step.signature)}

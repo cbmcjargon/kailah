@@ -2271,3 +2271,314 @@ textarea.input {
   color: var(--text-2);
   font-weight: 500;
 }
+
+/* ---- contacts (lib/contacts.ts) --------------------------------------------- */
+
+/* the line under a send form's address: who this is, as far as the wallet knows */
+.recipient-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-top: -6px;
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--text-3);
+}
+
+.recipient-note svg {
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+.recipient-note-known {
+  color: var(--accent);
+}
+
+.recipient-note-more {
+  display: block;
+  color: var(--text-2);
+}
+
+/* a name the user typed: never let it break a layout or run on */
+.recipient-name,
+.contact-name,
+.review-contact,
+.contact-row-name,
+.contact-item-name,
+.lookalike-name {
+  overflow-wrap: anywhere;
+  unicode-bidi: isolate;
+}
+
+.recipient-name {
+  font-weight: 650;
+  color: var(--text);
+}
+
+/* a contact's name in an activity row's second line */
+.tx-sub .contact-name {
+  max-width: 16ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-2);
+  font-weight: 600;
+}
+
+.tx-sub .contact-name::after {
+  content: '·';
+  margin-left: 6px;
+  color: var(--text-3);
+  font-weight: 400;
+}
+
+/* review screens and transaction details: the name above the address, never in place of it */
+.review-to {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+}
+
+.review-contact {
+  font-size: 14.5px;
+  font-weight: 650;
+  color: var(--text);
+  text-align: right;
+}
+
+.tx-detail-cp .review-contact {
+  font-size: 13.5px;
+}
+
+.lookalike-name {
+  display: block;
+  color: var(--text);
+  font-weight: 650;
+}
+
+/* the contact list: the picker in a send form, and Settings */
+.contact-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.contact-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  min-height: 52px;
+  padding: 8px 14px;
+  background: var(--bg);
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-ctl);
+  color: var(--text);
+  cursor: pointer;
+  text-align: left;
+  transition:
+    border-color 150ms ease,
+    background-color 150ms ease;
+}
+
+.contact-row-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.contact-row-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.contact-row-name,
+.contact-item-name {
+  font-size: 14.5px;
+  font-weight: 650;
+}
+
+.contact-row-addr {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  font-size: 12.5px;
+  color: var(--text-3);
+}
+
+/* a whole address, so it can be checked: used where there is no name to go by */
+.contact-row-full {
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--text-2);
+  word-break: break-all;
+}
+
+.contact-tag {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  font-family: var(--font);
+  font-size: 11px;
+  font-weight: 600;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--text-3);
+}
+
+.contact-paid {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.contact-paid-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.contact-paid-row .contact-row {
+  flex: 1;
+  min-width: 0;
+}
+
+.contact-paid-row .btn {
+  flex-shrink: 0;
+}
+
+/* a row of the book in Settings */
+.contact-item {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px 14px;
+  background: var(--bg);
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-ctl);
+}
+
+.contact-item-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.contact-item-addr {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.contact-item-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.contact-remove-armed {
+  color: var(--danger);
+}
+
+.contact-add {
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--hairline);
+}
+
+/* "save this address as a contact": a name and a button */
+.save-contact {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 100%;
+  text-align: left;
+}
+
+.save-contact-prompt {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-2);
+}
+
+.save-contact-row {
+  display: flex;
+  gap: 8px;
+}
+
+.save-contact-row .input {
+  flex: 1;
+  min-width: 0;
+}
+
+.save-contact-row .btn,
+.success-body .save-contact-row .btn {
+  width: auto;
+  flex-shrink: 0;
+}
+
+.save-contact-done {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13.5px;
+  color: var(--accent);
+}
+
+/* the one native select in the app: the network of a new contact */
+.select {
+  appearance: none;
+  -webkit-appearance: none;
+  padding-right: 38px;
+  cursor: pointer;
+  background-image:
+    linear-gradient(45deg, transparent 50%, var(--text-2) 50%),
+    linear-gradient(135deg, var(--text-2) 50%, transparent 50%);
+  background-position:
+    calc(100% - 20px) 50%,
+    calc(100% - 14px) 50%;
+  background-size:
+    6px 6px,
+    6px 6px;
+  background-repeat: no-repeat;
+}
+
+.select option {
+  background: var(--surface);
+  color: var(--text);
+}
+
+@media (hover: hover) {
+  .contact-row:hover {
+    border-color: var(--hairline-strong);
+    background: var(--surface-2);
+  }
+}
+
+@media (max-width: 430px) {
+  .contact-paid-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .save-contact-row {
+    flex-wrap: wrap;
+  }
+}

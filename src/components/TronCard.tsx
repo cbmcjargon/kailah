@@ -4,6 +4,7 @@ import { evmToUsd } from '../lib/units'
 import { formatUsd, shortAddress } from '../lib/format'
 import CopyButton from './CopyButton'
 import { IconArrowDown, IconArrowUp, IconCard, IconRefresh, Spinner } from './Icons'
+import ContactName from './ContactName'
 
 interface TronCardProps {
   chain: TronChainConfig
@@ -173,6 +174,9 @@ export default function TronCard({
                           : 'Self'}
                   </span>
                   <span className="tx-sub">
+                    {t.direction === 'out' && (
+                      <ContactName chainId={chain.id} address={t.counterparty} prefix="to " />
+                    )}
                     {t.time !== null ? new Date(t.time * 1000).toLocaleDateString() : ''}
                   </span>
                 </div>

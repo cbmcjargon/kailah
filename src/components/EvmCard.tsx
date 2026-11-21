@@ -5,6 +5,7 @@ import type { PricePoint } from '../lib/types'
 import Sparkline from './Sparkline'
 import CopyButton from './CopyButton'
 import { IconArrowDown, IconArrowUp, IconCard, IconRefresh, IconWarning, Spinner } from './Icons'
+import ContactName from './ContactName'
 
 interface EvmCardProps {
   chain: EvmChainConfig
@@ -213,6 +214,11 @@ export default function EvmCard({
                     {t.asset === 'gas' ? ` (${chain.gas.symbol})` : t.tokenSymbol !== undefined ? ' (token)' : ''}
                   </span>
                   <span className="tx-sub">
+                    {/* never on a token the wallet doesn't vouch for: its contract
+                        writes the "from" and "to" of its own transfers */}
+                    {t.direction === 'out' && t.tokenSymbol === undefined && (
+                      <ContactName chainId={chain.id} address={t.counterparty} prefix="to " />
+                    )}
                     {t.failed === true
                       ? 'Failed: nothing was sent'
                       : t.pending

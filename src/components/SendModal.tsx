@@ -21,9 +21,14 @@ import CopyButton from './CopyButton'
 import QrScanner from './LazyQrScanner'
 import HardwareReview from './HardwareReview'
 import LedgerPrompt, { useDevice } from './LedgerPrompt'
-import { IconBack, IconCheck, IconExternal, IconQrScan, IconShield, IconWarning, Spinner } from './Icons'
+import { IconBack, IconCheck, IconContacts, IconExternal, IconQrScan, IconShield, IconWarning, Spinner } from './Icons'
 import { coinsToUsd, errMessage } from './ui'
 import LookalikeWarning, { useLookalike } from './LookalikeWarning'
+import ContactPicker from './ContactPicker'
+import ContactName from './ContactName'
+import RecipientNote from './RecipientNote'
+import SaveContact from './SaveContact'
+import { useContactsFor } from './useContacts'
 import { knownAddresses, UTXO_FORMAT } from '../lib/lookalike'
 import { sentToAddresses } from '../lib/sentlog'
 import { agoText, EarlierSendLanded, utxoInFlightBlock, type Pending } from '../lib/pending'
@@ -63,6 +68,7 @@ export default function SendModal({
 }: SendModalProps) {
   const [step, setStep] = useState<Step>({ kind: 'form' })
   const [scanOpen, setScanOpen] = useState(false)
+  const [pickOpen, setPickOpen] = useState(false)
   const [dest, setDest] = useState('')
   const [amountStr, setAmountStr] = useState('')
   // what a scanned code's amount needs from the user (it couldn't be read)
@@ -107,14 +113,16 @@ export default function SendModal({
   // ---- form validation -----------------------------------------------------
   const destTrimmed = dest.trim()
   const destValid = destTrimmed !== '' && isValidAddress(destTrimmed, chain)
+  const contacts = useContactsFor(chain.id)
   const known = useMemo(
     () =>
       knownAddresses(
         accountState?.addresses.map((a) => a.address) ?? [],
         accountState?.txs.map((t) => t.counterparty) ?? [],
         sentToAddresses(chain.id),
+        contacts,
       ),
-    [accountState, chain.id],
+    [accountState, chain.id, contacts],
   )
   const lookalike = useLookalike(destValid ? destTrimmed : '', known, UTXO_FORMAT)
 
@@ -306,7 +314,20 @@ export default function SendModal({
         <QrScanner onDecoded={handleScanDecoded} onClose={() => setScanOpen(false)} />
       )}
 
-      {step.kind === 'form' && !scanOpen && (
+      {step.kind === 'form' && pickOpen && (
+        <ContactPicker
+          chainId={chain.id}
+          networkName={chain.name}
+          sentTo={sentToAddresses(chain.id)}
+          onPick={(address) => {
+            setDest(address)
+            setPickOpen(false)
+          }}
+          onClose={() => setPickOpen(false)}
+        />
+      )}
+
+      {step.kind === 'form' && !scanOpen && !pickOpen && (
         <form
           className="stack"
           noValidate
@@ -332,6 +353,14 @@ export default function SendModal({
               <button
                 type="button"
                 className="icon-btn dest-scan-btn"
+                aria-label="Choose from your contacts"
+                onClick={() => setPickOpen(true)}
+              >
+                <IconContacts />
+              </button>
+              <button
+                type="button"
+                className="icon-btn dest-scan-btn"
                 aria-label="Scan a QR code"
                 onClick={() => setScanOpen(true)}
               >
@@ -346,6 +375,16 @@ export default function SendModal({
               </span>
             )}
           </label>
+
+          {destValid && lookalike.match === null && (
+            <RecipientNote
+              chainId={chain.id}
+              networkName={chain.name}
+              address={destTrimmed}
+              known={known}
+              format={UTXO_FORMAT}
+            />
+          )}
 
           {lookalike.match !== null && (
             <LookalikeWarning
@@ -471,7 +510,10 @@ export default function SendModal({
           <dl className="review-list">
             <div className="review-row">
               <dt>To</dt>
-              <dd className="mono review-addr">{step.built.toAddress}</dd>
+              <dd className="review-to">
+                <ContactName chainId={chain.id} address={step.built.toAddress} className="review-contact" />
+                <span className="mono review-addr">{step.built.toAddress}</span>
+              </dd>
             </div>
             <div className="review-row">
               <dt>Amount</dt>
@@ -590,6 +632,7 @@ export default function SendModal({
             <div className="mono address-full">{step.txid}</div>
             <CopyButton text={step.txid} label="Copy transaction id" withText />
           </div>
+          <SaveContact chainId={chain.id} address={step.built.toAddress} existingLabel="Sent to your contact" />
           <a
             className="btn btn-secondary"
             href={chain.explorerTx(step.txid)}

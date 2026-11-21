@@ -2,6 +2,7 @@ import type { ChainConfig, TxSummary } from '../lib/types'
 import { formatCoin, formatUsd } from '../lib/format'
 import { IconArrowDown, IconArrowUp, IconSwap } from './Icons'
 import { coinsToUsd, relativeTime } from './ui'
+import ContactName from './ContactName'
 
 interface TxRowProps {
   chain: ChainConfig
@@ -45,6 +46,9 @@ export default function TxRow({ chain, tx, price, onClick }: TxRowProps) {
             <span className="tx-badge tx-badge-pending">Pending</span>
           ) : (
             <>
+              {!unknown && tx.direction === 'out' && (
+                <ContactName chainId={chain.id} address={tx.counterparty} prefix="to " />
+              )}
               <span>{relativeTime(tx.time)}</span>
               {tx.confirmations > 0 && tx.confirmations < 6 && (
                 <span className="tx-badge">{tx.confirmations} conf</span>

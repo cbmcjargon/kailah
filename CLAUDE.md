@@ -1,6 +1,6 @@
 # Kailah Wallet — maintenance notes
 
-Self-custody browser wallet, v2.7.11: four engines — UTXO (BTC/DOGE/LTC),
+Self-custody browser wallet, v2.8.0: four engines — UTXO (BTC/DOGE/LTC),
 EVM (USDC+ETH on Base/Ethereum/Arbitrum + BNB on BSC, no explorer API there),
 Solana (SOL + SPL USDC + Jupiter swaps + native staking via hand-built
 stake-program instructions in solstake.ts), TRON (TRX + USDT-TRC20 + Stake 2.0 via tron.ts/tronstake.ts — the node builds raw txs and the wallet DECODES the protobuf bytes
@@ -43,7 +43,7 @@ not feature building, unless the user asks for something new.
   committing, and never `git add -A` right after a deploy without checking.
   The public snapshot's leak scan refuses that path (it caught it once,
   2026-10-25).
-- Tests: `npm run check:offline` (keys, txbuild, txv2, qrparse, vault, scanner, hw, pending, netprefs, failover, swapgate, lookalike, trondecode, bitcore, amounts, sw, headers —
+- Tests: `npm run check:offline` (keys, txbuild, txv2, qrparse, vault, scanner, hw, pending, netprefs, failover, swapgate, lookalike, contacts, trondecode, bitcore, amounts, sw, headers —
   no network; this is what CI runs on every push) and `npm run check:live`
   (account, evm, sol, solswap, solstake, tron — real networks; a provider being
   down or rate-limited prints SKIP, never FAIL). check-providers.mjs is run by
@@ -116,9 +116,10 @@ not feature building, unless the user asks for something new.
   intermediate token account Jupiter opens (intermediateCloses); without it
   the stranded rent trips the SOL-cost bound and the swap is refused.
 - Lookalike-address warning (lib/lookalike.ts, LookalikeWarning.tsx) on all
-  four send forms. An address is trusted ("sent") only when the wallet's own
-  send log says it paid it; history rows never make one trusted (a lying
-  data service could plant a "sent" row). It reads only the history the
+  four send forms. An address is trusted only when the wallet's own send log
+  says it paid it ("sent"), when the user saved it as a contact ("contact"),
+  or when it is the account's own; history rows never make one trusted (a
+  lying data service could plant a "sent" row). It reads only the history the
   form already has (no extra requests). It warns on three matching characters
   at BOTH ends, or on ONE end alone when that end matches for some 22 bits:
   4 base58 characters (Solana, TRON after its T), 5 bech32, 6 hex, and 5 at a
@@ -292,8 +293,52 @@ not feature building, unless the user asks for something new.
   mainnet, and at 0 the node refused them, so payments in one never showed);
   raise it only after checking the new version's jsonParsed shape
   (check-swapgate N).
-- The lookalike check trusts only the wallet's own send log (lib/sentlog.ts),
-  never history rows.
+- The lookalike check trusts only the wallet's own send log (lib/sentlog.ts)
+  and the user's contact book (lib/contacts.ts), never history rows.
+- Contacts (lib/contacts.ts, kailah.sec.contacts; v2.8.0). A contact is
+  TRUSTED, so only the user's hand may write one: addContact is called from
+  SaveContact.tsx (the success step of a send, for the address that send
+  paid; and "Name it" on a send-log row in ContactPicker.tsx) and from
+  ContactsPanel.tsx (Settings, a pasted address, after the lookalike check
+  against the book and the send log). Never add a way to save a contact
+  from a history row, a transaction detail or a scanned code without that
+  check: a poisoner's dust is in the history precisely to be copied
+  (check-contacts G1-G6). Scope (CONTACT_NETWORKS): each UTXO chain alone;
+  the four real 0x networks share one, and the form says when a contact was
+  saved on another of them; practice NEVER shares with real, because this
+  wallet's practice keys differ from its real ones, so a practice address
+  paid in real mode could be out of the wallet's reach. Within a scope one
+  name means one address. Names hold no control, format (bidi, zero-width)
+  or private-use characters, and every place a name shows isolates its
+  direction; a review screen shows the name ABOVE the full address, never
+  in its place. contacts.ts names chain ids itself and validates through
+  addrcheck.ts (EVM, Solana and TRON rules restated; check-contacts B holds
+  them to the engines' validators) and utxoaddr.ts (the one UTXO validator,
+  re-exported by txbuild), so the book pulls no engine and no transaction
+  builder into the App chunk: keep it that way (G7 walks the whole static
+  import graph from main, Shell and App). The Contacts page is a lazy chunk
+  inside its OWN ChunkBoundary (SettingsModal): a lazy screen without one
+  reaches the shell's boundary when its chunk fails to load, which zeroes
+  the keys and replaces the unlocked wallet (review 2026-11-21, G7c).
+  RecipientNote says who an address is from findKnown alone (contact, own,
+  sent); a history-only address is "new". Activity shows a contact's name
+  only on what this wallet SENT, and never on a custom token's row: a token
+  contract writes the "from" and "to" of its own transfers, so a scam
+  airdrop could otherwise arrive under the user's own label (G10b). Settings
+  checks a pasted address against everything a send form would (App's
+  contactKnown: own addresses and history of the whole scope). Unlike the
+  caches, the book is the user's data: screens call syncContacts() before a
+  change (another window may have written) and show ContactsUnstored when
+  the browser refused a write. Like the send log, contacts stay on the
+  device. Write invisible test characters as \u escapes, through a script:
+  the Write tool turns them into the real characters (G13).
+- A segwit address in capitals can be valid base58 too: three in ten
+  Litecoin addresses written "LTC1Q…" are also 32 bytes, a Solana address
+  no key controls, and the Solana form took one typed or scanned until
+  2026-11-21. isValidSolAddress (and addrcheck's copy) refuses this wallet's
+  bech32 shapes in either case. When a validator is added or loosened, try
+  every other network's addresses on it as written, in capitals and in
+  lowercase (check-contacts B5 does).
 - Test wallet for dev flows: the public BIP39 vector phrase (abandon ×11 +
   about), password irrelevant — NEVER for real funds; erase after testing. Its
   testnet4/mainnet accounts have real history useful for exercising the UI.

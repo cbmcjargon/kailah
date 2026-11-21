@@ -4,6 +4,7 @@ import Modal from './Modal'
 import CopyButton from './CopyButton'
 import { IconBolt, IconExternal } from './Icons'
 import { absoluteTime, coinsToUsd } from './ui'
+import ContactName from './ContactName'
 
 interface TxDetailModalProps {
   chain: ChainConfig
@@ -78,6 +79,9 @@ export default function TxDetailModal({ chain, tx, price, onClose, onBump }: TxD
             <div className="review-row">
               <dt>{cpLabel}</dt>
               <dd className="tx-detail-cp">
+                {tx.direction === 'out' && (
+                  <ContactName chainId={chain.id} address={tx.counterparty} className="review-contact" />
+                )}
                 <span className="mono" title={tx.counterparty}>
                   {shortAddress(tx.counterparty)}
                 </span>

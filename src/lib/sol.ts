@@ -174,7 +174,16 @@ export function deriveSolKey(mnemonic: string, accountIndex = 0, practice = fals
   }
 }
 
+// A segwit address of the UTXO chains this wallet knows, in either case
+// (bech32 is one case throughout). Written in capitals, as a QR code often
+// has it, three in ten Litecoin addresses are also 32 bytes of valid base58:
+// a "Solana address" that no key controls, which this form took, typed or
+// scanned (review 2026-11-21). No real Solana address has this shape: the
+// odds of one are about one in 10^16.
+const UTXO_BECH32 = /^(?:(?:bc|tb|ltc)1[02-9ac-hj-np-z]+|(?:BC|TB|LTC)1[02-9AC-HJ-NP-Z]+)$/
+
 export function isValidSolAddress(addr: string): boolean {
+  if (UTXO_BECH32.test(addr)) return false
   try {
     solLib.validateAddress(addr)
     return true

@@ -27,6 +27,10 @@ Stored in your browser's local storage for this site or extension:
 - **A record of the addresses you have sent to,** per network, also
   encrypted. The lookalike-address warning compares new destinations with
   it; it never leaves your device.
+- **Your contacts:** the names you give to addresses, with the network each
+  was saved on, also encrypted. Send forms and the lookalike-address warning
+  read them. They never leave your device, and they don't follow your
+  recovery phrase to another one.
 - **A few non-sensitive settings, unencrypted:** practice or real mode,
   whether payment alerts are on, the latest block heights, and which data
   provider answered last.

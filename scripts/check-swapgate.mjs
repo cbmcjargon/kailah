@@ -1188,7 +1188,7 @@ console.log('--- Q. Solana activity is remembered on the device ---')
   const send = readFileSync(new URL('../src/components/SolSendModal.tsx', import.meta.url), 'utf8')
   const hist = readFileSync(new URL('../src/lib/solhistory.ts', import.meta.url), 'utf8')
   check('Q17 remembered rows reach the send form only as history counterparties, never as addresses the wallet paid; solhistory.ts imports no send log and calls no network',
-    /knownAddresses\(\[solKey\.address\], state\.txs\.map\(\(t\) => t\.counterparty\), sentToAddresses\(chain\.id\)\)/.test(send) && !/from '\.\/sentlog'|fetch\(/.test(hist) && /from '\.\/securestore'/.test(hist))
+    /knownAddresses\(\[solKey\.address\], state\.txs\.map\(\(t\) => t\.counterparty\), sentToAddresses\(chain\.id\), contacts\)/.test(send) && !/from '\.\/sentlog'|fetch\(/.test(hist) && /from '\.\/securestore'/.test(hist))
   const card = readFileSync(new URL('../src/components/SolCard.tsx', import.meta.url), 'utf8')
   check('Q18 the card says the list may miss older activity and links the account on the explorer, also when it has no rows but holds funds',
     /Older activity may be missing here\./.test(card) && /href=\{chain\.explorerAddr\(address\)\}/.test(card) && /rel="noopener noreferrer"/.test(card) && /\(txs\.length > 0 \|\| hasFunds\)/.test(card))

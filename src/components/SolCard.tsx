@@ -6,6 +6,7 @@ import type { PricePoint } from '../lib/types'
 import Sparkline from './Sparkline'
 import CopyButton from './CopyButton'
 import { IconArrowDown, IconArrowUp, IconCard, IconExternal, IconRefresh, IconSwap, Spinner } from './Icons'
+import ContactName from './ContactName'
 
 interface SolCardProps {
   chain: SolChainConfig
@@ -209,6 +210,9 @@ export default function SolCard({
                               : 'Self'}
                     </span>
                     <span className="tx-sub">
+                      {!t.swap && t.direction === 'out' && (
+                        <ContactName chainId={chain.id} address={t.counterparty} prefix="to " />
+                      )}
                       {t.swap &&
                         (t.amount < 0n
                           ? `${formatSol(-t.amount)} SOL · `

@@ -45,23 +45,28 @@ function AddressDiff({ address, start, end }: { address: string; start: number; 
 
 /**
  * Shown on a send form when the destination starts and ends like an address
- * from this account's history, or matches one end of it for long enough, but
- * isn't it (address poisoning, lookalike.ts). Continue stays disabled until
+ * from this account's history or the contact book, or matches one end of it
+ * for long enough, but isn't it (address poisoning, lookalike.ts). Continue stays disabled until
  * the user says they've checked the address.
  */
 export default function LookalikeWarning({ address, match, checked, onCheckedChange }: LookalikeWarningProps) {
+  const contactName = match.relation === 'contact' ? (match.name ?? 'a contact') : null
   const knownLabel =
-    match.relation === 'sent'
-      ? 'You sent to'
-      : match.relation === 'own'
-        ? 'Your own address'
-        : 'In your history'
+    contactName !== null
+      ? 'Your contact'
+      : match.relation === 'sent'
+        ? 'You sent to'
+        : match.relation === 'own'
+          ? 'Your own address'
+          : 'In your history'
   const whom =
-    match.relation === 'sent'
-      ? 'an address you’ve sent to before'
-      : match.relation === 'own'
-        ? 'one of your own addresses'
-        : 'another address in your history'
+    contactName !== null
+      ? 'your contact'
+      : match.relation === 'sent'
+        ? 'an address you’ve sent to before'
+        : match.relation === 'own'
+          ? 'one of your own addresses'
+          : 'another address in your history'
   // say which part matches: the fakes seen in the wild copy one end at a time
   const how =
     match.ends === 'both'
@@ -73,7 +78,16 @@ export default function LookalikeWarning({ address, match, checked, onCheckedCha
     <div className="warning-box lookalike-warning" role="alert">
       <IconWarning size={20} />
       <div>
-        <strong>This looks like {whom}, but it’s a different address</strong>
+        <strong>
+          This looks like {whom}
+          {contactName !== null && (
+            <>
+              {' '}
+              <bdi>{contactName}</bdi>
+            </>
+          )}
+          , but it’s a different address
+        </strong>
         <p>
           Scammers make addresses that {how} as one you use
           {match.seenIncoming
@@ -89,12 +103,19 @@ export default function LookalikeWarning({ address, match, checked, onCheckedCha
           </dd>
           <dt>{knownLabel}</dt>
           <dd>
+            {contactName !== null && <span className="lookalike-name">{contactName}</span>}
             <AddressDiff address={match.known} start={match.sameStart} end={match.sameEnd} />
           </dd>
         </dl>
         <p>
-          Check the whole address with the person you’re paying. Don’t copy it from your
-          transaction history.
+          {contactName !== null ? (
+            <>
+              To pay <bdi>{contactName}</bdi>, pick them from your contacts instead. Otherwise check the whole
+              address with the person you’re paying.
+            </>
+          ) : (
+            'Check the whole address with the person you’re paying. Don’t copy it from your transaction history.'
+          )}
         </p>
         <label className="lookalike-ack">
           <input type="checkbox" checked={checked} onChange={(e) => onCheckedChange(e.target.checked)} />

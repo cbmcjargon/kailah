@@ -12,6 +12,7 @@ import { Address, OutScript, Transaction, p2wpkh } from '@scure/btc-signer'
 import { sha256 } from '@noble/hashes/sha2'
 import { bytesToHex, hexToBytes } from '@noble/hashes/utils'
 import { formatCoin as fmtCoin } from './format'
+import { isValidAddress } from './utxoaddr'
 import type {
   AccountState,
   AccountUtxo,
@@ -37,22 +38,10 @@ function txidOfRawTx(rawTxHex: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// Address validation
+// Address validation: one implementation, in utxoaddr.ts, so the contact book
+// can use it without loading this module.
 
-/** script types acceptable as a destination, per chain family */
-const BTC_DEST_TYPES = ['pkh', 'sh', 'wpkh', 'wsh', 'tr']
-const DOGE_DEST_TYPES = ['pkh', 'sh']
-
-export function isValidAddress(addr: string, chain: ChainConfig): boolean {
-  let type: string
-  try {
-    type = Address(chain.network).decode(addr).type
-  } catch {
-    return false
-  }
-  const allowed = chain.id === 'doge' ? DOGE_DEST_TYPES : BTC_DEST_TYPES
-  return allowed.includes(type)
-}
+export { isValidAddress }
 
 /**
  * Dust is a property of the OUTPUT SCRIPT, not the chain: Bitcoin Core's

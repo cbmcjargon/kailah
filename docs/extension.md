@@ -74,7 +74,7 @@ diff -r store-copy dist-extension  # built from the tag of the version in store-
 
 The store adds a `_metadata/` folder with its signature and an `update_url` line
 in `manifest.json`; Chrome adds a `key` line when it installs. Every other file
-should match, and on the store's 2.7.7, 2.7.9 and 2.7.10 packages every other file did.
+should match, and on the store's 2.7.7, 2.7.9, 2.7.10 and 2.7.11 packages every other file did.
 
 CI (`.github/workflows/ci.yml`) runs `npm run build:extension` on every push, so
 the checks above run there too.

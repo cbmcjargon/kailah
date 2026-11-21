@@ -55,19 +55,26 @@ export function ModalPending({ onClose }: { onClose: () => void }) {
   )
 }
 
+/** Boundary fallback for a screen inside an open modal whose chunk failed to load. */
+export function ChunkFailed() {
+  return (
+    <div className="stack">
+      <p className="form-error" role="alert">
+        This part of the wallet didn’t load. Check your connection, then reload the page — you’ll
+        unlock again, and nothing in your wallet changes.
+      </p>
+      <button type="button" className="btn btn-primary" onClick={reloadPage}>
+        Reload
+      </button>
+    </div>
+  )
+}
+
 /** Boundary fallback for a modal whose chunk failed to load. */
 export function ModalFailed({ onClose }: { onClose: () => void }) {
   return (
     <Modal title="Couldn’t open this" onClose={onClose}>
-      <div className="stack">
-        <p className="form-error" role="alert">
-          This part of the wallet didn’t load. Check your connection, then reload the page — you’ll
-          unlock again, and nothing in your wallet changes.
-        </p>
-        <button type="button" className="btn btn-primary" onClick={reloadPage}>
-          Reload
-        </button>
-      </div>
+      <ChunkFailed />
     </Modal>
   )
 }

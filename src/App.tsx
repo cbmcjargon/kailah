@@ -73,6 +73,7 @@ import {
   type NetworkPrefs,
   type RealNetworkId,
 } from './lib/netprefs'
+import { CONTACT_NETWORKS, contactNetwork } from './lib/contacts'
 import Toasts, { type ToastItem } from './components/Toast'
 import Dashboard from './components/Dashboard'
 import SettingsModal from './components/SettingsModal'
@@ -1286,6 +1287,49 @@ export default function App({ mnemonic, sessionRef, derivedKeys, onLock, onErase
     downloadTextFile(`kailah-transactions-${stamp}.csv`, sections.join('\n\n'))
   }, [])
 
+  // What Settings checks a new contact's address against, beside the book and
+  // the send log: this wallet's own addresses and its history on every network
+  // that shares the address (the contact's scope). A send form checks a typed
+  // address against the same, and a contact skips that check from then on, so
+  // a lookalike must not get into the book unseen.
+  // It reads the wallet's state, not the refs, so that it is a new function
+  // whenever a key or a history arrives: Settings then checks again, and a
+  // page opened before an engine had loaded doesn't stay blind to it.
+  const contactKnown = useCallback(
+    (chainId: string): { own: string[]; counterparties: (string | null)[] } => {
+      const own: string[] = []
+      const counterparties: (string | null)[] = []
+      const net = contactNetwork(chainId)
+      if (net === undefined) return { own, counterparties }
+      for (const n of CONTACT_NETWORKS) {
+        if (n.scope !== net.scope) continue
+        if (n.kind === 'utxo') {
+          // the seed account's slot is the chain id; a Ledger account has its own
+          const slots = [n.id, ...hwAccounts.filter((a) => a.chain === n.id).map((a) => hardwareSlotKey(a.record))]
+          for (const slot of slots) {
+            const account = chainStates[slot]?.account
+            if (!account) continue
+            own.push(...account.addresses.map((a) => a.address))
+            counterparties.push(...account.txs.map((t) => t.counterparty))
+          }
+        } else if (n.kind === 'evm') {
+          if (evmKey) own.push(evmKey.address)
+          counterparties.push(...(evmStates[n.id as EvmChainId]?.txs ?? []).map((t) => t.counterparty))
+        } else if (n.kind === 'sol') {
+          const key = n.practice ? solKeys?.practice : solKeys?.real
+          if (key) own.push(key.address)
+          counterparties.push(...(solStates[n.id as SolChainId]?.txs ?? []).map((t) => t.counterparty))
+        } else {
+          const key = n.practice ? tronKeys?.practice : tronKeys?.real
+          if (key) own.push(key.address)
+          counterparties.push(...(tronStates[n.id as TronChainId]?.txs ?? []).map((t) => t.counterparty))
+        }
+      }
+      return { own, counterparties }
+    },
+    [hwAccounts, chainStates, evmKey, evmStates, solKeys, solStates, tronKeys, tronStates],
+  )
+
   // ---- render --------------------------------------------------------------
   const modeHwAccounts = hwAccounts.filter((a) => chainsForMode(mode).some((c) => c.id === a.chain))
   // the networks handleExportCsv will write, named on the Settings row
@@ -1373,6 +1417,7 @@ export default function App({ mnemonic, sessionRef, derivedKeys, onLock, onErase
           hwRecords={hwRecords}
           onAddHardware={() => setHwImportOpen(true)}
           onRemoveHardware={handleHardwareRemove}
+          contactKnown={contactKnown}
         />
       )}
       {hwImportOpen && (

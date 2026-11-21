@@ -1,6 +1,6 @@
 # Kailah Wallet
 
-**v2.7.11** — a self-custody wallet for Bitcoin, Dogecoin, Litecoin, USDC + ETH
+**v2.8.0** — a self-custody wallet for Bitcoin, Dogecoin, Litecoin, USDC + ETH
 (Base / Ethereum / Arbitrum), BNB, Solana (SOL + USDC, with in-wallet swaps
 and native staking), and TRON (TRX + USDT) that runs entirely in the browser. No servers, no accounts, no custody: keys are
 generated on your device, encrypted with your password, and never leave it.
@@ -68,7 +68,7 @@ npm run verify:live   # is each official site serving exactly this build?
   `dist-extension/` built from the tag of the version the store shows. Only a
   `_metadata/` folder and `manifest.json` should differ: the store adds an
   `update_url` line, and Chrome adds a `key` line when it installs. (Checked
-  on the store's 2.7.7, 2.7.9 and 2.7.10 packages.)
+  on the store's 2.7.7, 2.7.9, 2.7.10 and 2.7.11 packages.)
 
 **Privacy.** The developer collects no data. [PRIVACY.md](PRIVACY.md) lists
 exactly what stays on your device and which services see what.
@@ -175,14 +175,31 @@ different name and logo.
   camera QR scanning (BIP21 payment URIs, amount autofill), MAX sweep, fee
   selection, mandatory review screen.
 - **Lookalike-address warning** — on every network's send form: an address
-  that starts and ends like one you've paid (or one of your own) but isn't
-  it stops the send until you confirm you've checked it. So does one that
+  that starts and ends like one you've paid, one of your contacts or one of
+  your own, but isn't it, stops the send until you confirm you've checked it. So does one that
   copies only the start, or only the end, for four characters or more (five
   or six on Bitcoin-style and 0x addresses), because fakes copy one end at a
   time. That's the "address poisoning" scam, where a lookalike sends you dust
-  so it shows up in your history. Only sends you signed make an address
-  trusted, so the attacker's dust, a TRON zero-value USDT "send" or a
-  fake-token "send" can't.
+  so it shows up in your history. Only sends you signed, and contacts you
+  saved yourself, make an address trusted, so the attacker's dust, a TRON
+  zero-value USDT "send" or a fake-token "send" can't.
+- **Contacts** — save a name for an address you pay, on any network. Every
+  send form offers your contacts and the addresses this wallet has paid
+  before, so you pick the recipient instead of copying an address out of your
+  history, which is where a poisoner's lookalike waits. Under the address the
+  form says who it is, as far as the wallet itself knows: a contact by name,
+  one of your own addresses, one you've paid before, or a new address. The
+  review screen shows the name above the full address, never in its place,
+  and activity shows the name on payments you sent to exactly that address
+  (never on one that arrived: a token's contract can write any sender). An
+  address that only looks like a contact's stops the send under the contact's
+  name. Only you can add a contact: in Settings, after a send, or by naming an
+  address the wallet has already paid. Nothing is added from your history,
+  and Settings checks a pasted address against your contacts, your own
+  addresses, your history and what the wallet has paid before saving it.
+  Contacts are encrypted on the device; practice contacts stay in practice
+  mode; one 0x contact covers Base, Ethereum, Arbitrum and BNB Chain, and
+  the form says which of them it was saved on.
 - **Speed up (RBF)** — replace a stuck Bitcoin/Litecoin transaction with a
   higher-fee version, with the BIP125 rules enforced client-side.
 - **Buy** — curated links to licensed onramps (Banxa pre-fills your address)
@@ -264,6 +281,9 @@ This is a personal, hobby-grade wallet. Keep amounts small.
   keep only a few days, so a payment that arrived while the wallet stayed
   closed for longer, or before it was restored on this device, is not listed;
   the balance is always current and the explorer link shows everything.
+- Contacts live on this device only, like the wallet's record of what it has
+  paid. Restoring the recovery phrase on another device brings back the coins,
+  not the contact book, and there is no export or import yet.
 - "Other tokens" shows at most 12 detected ERC-20s; a flood of airdrops can
   crowd a real custom token out of the list.
 - The real-mode confirmation is shown once per device; after that the
@@ -311,6 +331,11 @@ src/lib/          — all money logic, UI-free, contracts in types.ts
   onramp.ts       buy-provider links
   prices.ts       spot prices + 7-day history
   csvexport.ts    formula-injection-safe CSV
+  lookalike.ts    the lookalike-address check, and "who is this address"
+  sentlog.ts      the wallet's own record of the addresses it has paid
+  contacts.ts     the contact book: names for addresses, encrypted, per network scope
+  addrcheck.ts    address rules for every network without loading an engine
+  utxoaddr.ts     the UTXO chains' one address validator (txbuild re-exports it)
   evm.ts          the whole EVM engine (keys, RPC failover, ERC-20 send with
                   pinned chainId, Blockscout history) — deliberately separate
                   from the UTXO stack
@@ -361,6 +386,7 @@ Verification suites (run with `npx tsx scripts/<name>.mjs`):
 | check-trondecode.mjs | the TRON decoder on hand-built protobuf bytes, offline: the honest transfer decodes exactly; expiration is bounded to ten minutes either side of now; the Stake 2.0 resource enum is strict; unknown fields, a Permission_id and a data/memo field are refused |
 | check-swapgate.mjs | the Jupiter Swap V2 gate, offline, on two recorded /build answers: honest builds compile to exactly the instructions Jupiter described and sign byte-exactly; any change to the decoded amount, quoted output, slippage, platform fee, positive-slippage share, variant or authority is refused, as are "other"/tip instructions, foreign signers, a second Jupiter instruction, Approve, a CloseAccount paying someone else, unlisted programs, stake accounts, lookup tables that disagree with the chain, and a simulation short of the decoded floor; the fee is exactly 0.5% (none for the fee wallet itself), and a token account opened for an intermediate token is closed in the same transaction; a route that fails its test run in one exchange is named from the innermost log line and re-routed once, through the whole gate again (a dishonest fresh route is still refused), while failures of the transaction's own plumbing are not re-routed; a simulation that runs out of SOL or tokens says so in plain words, and the swap form checks the SOL it needs, takes only the quote for what it shows, and names the swap by its own direction; the gate reads balances at the simulation's commitment and measures a mismatch once more (a shared fee account, an unrelated transfer); a first-time holder's USDC account deposit is on the review; the form and review show the rate and route from the quote itself, the form's quote refreshes every 20 s while it is open and visible, and a Jupiter swap reads as "Swapped" in Solana activity (never as "Received" the coin it bought); Solana activity reads version-1 transactions (a recorded one) and skips only what it can't read safely; a route too large for one transaction is caught before any simulation, rebuilt once with fewer accounts through the whole gate, and otherwise refused in plain words; Solana activity is remembered on the device: a finalized payment stays listed after the servers prune it and is never fetched again, the list is ciphertext at rest, checked on the way back in, capped, gone on erase, and never written by a read that a lock or erase overtook |
 | check-lookalike.mjs | the send form's lookalike-address check, offline: the real poisoning seen on a Solana wallet is caught; addresses you've paid, your own, new ones and people who paid you don't warn; history an attacker can write (incoming dust, TRON zero-value USDT, EVM custom-token rows) never makes an address trusted; 0x/EVM case, bech32 prefix and case, TRON's T, and the 3-and-3 threshold; case is folded only for real bech32 (bc/tb/ltc) addresses, so a case-flipped twin of a Solana, TRON or legacy Litecoin address warns; one end alone warns when it matches for long enough (four characters on Solana and TRON, five on bech32, six on 0x addresses, five at a legacy start), in the shapes seen dusting a real wallet, on made-up addresses, with one character fewer staying quiet and chance matches among 400 unrelated addresses per network counted |
+| check-contacts.mjs | the contact book, offline: its network table is the engines' own; the address rules it restates give each engine's verdict on a few thousand addresses, and no address of one kind passes as another as written, in capitals or in lowercase (a Litecoin address in capitals is often valid base58 of 32 bytes: the Solana engine, its QR reader and the book all refuse it); names hold nothing invisible or blank, while emoji keep the joiners they are built with; one name per address and one address per name within a scope, practice never sharing with real; ciphertext at rest, unreadable while locked or by another wallet, gone on erase, every record checked on the way back in, a write the browser refused known as that, another window's change picked up before this one's; a contact is trusted by the lookalike check and an address that imitates one warns under its name; "who is this" speaks for contacts, own addresses and the send log only; only the save offer (inside the success step) and Settings can add a contact, never a history row; activity names only what the wallet sent, never a custom token's row; the static import graph from main, Shell and App reaches no engine, and the Contacts page sits in a boundary of its own |
 | check-scanner.mjs | the scan frontier against a provider that hides or invents usage, snapshot validation and the encrypted caches; a failed worker pool stops taking items; a scan from before a lock or erase writes nothing afterwards (not even into the next wallet's store); snapshots carry their own flag; the dashboard keeps the last complete balance over a partial scan, queues rescans as asked, and a send says when coins couldn't load; confirmations count from a tip no lower than the payment's block and advance on quick polls; a scan for a Ledger account removed meanwhile keeps no address map |
 | check-failover.mjs | rate limit vs outage in the provider failover: a provider that pushes back (a 429, or the bare network error a browser shows for a CORS-less 429) is paused and retried, a healthy backup covers the pause, timeouts get one retry, a dead provider fails over at once with a 60 s cooldown, BlockCypher's hourly limit is never retried, and a request never waits or retries past its limits; Bitcore's visible 429 is ridden out without spending BlockCypher's budget, the start-up probe keeps the configured order, a chain on a backup reports it (its polls slow to 10 minutes), nothing is remembered after the wallet locked or was erased, and BlockCypher serves up to 500 inputs/outputs per transaction (a bigger one is marked partial) and gives a broadcast 20 s; practice Bitcoin has a backup that answers address lookups (blockstream.info, used only while mempool.space fails, its hourly limit never retried), background polls back off from 1 to 10 minutes after a failed scan, and a test network's failed check is a calm note, not an alert; mainnet Bitcoin's blockstream.info is a backup too, asked only while all three mempool instances fail; a background poll leaves an EVM, Solana or TRON refresh under way alone, for up to three minutes |
 | check-pending.mjs | the double-pay guard, offline: every broadcast is recorded before it goes out; a send is refused while an earlier attempt may still land (EVM per nonce, Solana until its blockhash expires by block height, TRON until its expiration by this device's clock, UTXO for 30 minutes); a refusal drops the record, a lost answer keeps it, and an attempt whose broadcast failed but later landed is reported before any new send; another window's records count; a Speed up waits for a payment the network doesn't show yet; a send still waiting can be replaced at its nonce (outbidding every attempt by 10 %); a Solana attempt stops holding once the chain passes its blockhash, at any age, and is called expired only then; SOL below the rent minimum to a new address is refused; a UTXO attempt holds back only the account that sent it (seed or Ledger); a Solana attempt that landed but failed is reported as failed; a stake deactivated in its activation epoch is withdrawable, and Withdraw re-reads the account; with Solana's two mainnet servers, a read fails over to the second, a hold ends on the lower of their block heights, "landed" or "never seen" counts only when both agree, and a refusal after the first went quiet keeps the record; a server that gave no answer rests for a minute and is asked last, and the guard still asks it; once a Solana attempt can no longer land, one server still showing it means it went through (the other may have pruned it), and "never seen" needs every server's answer |

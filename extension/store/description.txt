@@ -19,6 +19,7 @@ PRIVATE BY DESIGN
 
 ALSO
 • Staking on Solana and TRON; swaps between SOL and USDC (a 0.5% Kailah fee, shown before you confirm)
+• Contacts: save a name for an address you pay and pick it next time, so you never copy an address out of your history
 • QR code scanning, payment alerts (with no amounts) and CSV export
 • Face ID or fingerprint unlock with a passkey, where your device supports it (your password always works)
 • Show only the networks you use; hidden ones are never queried

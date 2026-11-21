@@ -241,6 +241,39 @@ export function IconDownload(p: IconProps) {
   )
 }
 
+/** One person: a saved contact. */
+export function IconUser(p: IconProps) {
+  return (
+    <Svg {...p}>
+      <circle cx="12" cy="8" r="4" />
+      <path d="M4 21a8 8 0 0 1 16 0" />
+    </Svg>
+  )
+}
+
+/** An address book: the contact list. */
+export function IconContacts(p: IconProps) {
+  return (
+    <Svg {...p}>
+      <rect x="5" y="3" width="15" height="18" rx="2" />
+      <circle cx="12.5" cy="10" r="2.5" />
+      <path d="M8.5 17a4 4 0 0 1 8 0" />
+      <line x1="2.5" y1="8" x2="5" y2="8" />
+      <line x1="2.5" y1="12" x2="5" y2="12" />
+      <line x1="2.5" y1="16" x2="5" y2="16" />
+    </Svg>
+  )
+}
+
+export function IconPlus(p: IconProps) {
+  return (
+    <Svg {...p}>
+      <line x1="12" y1="5" x2="12" y2="19" />
+      <line x1="5" y1="12" x2="19" y2="12" />
+    </Svg>
+  )
+}
+
 /** Two curved arrows — a self-transfer (funds returning to the wallet). */
 export function IconSwap(p: IconProps) {
   return (

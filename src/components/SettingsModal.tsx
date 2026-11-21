@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type FormEvent } from 'react'
+import { lazy, Suspense, useEffect, useRef, useState, type FormEvent } from 'react'
 import type { HardwareAccountRecord, NetMode } from '../lib/types'
 import { CHAINS } from '../lib/networks'
 import { NETWORK_LABELS, PRACTICE_TWINS, REAL_NETWORKS, type RealNetworkId } from '../lib/netprefs'
@@ -10,7 +10,18 @@ import WordGrid from './WordGrid'
 import EraseForm from './EraseForm'
 import ModeToggle from './ModeToggle'
 import { biometricErrorMessage } from '../lib/biometric'
-import { IconBack, IconBell, IconDownload, IconFaceId, IconLock, IconShield, IconWarning } from './Icons'
+import { IconBack, IconBell, IconContacts, IconDownload, IconFaceId, IconLock, IconShield, IconWarning, Spinner } from './Icons'
+import { contactNetwork } from '../lib/contacts'
+import { useAllContacts } from './useContacts'
+
+import ChunkBoundary, { ChunkFailed } from './ChunkBoundary'
+
+// The contact book's own screen, fetched when it is opened: its lookalike
+// check and address rules have no business in the App chunk. It sits in a
+// boundary of its own: a chunk that fails to load (offline, or a deploy
+// replaced it) would otherwise reach the shell's boundary, which zeroes the
+// keys and replaces the whole unlocked wallet (review 2026-11-21).
+const ContactsPanel = lazy(() => import('./ContactsPanel'))
 
 interface SettingsModalProps {
   mode: NetMode
@@ -42,6 +53,8 @@ interface SettingsModalProps {
   /** networks known to hold funds right now — hiding one takes a second tap */
   fundedNetworks: readonly RealNetworkId[]
   onSetNetworkShown: (id: RealNetworkId, show: boolean) => void
+  /** this wallet's own addresses and history counterparties on a chain's contact scope */
+  contactKnown: (chainId: string) => { own: string[]; counterparties: (string | null)[] }
 }
 
 // Labels come from netprefs' static table, not the engine configs: importing
@@ -56,7 +69,7 @@ const PRACTICE_CAPABLE = (() => {
   return names.length > 1 ? `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}` : names.join('')
 })()
 
-type View = 'main' | 'reveal' | 'erase'
+type View = 'main' | 'reveal' | 'erase' | 'contacts'
 
 const REVEAL_SECONDS = 60
 
@@ -83,8 +96,11 @@ export default function SettingsModal({
   networksDecided,
   fundedNetworks,
   onSetNetworkShown,
+  contactKnown,
 }: SettingsModalProps) {
   const [view, setView] = useState<View>('main')
+  const practice = mode === 'practice'
+  const contactCount = useAllContacts().filter((c) => contactNetwork(c.chain)?.practice === practice).length
   // removing takes a second tap on the same row
   const [armedRemove, setArmedRemove] = useState<string | null>(null)
   // so does hiding a network that holds funds
@@ -201,7 +217,15 @@ export default function SettingsModal({
 
   return (
     <Modal
-      title={view === 'main' ? 'Settings' : view === 'reveal' ? 'Recovery phrase' : 'Erase wallet'}
+      title={
+        view === 'main'
+          ? 'Settings'
+          : view === 'reveal'
+            ? 'Recovery phrase'
+            : view === 'contacts'
+              ? 'Contacts'
+              : 'Erase wallet'
+      }
       onClose={closeAll}
     >
       {view === 'main' && (
@@ -261,6 +285,19 @@ export default function SettingsModal({
             >
               <span>Erase wallet</span>
               <span className="settings-row-hint">Requires typing DELETE</span>
+            </button>
+          </section>
+
+          <section className="settings-section">
+            <h3 className="settings-heading">Contacts</h3>
+            <button type="button" className="settings-row" onClick={() => setView('contacts')}>
+              <span className="settings-row-with-icon">
+                <IconContacts size={16} />
+                Contacts
+              </span>
+              <span className="settings-row-hint">
+                {contactCount === 0 ? 'Save names for addresses you pay' : `${contactCount} saved`}
+              </span>
             </button>
           </section>
 
@@ -514,6 +551,30 @@ export default function SettingsModal({
               </button>
             </div>
           )}
+        </div>
+      )}
+
+      {view === 'contacts' && (
+        <div className="stack">
+          <button
+            type="button"
+            className="btn btn-ghost btn-small self-start"
+            onClick={() => setView('main')}
+          >
+            <IconBack size={16} />
+            Back
+          </button>
+          <ChunkBoundary fallback={<ChunkFailed />}>
+            <Suspense
+              fallback={
+                <div className="modal-state">
+                  <Spinner size={28} />
+                </div>
+              }
+            >
+              <ContactsPanel mode={mode} knownFor={contactKnown} />
+            </Suspense>
+          </ChunkBoundary>
         </div>
       )}
 

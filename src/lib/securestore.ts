@@ -23,7 +23,7 @@ import { mnemonicToSeedSync } from '@scure/bip39'
 import { base64 } from '@scure/base'
 
 const PREFIX = 'kailah.sec.'
-const KNOWN_NAMES = ['addrmap', 'statecache', 'pending', 'hwaccounts', 'netprefs', 'sentto', 'solhistory'] as const
+const KNOWN_NAMES = ['addrmap', 'statecache', 'pending', 'hwaccounts', 'netprefs', 'sentto', 'solhistory', 'contacts'] as const
 export type SecureName = (typeof KNOWN_NAMES)[number]
 
 let aesKey: CryptoKey | null = null
@@ -206,6 +206,19 @@ export function secureSet(name: SecureName, value: unknown): void {
       if (aesKey === key) unsaved.add(name)
     })
   writes.set(name, next)
+}
+
+/**
+ * Whether the newest write of this blob reached storage, once it has been
+ * tried: false when the store is locked or the browser refused it (quota
+ * full, storage disabled). The caches don't care, a rebuilt cache is the same
+ * cache; the contact book does, because what it holds is the user's own.
+ */
+export async function securePersisted(name: SecureName): Promise<boolean> {
+  const key = aesKey
+  if (key === null || storage() === null) return false
+  await (writes.get(name) ?? Promise.resolve()).catch(() => undefined)
+  return aesKey === key && !unsaved.has(name)
 }
 
 export function secureRemove(name: SecureName): void {
