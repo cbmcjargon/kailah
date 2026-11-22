@@ -116,14 +116,20 @@ export function buildManifest(version: string, extensionCsp: string): Manifest {
   const icons = { 16: 'icons/icon-16.png', 32: 'icons/icon-32.png', 48: 'icons/icon-48.png', 128: 'icons/icon-128.png' }
   const manifest: Manifest = {
     manifest_version: 3,
-    name: 'Kailah Wallet',
+    // The store's title, which its search reads along with the summary and
+    // the description. On 2026-11-22 the plain "Kailah Wallet" showed for no
+    // coin's name, while "litecoin wallet" and "dogecoin wallet" each found
+    // only one or two wallets built for the coin. The store's guidance asks
+    // for a title that says what the extension does, without a keyword
+    // list: three coins, no more.
+    name: 'Kailah Wallet: Bitcoin, Dogecoin & Litecoin',
     short_name: 'Kailah',
     version,
-    // The store's summary line. No ticker list: "BTC, DOGE, LTC, USDC, ETH,
-    // BNB, SOL and TRX" here got the listing rejected as keyword spam
-    // (Yellow Argon, 2026-10-28); the build refuses one now.
+    // The store's summary line, in one sentence. No ticker list: "BTC, DOGE,
+    // LTC, USDC, ETH, BNB, SOL and TRX" here got the listing rejected as
+    // keyword spam (Yellow Argon, 2026-10-28); the build refuses one now.
     description:
-      'A self-custody crypto wallet. Your keys are created and encrypted on this device and never leave it.',
+      'A self-custody wallet for Bitcoin, Dogecoin, Litecoin, Solana, TRON and USDC that checks every transaction before you sign.',
     // 116: chrome.runtime.getContexts (background.ts). Trusted Types (83) and
     // the manifest COOP key (93) are older.
     minimum_chrome_version: '116',
@@ -155,6 +161,10 @@ export function assertPrivilegeSurface(manifest: Manifest): void {
   const perms = (manifest.permissions as string[] | undefined) ?? []
   for (const p of perms) {
     if (!ALLOWED_PERMISSIONS.includes(p)) throw new Error(`manifest: permission "${p}" is not allowed`)
+  }
+  const name = manifest.name
+  if (typeof name !== 'string' || name.length > 75 || !name.startsWith('Kailah Wallet')) {
+    throw new Error('manifest: name must start with "Kailah Wallet" and be at most 75 characters (Chrome Web Store limit)')
   }
   const desc = manifest.description
   if (typeof desc !== 'string' || desc.length > 132) {

@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://kailah.netlify.app/sitemap.xml

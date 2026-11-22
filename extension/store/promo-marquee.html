@@ -1,0 +1,85 @@
+<!doctype html>
+<!-- Chrome Web Store marquee image, 1400×560: the store can only place an
+     item in its home-page carousel if it has one. Render: see
+     docs/extension.md ("Images"). Brand and one line, per the store's
+     guidance: no screenshot, saturated colours, full-bleed, legible at half
+     size. Same mark and palette as promo-tile.html. -->
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      html,
+      body {
+        margin: 0;
+        width: 1400px;
+        height: 560px;
+        overflow: hidden;
+      }
+      body {
+        position: relative;
+        background:
+          radial-gradient(circle at 22% 50%, rgba(94, 234, 212, 0.34) 0, rgba(94, 234, 212, 0) 40%),
+          linear-gradient(120deg, #0f6b63 0%, #0b2f4d 48%, #0b0e14 100%);
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+      }
+      .rings {
+        position: absolute;
+        inset: 0;
+      }
+      .mark {
+        position: absolute;
+        left: 150px;
+        top: 122px;
+        width: 316px;
+        height: 316px;
+        filter: drop-shadow(0 18px 40px rgba(0, 0, 0, 0.38));
+      }
+      .text {
+        position: absolute;
+        left: 540px;
+        top: 150px;
+      }
+      .name {
+        line-height: 1;
+        font-weight: 800;
+        font-size: 124px;
+        letter-spacing: -0.025em;
+        color: #f2f4f8;
+        white-space: nowrap;
+      }
+      .name span {
+        color: #5eead4;
+      }
+      .line {
+        margin-top: 34px;
+        font-weight: 600;
+        font-size: 44px;
+        letter-spacing: -0.01em;
+        line-height: 1.18;
+        color: rgba(242, 244, 248, 0.9);
+      }
+    </style>
+  </head>
+  <body>
+    <svg class="rings" viewBox="0 0 1400 560" aria-hidden="true">
+      <circle cx="308" cy="280" r="236" fill="none" stroke="rgba(94,234,212,0.16)" stroke-width="3" />
+      <circle cx="308" cy="280" r="340" fill="none" stroke="rgba(94,234,212,0.09)" stroke-width="3" />
+      <circle cx="308" cy="280" r="452" fill="none" stroke="rgba(94,234,212,0.05)" stroke-width="3" />
+    </svg>
+    <svg class="mark" viewBox="80 80 352 352" aria-hidden="true">
+      <circle cx="256" cy="256" r="152" fill="#0b0e14" stroke="#5eead4" stroke-width="26" />
+      <path
+        d="M212 164v184M212 256l104-92M212 256l104 92"
+        stroke="#f2f4f8"
+        stroke-width="32"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+        fill="none"
+      />
+    </svg>
+    <div class="text">
+      <div class="name">Kailah <span>Wallet</span></div>
+      <div class="line">Reads every transaction<br />before you sign it.</div>
+    </div>
+  </body>
+</html>

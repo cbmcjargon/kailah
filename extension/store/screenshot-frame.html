@@ -1,0 +1,109 @@
+<!doctype html>
+<!-- Chrome Web Store screenshot, 1280×800: a caption band over a capture of
+     the real UI. Render: see docs/extension.md ("Images"). The capture is a
+     1280×800 PNG of the extension's own tab, shown whole at 82.5% under the
+     band; the margins take the app's own background, so nothing frames it.
+     Query: ?img=<file>&h=<headline>&s=<one line under it>&bg=<the capture's
+     own edge colour, so a dimmed screen meets the margins without a seam>. -->
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      html,
+      body {
+        margin: 0;
+        width: 1280px;
+        height: 800px;
+        overflow: hidden;
+        background: #0a0d13;
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+      }
+      .band {
+        position: absolute;
+        left: 0;
+        top: 0;
+        width: 1280px;
+        height: 140px;
+        background:
+          radial-gradient(circle at 8% 40%, rgba(94, 234, 212, 0.3) 0, rgba(94, 234, 212, 0) 42%),
+          linear-gradient(100deg, #0f6b63 0%, #0b2f4d 46%, #0b0e14 100%);
+      }
+      .words {
+        position: absolute;
+        left: 112px;
+        top: 30px;
+        width: 880px;
+      }
+      h1 {
+        margin: 0;
+        font-size: 42px;
+        line-height: 1.1;
+        font-weight: 800;
+        letter-spacing: -0.02em;
+        color: #f2f4f8;
+      }
+      p {
+        margin: 10px 0 0;
+        font-size: 21px;
+        line-height: 1.25;
+        font-weight: 500;
+        color: rgba(242, 244, 248, 0.82);
+      }
+      .brand {
+        position: absolute;
+        right: 112px;
+        top: 44px;
+        display: flex;
+        align-items: center;
+        gap: 14px;
+        font-size: 26px;
+        font-weight: 800;
+        letter-spacing: -0.02em;
+        color: #f2f4f8;
+      }
+      .brand span {
+        color: #5eead4;
+      }
+      .brand svg {
+        width: 52px;
+        height: 52px;
+      }
+      .shot {
+        position: absolute;
+        left: 112px;
+        top: 140px;
+        width: 1056px;
+        height: 660px;
+      }
+    </style>
+  </head>
+  <body>
+    <img class="shot" id="shot" alt="" />
+    <div class="band"></div>
+    <div class="words">
+      <h1 id="h"></h1>
+      <p id="s"></p>
+    </div>
+    <div class="brand">
+      <svg viewBox="80 80 352 352" aria-hidden="true">
+        <circle cx="256" cy="256" r="152" fill="#0b0e14" stroke="#5eead4" stroke-width="26" />
+        <path
+          d="M212 164v184M212 256l104-92M212 256l104 92"
+          stroke="#f2f4f8"
+          stroke-width="32"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+          fill="none"
+        />
+      </svg>
+      <div>Kailah <span>Wallet</span></div>
+    </div>
+    <script>
+      const q = new URLSearchParams(location.search)
+      document.getElementById('shot').src = q.get('img')
+      if (/^#[0-9a-f]{6}$/.test(q.get('bg') || '')) document.body.style.background = q.get('bg')
+      document.getElementById('h').textContent = q.get('h')
+      document.getElementById('s').textContent = q.get('s')
+    </script>
+  </body>
+</html>

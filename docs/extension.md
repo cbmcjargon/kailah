@@ -74,7 +74,7 @@ diff -r store-copy dist-extension  # built from the tag of the version in store-
 
 The store adds a `_metadata/` folder with its signature and an `update_url` line
 in `manifest.json`; Chrome adds a `key` line when it installs. Every other file
-should match, and on the store's 2.7.7, 2.7.9, 2.7.10 and 2.7.11 packages every other file did.
+should match, and on the store's 2.7.7, 2.7.9, 2.7.10, 2.7.11 and 2.8.0 packages every other file did.
 
 CI (`.github/workflows/ci.yml`) runs `npm run build:extension` on every push, so
 the checks above run there too.
@@ -257,26 +257,42 @@ safety: you can compare the store's copy with the public source file by file
   version must increase with every upload; it comes from `package.json`.
 - **Images.** Ready to upload, in `extension/store/` (24-bit PNG, no alpha):
   - Five 1280×800 screenshots, in listing order: `screenshot-1-dashboard`,
-    `-2-send-review` (USDT on TRON, stopped at review), `-3-receive-btc`,
-    `-4-ledger` and `-5-settings`.
+    `-2-networks` (the nine networks in Settings), `-3-lookalike` (the warning
+    on the Solana send form), `-4-review` (a practice send to a saved contact,
+    stopped at review) and `-5-contacts`. Each is a capture of the real UI
+    under a one-line caption.
   - `promo-small-440x280.png`, the small promo tile, rendered from
     `promo-tile.html`.
+  - `promo-marquee-1400x560.png`, the marquee image, rendered from
+    `promo-marquee.html`. The store can place an item in its home-page
+    carousel only if it has one.
   - The 128×128 icon is in the package (`icons/icon-128.png`).
 
   How they were made, to redo after a UI change:
   - **Screenshots.** Captured from `dist-extension/` in Chrome for Testing
     (headless, 1280×800, DPR 1, throwaway profile). The public test wallet
-    was in practice mode and was erased afterwards. They are full-bleed
-    captures of the real UI, as the store asks: no frames or captions.
-  - **Edits.** The extension ID under the name is blurred, because the store
-    assigns a different ID from the unpacked build's. Scrollbars are hidden,
-    as macOS overlay scrollbars are. Focus rings are cleared.
-  - **Networks.** Shots 1 and 2 hide Bitcoin and Base through Networks shown.
-    Practice Bitcoin needs mempool.space, which the capture machine could not
-    reach, and Base's spam-airdrop list crowded the frame. Shots 3–5 have
-    Bitcoin shown, behind the modal.
-  - **Tile.** Render `promo-tile.html` at exactly 440×280, DPR 1, and save
-    it as RGB.
+    was in practice mode, and the profile was deleted afterwards. Each capture
+    is then rendered through `screenshot-frame.html`: the whole capture at
+    82.5% under a caption band, the margins in the capture's own edge colour,
+    so nothing frames it (`chrome-headless-shell`, as for the tile). The
+    store's guidance asks for the real UI with visual aids and little text.
+  - **Edits.** The line under the name shows the store's item ID in place of
+    the unpacked build's, since that is the one a store user sees. Scrollbars
+    are hidden, as macOS overlay scrollbars are. Focus rings are cleared.
+  - **What is on them.** The contact "Alex" and the address that imitates it
+    are made up for the capture: random bytes, nobody's keys. Shot 1 hides
+    practice Bitcoin and Base through Networks shown (practice Bitcoin needs
+    mempool.space, which the capture machine could not reach, and Base's
+    spam-airdrop list crowded the frame).
+  - **Capturing.** In three runs full Chrome's new headless mode stopped
+    drawing frames after a few captures, and a capture then never returns. A
+    run with the display kept awake (`caffeinate -d`), the window sized so the
+    page is exactly 1280×800 and no device-metrics override took all of them
+    without a stall.
+  - **Tile and marquee.** Render `promo-tile.html` at exactly 440×280 and
+    `promo-marquee.html` at exactly 1400×560, DPR 1, and save each as RGB
+    (`chrome-headless-shell --screenshot=… --window-size=1400,560
+    --force-device-scale-factor=1 --hide-scrollbars file://…`).
 - **Single purpose.** "A self-custody cryptocurrency wallet: create or restore
   a wallet, view balances and history, and send and receive coins. Keys are
   created and encrypted on the user's device."

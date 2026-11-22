@@ -1,6 +1,6 @@
 # Kailah Wallet — maintenance notes
 
-Self-custody browser wallet, v2.8.0: four engines — UTXO (BTC/DOGE/LTC),
+Self-custody browser wallet, v2.8.1: four engines — UTXO (BTC/DOGE/LTC),
 EVM (USDC+ETH on Base/Ethereum/Arbitrum + BNB on BSC, no explorer API there),
 Solana (SOL + SPL USDC + Jupiter swaps + native staking via hand-built
 stake-program instructions in solstake.ts), TRON (TRX + USDT-TRC20 + Stake 2.0 via tron.ts/tronstake.ts — the node builds raw txs and the wallet DECODES the protobuf bytes
@@ -339,6 +339,16 @@ not feature building, unless the user asks for something new.
   bech32 shapes in either case. When a validator is added or loosened, try
   every other network's addresses on it as written, in capitals and in
   lowercase (check-contacts B5 does).
+- Store listing text: the title (the manifest's `name`), the summary (its
+  `description`) and extension/store/description.txt. The store's search
+  reads all three. After the 2026-10-28 keyword rejection (a ticker list in
+  the summary, "wallet" 15 times in the description) the text named four
+  networks and never said "Dogecoin", and the wallet showed in search for its
+  own name only (measured 2026-11-22). So: the title names at most three
+  coins, the description names all nine networks, no keyword appears more
+  than five times and nothing lists tickers (check-netprefs I6-I9; the build
+  refuses a ticker list or a name over 75 characters). The title changes
+  only with a release, since it is in the package.
 - Test wallet for dev flows: the public BIP39 vector phrase (abandon ×11 +
   about), password irrelevant — NEVER for real funds; erase after testing. Its
   testnet4/mainnet accounts have real history useful for exercising the UI.

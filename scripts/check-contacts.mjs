@@ -71,8 +71,10 @@ const refuses = (fn) => {
 }
 const MN = 'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about'
 const OTHER_MN = 'legal winner thank year wave sausage worth useful legal winner thank yellow'
+// Waits for the encrypted write to land. Up to 5 s: at 400 ms a busy machine
+// (load average 6, 2026-11-22) failed six of the E checks with nothing wrong.
 const settle = async (key = 'kailah.sec.contacts') => {
-  for (let i = 0; i < 40 && !store.has(key); i++) await new Promise((r) => setTimeout(r, 10))
+  for (let i = 0; i < 500 && !store.has(key); i++) await new Promise((r) => setTimeout(r, 10))
   await new Promise((r) => setTimeout(r, 25))
 }
 

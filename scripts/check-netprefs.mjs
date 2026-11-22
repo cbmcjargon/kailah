@@ -381,10 +381,22 @@ console.log('--- I. what a store reviewer meets (review 2026-10-28) ---')
   check('I6 the store summary lists no tickers (it was rejected as keyword spam for "BTC, DOGE, LTC, USDC, ETH, BNB, SOL and TRX")',
     summary.length > 0 && summary.length <= 132 && !tickerList.test(summary) && tickerList.test('BTC, DOGE, LTC and SOL') && /lists tickers/.test(manifestSrc), summary)
   const prose = listing.replace(/https?:\/\/\S+/g, '').replace(/[a-z0-9.-]+\.(?:app|org)\b/g, '')
-  const counts = Object.fromEntries(['wallet', 'kailah', 'crypto', 'bitcoin', 'ethereum', 'solana', 'tron', 'usdc', 'usdt', 'swap', 'swaps', 'extension', 'networks', 'coins', 'app']
+  const counts = Object.fromEntries(['wallet', 'kailah', 'crypto', 'bitcoin', 'dogecoin', 'litecoin', 'ethereum', 'solana', 'tron', 'usdc', 'usdt', 'swap', 'swaps', 'extension', 'networks', 'coins', 'app']
     .map((w) => [w, (prose.match(new RegExp(`\\b${w}\\b`, 'gi')) ?? []).length]))
   check('I7 ...and the description repeats no keyword more than five times, nor lists tickers (the store\'s keyword-spam rule)',
     Object.values(counts).every((n) => n <= 5) && !tickerList.test(prose), JSON.stringify(Object.fromEntries(Object.entries(counts).filter(([, n]) => n > 3))))
+  // Found 2026-11-22: after that rejection the listing named four networks
+  // and never said "Dogecoin", and the title named no coin, so the store's
+  // search showed the wallet for its own name only.
+  const nine = ['Bitcoin', 'Dogecoin', 'Litecoin', 'Ethereum', 'Base', 'Arbitrum One', 'BNB Chain', 'Solana', 'TRON']
+  const unnamed = nine.filter((n) => !new RegExp(`\\b${n}\\b`).test(listing))
+  check('I8 the store description names all nine networks (it once left out Dogecoin, and the store\'s search showed the wallet for no coin)',
+    unnamed.length === 0, unnamed.join(', '))
+  const title = /\bname:\s*'([^']*)'/.exec(manifestSrc)?.[1] ?? ''
+  const titleCoins = [...nine, 'USDC', 'USDT'].filter((n) => title.includes(n))
+  check('I9 the store title starts with the wallet\'s name, fits 75 characters and names at most three coins (a title, not a keyword list)',
+    title.startsWith('Kailah Wallet') && title.length <= 75 && titleCoins.length >= 1 && titleCoins.length <= 3 && !tickerList.test(title) && /at most 75 characters/.test(manifestSrc),
+    `${title} (${titleCoins.length} named)`)
   const welcome = await src('src/components/Welcome.tsx')
   check('I5 the welcome screen names more than Bitcoin, Dogecoin and Litecoin', /Ethereum, Solana, TRON/.test(welcome) && !/Dogecoin &amp; Litecoin/.test(welcome))
 }

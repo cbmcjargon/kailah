@@ -1,6 +1,6 @@
 # Kailah Wallet
 
-**v2.8.0** — a self-custody wallet for Bitcoin, Dogecoin, Litecoin, USDC + ETH
+**v2.8.1** — a self-custody wallet for Bitcoin, Dogecoin, Litecoin, USDC + ETH
 (Base / Ethereum / Arbitrum), BNB, Solana (SOL + USDC, with in-wallet swaps
 and native staking), and TRON (TRX + USDT) that runs entirely in the browser. No servers, no accounts, no custody: keys are
 generated on your device, encrypted with your password, and never leave it.
@@ -68,7 +68,7 @@ npm run verify:live   # is each official site serving exactly this build?
   `dist-extension/` built from the tag of the version the store shows. Only a
   `_metadata/` folder and `manifest.json` should differ: the store adds an
   `update_url` line, and Chrome adds a `key` line when it installs. (Checked
-  on the store's 2.7.7, 2.7.9, 2.7.10 and 2.7.11 packages.)
+  on the store's 2.7.7, 2.7.9, 2.7.10, 2.7.11 and 2.8.0 packages.)
 
 **Privacy.** The developer collects no data. [PRIVACY.md](PRIVACY.md) lists
 exactly what stays on your device and which services see what.
