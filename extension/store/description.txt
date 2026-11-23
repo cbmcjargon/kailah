@@ -1,4 +1,4 @@
-Kailah Wallet is a self-custody crypto wallet that runs in your browser. One 12-word recovery phrase holds your coins on nine networks, from Bitcoin, Dogecoin and Litecoin to Solana and TRON. Your keys are created and encrypted on your device and never leave it.
+Kailah Wallet is a self-custody crypto wallet that runs in your browser. One 12-word recovery phrase holds your coins on the nine networks listed below. Your keys are created and encrypted on your device and never leave it.
 
 WHAT IT HOLDS
 • Bitcoin, Dogecoin and Litecoin, on the standard paths, so the same phrase restores in other wallets

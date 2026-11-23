@@ -116,20 +116,23 @@ export function buildManifest(version: string, extensionCsp: string): Manifest {
   const icons = { 16: 'icons/icon-16.png', 32: 'icons/icon-32.png', 48: 'icons/icon-48.png', 128: 'icons/icon-128.png' }
   const manifest: Manifest = {
     manifest_version: 3,
-    // The store's title, which its search reads along with the summary and
-    // the description. On 2026-11-22 the plain "Kailah Wallet" showed for no
-    // coin's name, while "litecoin wallet" and "dogecoin wallet" each found
-    // only one or two wallets built for the coin. The store's guidance asks
-    // for a title that says what the extension does, without a keyword
-    // list: three coins, no more.
-    name: 'Kailah Wallet: Bitcoin, Dogecoin & Litecoin',
+    // The store's title: the plain name. 2.8.1 tried "Kailah Wallet:
+    // Bitcoin, Dogecoin & Litecoin" for the store's search; the store then
+    // rejected its summary as keyword spam for listing coins (Yellow Argon,
+    // 2026-11-22, as in October), and the owner chose not to risk a third
+    // rejection on the title, though that one wasn't cited. The networks are
+    // named in the description, in context. The build refuses a coin here.
+    name: 'Kailah Wallet',
     short_name: 'Kailah',
     version,
-    // The store's summary line, in one sentence. No ticker list: "BTC, DOGE,
-    // LTC, USDC, ETH, BNB, SOL and TRX" here got the listing rejected as
-    // keyword spam (Yellow Argon, 2026-10-28); the build refuses one now.
+    // The store's summary line: one sentence on what the wallet does, naming
+    // no coin. The store rejected both lists it once held as keyword spam
+    // (Yellow Argon): the tickers "BTC, DOGE, LTC, USDC, ETH, BNB, SOL and
+    // TRX" (2026-10-28) and the names "Bitcoin, Dogecoin, Litecoin, Solana,
+    // TRON and USDC" (2026-11-22). The build refuses either; the networks are
+    // named in the description, in context.
     description:
-      'A self-custody wallet for Bitcoin, Dogecoin, Litecoin, Solana, TRON and USDC that checks every transaction before you sign.',
+      'A self-custody crypto wallet that checks every transaction before you sign and warns you about lookalike addresses.',
     // 116: chrome.runtime.getContexts (background.ts). Trusted Types (83) and
     // the manifest COOP key (93) are older.
     minimum_chrome_version: '116',
@@ -166,12 +169,19 @@ export function assertPrivilegeSurface(manifest: Manifest): void {
   if (typeof name !== 'string' || name.length > 75 || !name.startsWith('Kailah Wallet')) {
     throw new Error('manifest: name must start with "Kailah Wallet" and be at most 75 characters (Chrome Web Store limit)')
   }
+  const coinWord = /\b(Bitcoin|Dogecoin|Litecoin|Ethereum|Base|Arbitrum|BNB|Solana|TRON|USDC|USDT|BTC|DOGE|LTC|ETH|SOL|TRX)\b/
+  if (coinWord.test(name)) {
+    throw new Error('manifest: name names a coin or network; after two keyword-spam rejections the title is the plain name (2026-11-22)')
+  }
   const desc = manifest.description
   if (typeof desc !== 'string' || desc.length > 132) {
     throw new Error('manifest: description must be a string of at most 132 characters (Chrome Web Store limit)')
   }
   if (/\b[A-Z]{2,5}\b(?:,\s*(?:and\s+)?[A-Z]{2,5}\b|\s+and\s+[A-Z]{2,5}\b){2,}/.test(desc)) {
     throw new Error('manifest: description lists tickers; the Chrome Web Store rejects that as keyword spam (Yellow Argon)')
+  }
+  if (coinWord.test(desc)) {
+    throw new Error('manifest: description names a coin or network; the Chrome Web Store rejected a list of them as keyword spam (Yellow Argon, 2026-11-22)')
   }
   if (!/^\d+(\.\d+){0,3}$/.test(String(manifest.version))) {
     throw new Error(`manifest: version "${String(manifest.version)}" is not 1-4 dot-separated integers`)

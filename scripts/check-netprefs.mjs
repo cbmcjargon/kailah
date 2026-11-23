@@ -380,6 +380,12 @@ console.log('--- I. what a store reviewer meets (review 2026-10-28) ---')
   const tickerList = /\b[A-Z]{2,5}\b(?:,\s*(?:and\s+)?[A-Z]{2,5}\b|\s+and\s+[A-Z]{2,5}\b){2,}/
   check('I6 the store summary lists no tickers (it was rejected as keyword spam for "BTC, DOGE, LTC, USDC, ETH, BNB, SOL and TRX")',
     summary.length > 0 && summary.length <= 132 && !tickerList.test(summary) && tickerList.test('BTC, DOGE, LTC and SOL') && /lists tickers/.test(manifestSrc), summary)
+  // Yellow Argon again, 2026-11-22: the 2.8.1 summary "A self-custody wallet
+  // for Bitcoin, Dogecoin, Litecoin, Solana, TRON and USDC that …" was
+  // rejected for the names alone. The title named three coins and wasn't cited.
+  const coinWord = /\b(Bitcoin|Dogecoin|Litecoin|Ethereum|Base|Arbitrum|BNB|Solana|TRON|USDC|USDT|BTC|DOGE|LTC|ETH|SOL|TRX)\b/
+  check('I6b ...and names no coin or network at all (the store rejected "Bitcoin, Dogecoin, Litecoin, Solana, TRON and USDC" there as keyword spam)',
+    !coinWord.test(summary) && coinWord.test('A self-custody wallet for Bitcoin, Dogecoin, Litecoin, Solana, TRON and USDC') && /names a coin or network/.test(manifestSrc), summary)
   const prose = listing.replace(/https?:\/\/\S+/g, '').replace(/[a-z0-9.-]+\.(?:app|org)\b/g, '')
   const counts = Object.fromEntries(['wallet', 'kailah', 'crypto', 'bitcoin', 'dogecoin', 'litecoin', 'ethereum', 'solana', 'tron', 'usdc', 'usdt', 'swap', 'swaps', 'extension', 'networks', 'coins', 'app']
     .map((w) => [w, (prose.match(new RegExp(`\\b${w}\\b`, 'gi')) ?? []).length]))
@@ -392,11 +398,12 @@ console.log('--- I. what a store reviewer meets (review 2026-10-28) ---')
   const unnamed = nine.filter((n) => !new RegExp(`\\b${n}\\b`).test(listing))
   check('I8 the store description names all nine networks (it once left out Dogecoin, and the store\'s search showed the wallet for no coin)',
     unnamed.length === 0, unnamed.join(', '))
+  // 2026-11-22, after the second keyword-spam rejection: the owner chose the
+  // plain name over 2.8.1's "Kailah Wallet: Bitcoin, Dogecoin & Litecoin"
+  // (which the reviewer hadn't cited) rather than risk a third.
   const title = /\bname:\s*'([^']*)'/.exec(manifestSrc)?.[1] ?? ''
-  const titleCoins = [...nine, 'USDC', 'USDT'].filter((n) => title.includes(n))
-  check('I9 the store title starts with the wallet\'s name, fits 75 characters and names at most three coins (a title, not a keyword list)',
-    title.startsWith('Kailah Wallet') && title.length <= 75 && titleCoins.length >= 1 && titleCoins.length <= 3 && !tickerList.test(title) && /at most 75 characters/.test(manifestSrc),
-    `${title} (${titleCoins.length} named)`)
+  check('I9 the store title is the plain name, naming no coin (the owner\'s choice after two keyword-spam rejections), and the build refuses a coin there',
+    title === 'Kailah Wallet' && !coinWord.test(title) && /name names a coin or network/.test(manifestSrc) && /at most 75 characters/.test(manifestSrc), title)
   const welcome = await src('src/components/Welcome.tsx')
   check('I5 the welcome screen names more than Bitcoin, Dogecoin and Litecoin', /Ethereum, Solana, TRON/.test(welcome) && !/Dogecoin &amp; Litecoin/.test(welcome))
 }

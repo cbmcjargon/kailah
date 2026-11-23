@@ -1,6 +1,6 @@
 # Kailah Wallet — maintenance notes
 
-Self-custody browser wallet, v2.8.1: four engines — UTXO (BTC/DOGE/LTC),
+Self-custody browser wallet, v2.8.2: four engines — UTXO (BTC/DOGE/LTC),
 EVM (USDC+ETH on Base/Ethereum/Arbitrum + BNB on BSC, no explorer API there),
 Solana (SOL + SPL USDC + Jupiter swaps + native staking via hand-built
 stake-program instructions in solstake.ts), TRON (TRX + USDT-TRC20 + Stake 2.0 via tron.ts/tronstake.ts — the node builds raw txs and the wallet DECODES the protobuf bytes
@@ -344,11 +344,19 @@ not feature building, unless the user asks for something new.
   reads all three. After the 2026-10-28 keyword rejection (a ticker list in
   the summary, "wallet" 15 times in the description) the text named four
   networks and never said "Dogecoin", and the wallet showed in search for its
-  own name only (measured 2026-11-22). So: the title names at most three
-  coins, the description names all nine networks, no keyword appears more
-  than five times and nothing lists tickers (check-netprefs I6-I9; the build
-  refuses a ticker list or a name over 75 characters). The title changes
-  only with a release, since it is in the package.
+  own name only (measured 2026-11-22). Then 2.8.1's summary, "A self-custody
+  wallet for Bitcoin, Dogecoin, Litecoin, Solana, TRON and USDC that …", was
+  rejected as keyword spam too (Yellow Argon, 2026-11-22), for the names
+  alone. Its title, "Kailah Wallet: Bitcoin, Dogecoin & Litecoin", wasn't
+  cited, but the owner chose the plain name rather than risk a third
+  rejection (2.8.2). So: the title is "Kailah Wallet", the summary names no
+  coin or network and says what the wallet does, the description names all
+  nine networks in context (in sentences, never as a bare list), no keyword
+  appears more than five times and nothing lists tickers (check-netprefs
+  I6-I9; the build refuses a ticker list, a coin named in the title or the
+  summary, or a name over 75 characters).
+  The title and summary change only with a release, since they are in the
+  package.
 - Test wallet for dev flows: the public BIP39 vector phrase (abandon ×11 +
   about), password irrelevant — NEVER for real funds; erase after testing. Its
   testnet4/mainnet accounts have real history useful for exercising the UI.
