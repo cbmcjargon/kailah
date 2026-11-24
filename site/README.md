@@ -1,7 +1,7 @@
 # Kailah Wallet — marketing site
 
-The public face of the wallet: one static page in this folder, with no build
-step. It is separate from the wallet app (`npm run build` → `dist/` never
+The public face of the wallet: two static pages in this folder, the home page
+and a live demo, with no build step. It is separate from the wallet app (`npm run build` → `dist/` never
 touches it) and has its own hosting: its own Netlify site, plus a second copy
 on the nginx box (below).
 
@@ -12,12 +12,28 @@ on the nginx box (below).
 | `index.html` | The page. Every claim on it comes from `README.md`, `PRIVACY.md`, `SECURITY.md`, `TRADEMARK.md`, `docs/` and `extension/store/description.txt`. |
 | `styles.css` | Dark theme with the wallet's own tokens (`src/styles.css`), system fonts, responsive from 360 px up, honours `prefers-reduced-motion`. |
 | `main.js` | Scroll reveal, the phone menu, the "checked before signing" illustration. No network, no storage, no HTML sinks. |
+| `rob/index.html` | "Try to rob Kailah", served as `/rob/`: four attacks (address poisoning, a TRON node that rewrites the payment, a Dogecoin data service that lies about a coin, the retry that pays twice) staged in the visitor's browser against the wallet's own checks. Linked from the home page's checks section and footer as `rob/`. A folder, not `rob.html`, because Netlify's Pretty URLs rewrites links to `.html` files in the HTML it serves (`href="rob.html"` came out as `href='/rob'`), and a served page should match this folder byte for byte; its own files sit at the root, as `../`, so it works at `/rob` and `/rob/`. It names no version, so a release can't leave it behind. |
+| `rob.css` | The demo's own styles, loaded after `styles.css`; only `rb-` classes. |
+| `rob-checks.js` | The checks the demo runs: copies of `src/lib/lookalike.ts`, `tron.ts`'s TRX send check and `rawtxcache.ts`'s coin ID, plus the made-up addresses and staged attacks. |
+| `rob.js` | The demo's widgets, built from DOM nodes and text only (Trusted Types). No network, no storage. |
 | `_headers` | The site's own security headers (Netlify format), including a CSP of `default-src 'none'` plus `'self'` for scripts, styles and images. `scripts/serve-site.mjs` applies them locally; a non-Netlify host needs them configured the way `deploy/vps-redeploy.sh` does for the wallet. |
 | `icon.svg`, `icon-192.png` | Copies of the wallet's logo (`public/`). |
 | `img/*.webp` | Real screenshots of v2.7.8, taken from the live site with the public test phrase at 390×844 @2×, then erased. `img/og.jpg` is the link-preview image. |
 
-All asset paths are relative, so the page works at a domain root or under a
+All asset paths are relative, so the pages work at a domain root or under a
 path.
+
+## The demo is held to the wallet
+
+`scripts/check-sitedemo.mjs`, part of `npm run check:offline` and so of CI,
+runs `rob-checks.js` beside the wallet's own modules on 81,200 seeded cases
+and fails on any different verdict or message. It also pins the wallet code
+the copy follows by hand (prepareTronSend's TRX check, verifyTxId, the
+Dogecoin signer's hash and fee checks), the words the page quotes
+(LookalikeWarning, RecipientNote, EvmSendWaiting) and the numbers it states.
+So a change to any of those fails CI until `rob-checks.js`, `rob.js` or
+`rob/index.html` follow, and the site then needs both its deploys. If the number of
+cases changes, the page's list and its lead change with it.
 
 ## Preview
 
@@ -49,9 +65,9 @@ mirror is a second copy of the same page, not a second identity.
 ## Before publishing
 
 - **Domain:** `og:url`, `og:image` and the canonical link point at
-  https://kailah.netlify.app (the site's own Netlify site). Change all
-  three when a custom domain is added; link previews need the absolute
-  image address.
+  https://kailah.netlify.app (the site's own Netlify site), on both pages, and
+  `sitemap.xml` and `robots.txt` name it too. Change them all when a custom
+  domain is added; link previews need the absolute image address.
 - **Version:** the page names v2.8.2 in the hero and the footer. Update
   both on a release, or drop the number.
 - **Store link:** the two "Chrome extension" buttons, the official-sources

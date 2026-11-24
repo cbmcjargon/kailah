@@ -43,7 +43,7 @@ not feature building, unless the user asks for something new.
   committing, and never `git add -A` right after a deploy without checking.
   The public snapshot's leak scan refuses that path (it caught it once,
   2026-10-25).
-- Tests: `npm run check:offline` (keys, txbuild, txv2, qrparse, vault, scanner, hw, pending, netprefs, failover, swapgate, lookalike, contacts, trondecode, bitcore, amounts, sw, headers —
+- Tests: `npm run check:offline` (keys, txbuild, txv2, qrparse, vault, scanner, hw, pending, netprefs, failover, swapgate, lookalike, contacts, trondecode, bitcore, amounts, sw, headers, sitedemo —
   no network; this is what CI runs on every push) and `npm run check:live`
   (account, evm, sol, solswap, solstake, tron — real networks; a provider being
   down or rate-limited prints SKIP, never FAIL). check-providers.mjs is run by
@@ -357,6 +357,17 @@ not feature building, unless the user asks for something new.
   summary, or a name over 75 characters).
   The title and summary change only with a release, since they are in the
   package.
+- The marketing site's demo (site/rob/, "Try to rob Kailah") runs
+  copies of lookalike.ts, tron.ts's TRX send check (decodeTronRawTx,
+  assertTronEnvelope, prepareTronSend's TRX path, verifyTxId) and
+  rawtxcache.ts's coin ID (site/rob-checks.js), and quotes LookalikeWarning,
+  RecipientNote and EvmSendWaiting word for word. check-sitedemo holds it to
+  the wallet's code, so changing any of those fails CI until the copy and the
+  page's words follow; then site/ needs both its deploys. It names no
+  version on purpose. It is a folder (rob/index.html, its own files at the
+  root as ../) because Netlify's Pretty URLs rewrites links to .html files
+  in the HTML it serves (found 2026-11-24): link any new site page as a
+  folder, never x.html.
 - Test wallet for dev flows: the public BIP39 vector phrase (abandon ×11 +
   about), password irrelevant — NEVER for real funds; erase after testing. Its
   testnet4/mainnet accounts have real history useful for exercising the UI.

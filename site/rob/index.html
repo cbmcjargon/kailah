@@ -1,0 +1,451 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; font-src 'self'; connect-src 'none'; base-uri 'none'; form-action 'none'; object-src 'none'; require-trusted-types-for 'script'; trusted-types default" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>Try to rob Kailah — four attacks, run live against Kailah Wallet's own checks</title>
+    <meta name="description" content="Address poisoning, a lying network node, a lying data service and the retry that pays twice, staged in your browser against copies of Kailah Wallet's own checks. Nothing is sent." />
+    <meta name="theme-color" content="#0b0e14" />
+    <meta name="color-scheme" content="dark" />
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="Try to rob Kailah" />
+    <meta property="og:description" content="Four ways crypto gets stolen, run live in your browser against Kailah Wallet's own checks. You play the thief." />
+    <meta property="og:url" content="https://kailah.netlify.app/rob/" />
+    <meta property="og:image" content="https://kailah.netlify.app/img/og.jpg" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <link rel="canonical" href="https://kailah.netlify.app/rob/" />
+    <link rel="icon" type="image/svg+xml" href="../icon.svg" />
+    <link rel="apple-touch-icon" href="../icon-192.png" />
+    <link rel="stylesheet" href="../styles.css" />
+    <link rel="stylesheet" href="../rob.css" />
+  </head>
+  <body>
+    <a class="skip" href="#main">Skip to content</a>
+
+    <svg class="sprite" aria-hidden="true" focusable="false">
+      <symbol id="i-check" viewBox="0 0 24 24"><path d="M5 12.5l4.2 4.2L19 7.5" /></symbol>
+      <symbol id="i-arrow" viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6" /></symbol>
+      <symbol id="i-warn" viewBox="0 0 24 24"><path d="M12 3.5l9.5 16.5h-19L12 3.5zM12 10v4M12 17h.01" /></symbol>
+      <symbol id="i-swap" viewBox="0 0 24 24"><path d="M4 8h13M14 4l4 4-4 4M20 16H7M10 12l-4 4 4 4" /></symbol>
+      <symbol id="i-usb" viewBox="0 0 24 24"><rect x="7" y="2.5" width="10" height="7" rx="1.5" /><path d="M12 9.5v12M8 14l4 3 4-3M10 5.5h1M13 5.5h1" /></symbol>
+      <symbol id="i-flask" viewBox="0 0 24 24"><path d="M9.5 3h5M10 3v6l-5.5 9.2A2 2 0 0 0 6.2 21h11.6a2 2 0 0 0 1.7-2.8L14 9V3M7.5 15.5h9" /></symbol>
+      <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2.5 12s3.5-6.5 9.5-6.5 9.5 6.5 9.5 6.5-3.5 6.5-9.5 6.5S2.5 12 2.5 12z" /><circle cx="12" cy="12" r="3" /></symbol>
+      <symbol id="i-zap" viewBox="0 0 24 24"><path d="M13 2.5L4.5 13.5H12l-1 8 8.5-11H12l1-8z" /></symbol>
+      <symbol id="i-layers" viewBox="0 0 24 24"><path d="M12 3l9 5-9 5-9-5 9-5zM3 13l9 5 9-5M3 17.5l9 5 9-5" /></symbol>
+      <symbol id="i-server-off" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="6" rx="1.5" /><rect x="3" y="14" width="18" height="6" rx="1.5" /><path d="M7 7h.01M7 17h.01M2.5 2.5l19 19" /></symbol>
+      <symbol id="i-list" viewBox="0 0 24 24"><path d="M9 6h12M9 12h12M9 18h12M4 6h.01M4 12h.01M4 18h.01" /></symbol>
+      <symbol id="i-hash" viewBox="0 0 24 24"><path d="M5 9h14M5 15h14M10 4L8 20M16 4l-2 16" /></symbol>
+      <symbol id="i-lock" viewBox="0 0 24 24"><rect x="4" y="11" width="16" height="10" rx="2" /><path d="M8 11V7a4 4 0 0 1 8 0v4" /></symbol>
+      <symbol id="i-file" viewBox="0 0 24 24"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8l-5-5zM14 3v5h5M8.5 13h7M8.5 17h7" /></symbol>
+    </svg>
+
+    <header class="nav" data-nav>
+      <div class="wrap nav-inner">
+        <a class="brand" href="../" aria-label="Kailah Wallet, home page">
+          <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true" focusable="false">
+            <circle cx="16" cy="16" r="14" stroke="#5eead4" stroke-width="2.25" fill="none" />
+            <path d="M12.2 9.5v13M20 9.5l-7.3 6.9M15 14.9l5.2 7.6" stroke="#5eead4" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round" fill="none" />
+          </svg>
+          <span class="brand-name">Kailah Wallet</span>
+        </a>
+        <a class="btn btn-primary btn-small" href="https://kailah-wallet.netlify.app">Use it now</a>
+      </div>
+    </header>
+
+    <main id="main" class="rb">
+      <!-- ============================== HERO ============================== -->
+      <section class="rb-hero" aria-labelledby="rb-title">
+        <div class="wrap">
+          <p class="eyebrow-pill">
+            <span class="dot" aria-hidden="true"></span>
+            A live demo · runs in your browser · nothing is sent
+          </p>
+          <h1 class="rb-title" id="rb-title">Try to <span class="grad">rob</span> Kailah.</h1>
+          <p class="lead">
+            Four ways crypto gets stolen or lost, staged right here. You play the thief. The checks that stop you
+            are copied line for line from the wallet's own source code, and a test in the wallet's suite runs them
+            beside the wallet's code on every change: the same verdict on 81,200 cases.
+          </p>
+          <p class="honest">
+            Hobby-grade and maintained by one person. Its security reviews were AI-assisted, not a third-party audit.
+            Keep amounts small.
+          </p>
+          <noscript>
+            <p class="honest">The demos on this page run in JavaScript, in your browser. With it off, you can still read how each attack works.</p>
+          </noscript>
+          <ul class="rb-stats">
+            <li><strong>9</strong><span>networks, one recovery phrase</span></li>
+            <li><strong>1,500+</strong><span>automated checks on every change</span></li>
+            <li><strong>0</strong><span>sign-ups, trackers or analytics</span></li>
+          </ul>
+          <nav class="rb-index" aria-label="Attacks on this page">
+            <a href="#poison">The fake in your history</a>
+            <a href="#node">The node that rewrites your payment</a>
+            <a href="#doge">The coin that holds less</a>
+            <a href="#retry">The retry that pays twice</a>
+          </nav>
+        </div>
+      </section>
+
+      <!-- ============================== ADDRESS POISONING ============================== -->
+      <section class="rb-attack" id="poison" aria-labelledby="poison-title">
+        <div class="wrap">
+          <div class="section-head">
+            <p class="eyebrow rb-danger">Attack · address poisoning</p>
+            <h2 class="h2" id="poison-title">The fake in your history</h2>
+            <p class="sub">
+              You paid Alex yesterday. A minute later a stranger sent you a fraction of a cent from an address that
+              starts and ends like Alex's. Most wallets shorten addresses to their first and last few characters, so
+              in your history the two look the same. Next time you copy "Alex" from your history, you might copy the
+              thief.
+            </p>
+            <p class="sub">
+              <strong>Kailah compares every address you enter with the ones you trust</strong>: your contacts, the addresses you've
+              paid and your own. It warns when three characters match at both ends, or when one end alone matches as
+              far as a fake can cheaply copy.
+            </p>
+          </div>
+
+          <div class="rb-bench">
+            <div class="rb-chips" role="radiogroup" aria-label="Network">
+              <input type="radio" name="rb-pnet" id="rb-pnet-sol" value="sol" checked /><label for="rb-pnet-sol">Solana</label>
+              <input type="radio" name="rb-pnet" id="rb-pnet-evm" value="evm" /><label for="rb-pnet-evm">Ethereum, Base, Arbitrum, BNB</label>
+            </div>
+            <div class="rb-cols">
+              <div class="rb-panel">
+                <p class="rb-panel-title">Your history</p>
+                <ul class="rb-history" id="rb-p-history"></ul>
+                <p class="rb-math" id="rb-p-math"></p>
+                <p class="rb-muted">Every address on this page is made up from random bytes.</p>
+              </div>
+              <div class="rb-panel">
+                <p class="rb-panel-title">Send 40 USDC</p>
+                <label class="rb-field-label" for="rb-p-input">Send to</label>
+                <input class="rb-input" id="rb-p-input" spellcheck="false" autocomplete="off" autocapitalize="off" />
+                <div class="rb-btns" id="rb-p-try">
+                  <button class="btn btn-secondary btn-small" data-try="history" type="button">Copy it from history</button>
+                  <button class="btn btn-secondary btn-small" data-try="contact" type="button">Pick Alex from contacts</button>
+                  <button class="btn btn-secondary btn-small" data-try="oneend" id="rb-p-oneend" type="button">A fake that copies the first 4 only</button>
+                  <button class="btn btn-secondary btn-small" data-try="three" type="button">A fake with three at each end</button>
+                  <button class="btn btn-secondary btn-small" data-try="stranger" type="button">A stranger's address</button>
+                </div>
+                <div id="rb-p-result" role="status" aria-live="polite"></div>
+                <div class="rb-btns"><button class="btn btn-primary btn-small" id="rb-p-continue" type="button">Continue</button></div>
+                <p class="rb-muted" id="rb-p-sent" aria-live="polite"></p>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============================== THE LYING NODE (TRON) ============================== -->
+      <section class="rb-attack" id="node" aria-labelledby="node-title">
+        <div class="wrap">
+          <div class="section-head">
+            <p class="eyebrow rb-danger">Attack · a node that rewrites your payment</p>
+            <h2 class="h2" id="node-title">The bytes you sign are the bytes that count</h2>
+            <p class="sub">
+              On TRON, your wallet asks a network node to build the payment, then signs the bytes that come back.
+              The node also sends a readable summary of those bytes. A hacked or dishonest node can make the summary
+              say one thing and the bytes another, and a wallet that checks only the summary signs what the bytes say.
+            </p>
+            <p class="sub">
+              <strong>Kailah doesn't go by the summary.</strong> It decodes every byte it is about to sign, refuses any field it
+              doesn't know or finds twice, and checks that the payment is exactly the one you asked for. Pick an
+              attack.
+            </p>
+          </div>
+
+          <div class="rb-bench">
+            <div class="rb-chips is-thief" role="radiogroup" aria-label="What the node does">
+              <input type="radio" name="rb-tatk" id="rb-tatk-honest" value="honest" /><label for="rb-tatk-honest">Honest node</label>
+              <input type="radio" name="rb-tatk" id="rb-tatk-recipient" value="recipient" /><label for="rb-tatk-recipient">Pay the thief instead</label>
+              <input type="radio" name="rb-tatk" id="rb-tatk-amount" value="amount" /><label for="rb-tatk-amount">Charge ten times as much</label>
+              <input type="radio" name="rb-tatk" id="rb-tatk-duplicate" value="duplicate" checked /><label for="rb-tatk-duplicate">Name the thief a second time</label>
+              <input type="radio" name="rb-tatk" id="rb-tatk-approve" value="approve" /><label for="rb-tatk-approve">Swap it for a USDT approval</label>
+              <input type="radio" name="rb-tatk" id="rb-tatk-relabel" value="relabel" /><label for="rb-tatk-relabel">Dress a contract call as a payment</label>
+              <input type="radio" name="rb-tatk" id="rb-tatk-second" value="second" /><label for="rb-tatk-second">Add a second payment</label>
+              <input type="radio" name="rb-tatk" id="rb-tatk-permission" value="permission" /><label for="rb-tatk-permission">Use another of your account's permissions</label>
+              <input type="radio" name="rb-tatk" id="rb-tatk-expiry" value="expiry" /><label for="rb-tatk-expiry">Keep the signature alive for a day</label>
+              <input type="radio" name="rb-tatk" id="rb-tatk-feelimit" value="feelimit" /><label for="rb-tatk-feelimit">Add a 100 TRX fee budget</label>
+              <input type="radio" name="rb-tatk" id="rb-tatk-memo" value="memo" /><label for="rb-tatk-memo">Tuck a memo inside</label>
+              <input type="radio" name="rb-tatk" id="rb-tatk-txid" value="txid" /><label for="rb-tatk-txid">Lie about the transaction ID</label>
+            </div>
+            <div class="rb-cols">
+              <div class="rb-panel rb-follow">
+                <p class="rb-panel-title">What a wallet that trusts the summary shows</p>
+                <div class="rb-ask">
+                  <span class="rb-muted">You asked</span>
+                  <span class="rb-big">Send 250 TRX to Alex</span>
+                  <span class="rb-addr" id="rb-t-alex"></span>
+                </div>
+                <div class="rb-summary">
+                  <span class="rb-muted">The node's summary</span>
+                  <span class="rb-big">TransferContract · 250 TRX → Alex</span>
+                  <span class="rb-fake-ok" aria-hidden="true">Looks right · Sign</span>
+                  <p class="rb-effect" id="rb-t-effect"></p>
+                  <p class="rb-muted">The summary reads the same for every attack. Only the bytes change.</p>
+                </div>
+              </div>
+              <div class="rb-panel">
+                <p class="rb-panel-title">What Kailah reads in the bytes</p>
+                <div class="rb-bytes" id="rb-t-bytes" role="img" aria-label="The transaction bytes the node returned, coloured by field"></div>
+                <ul class="rb-legend">
+                  <li class="rb-k-env">block and timing</li>
+                  <li class="rb-k-struct">structure</li>
+                  <li class="rb-k-owner">your account</li>
+                  <li class="rb-k-to">recipient</li>
+                  <li class="rb-k-amount">amount</li>
+                  <li class="rb-k-changed">changed by the node</li>
+                </ul>
+                <dl class="rb-decoded" id="rb-t-decoded"></dl>
+                <ol class="rb-checks" id="rb-t-checks"></ol>
+                <div id="rb-t-verdict" role="status" aria-live="polite"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============================== THE LYING DATA SERVICE (DOGE) ============================== -->
+      <section class="rb-attack" id="doge" aria-labelledby="doge-title">
+        <div class="wrap">
+          <div class="section-head">
+            <p class="eyebrow rb-danger">Attack · a data service that lies about your coins</p>
+            <h2 class="h2" id="doge-title">The coin that holds less</h2>
+            <p class="sub">
+              A classic Dogecoin signature doesn't cover how much the coin being spent is worth. So the wallet has to
+              know each coin's amount, and it asks a data service. If the service says your 2,500 DOGE coin holds 25,
+              the wallet builds a payment that hands the difference to the miners as a fee.
+            </p>
+            <p class="sub">
+              <strong>Kailah also fetches the transaction that created the coin, and keeps it only if its bytes hash to the
+              coin's ID.</strong> Nobody can make different bytes with the same hash. If the service lies in its list of coins
+              instead, the verified bytes still win: before anything goes out, Kailah checks that the fee the signed
+              transaction really pays is the fee it planned. The hashing below runs in your browser.
+            </p>
+          </div>
+
+          <div class="rb-bench">
+            <div class="rb-chips is-thief" role="radiogroup" aria-label="What the data service does">
+              <input type="radio" name="rb-dmode" id="rb-dmode-truth" value="truth" /><label for="rb-dmode-truth">Tell the truth</label>
+              <input type="radio" name="rb-dmode" id="rb-dmode-lie" value="lie" checked /><label for="rb-dmode-lie">Say the coin holds 25 DOGE</label>
+              <input type="radio" name="rb-dmode" id="rb-dmode-flip" value="flip" /><label for="rb-dmode-flip">Flip one bit anywhere</label>
+            </div>
+            <div class="rb-cols">
+              <div class="rb-panel">
+                <p class="rb-panel-title">The bytes the data service sent</p>
+                <div class="rb-bytes" id="rb-d-bytes" role="img" aria-label="The funding transaction the data service sent, coloured by part"></div>
+                <ul class="rb-legend">
+                  <li class="rb-k-env">header and input</li>
+                  <li class="rb-k-amount">your coin's amount</li>
+                  <li class="rb-k-to">your coin's lock</li>
+                  <li class="rb-k-other">the other output</li>
+                  <li class="rb-k-changed">changed by the service</li>
+                </ul>
+                <p class="rb-small" id="rb-d-claim"></p>
+                <div class="rb-btns"><button class="btn btn-secondary btn-small" id="rb-d-again" type="button" hidden>Flip another bit</button></div>
+              </div>
+              <div class="rb-panel">
+                <p class="rb-panel-title">What Kailah does with them</p>
+                <div class="rb-ids">
+                  <div><p class="rb-muted">Your coin's ID</p><p class="rb-id" id="rb-d-coin"></p></div>
+                  <div><p class="rb-muted">SHA-256 of the bytes, twice, computed just now</p><p class="rb-id" id="rb-d-hash"></p></div>
+                </div>
+                <div id="rb-d-verdict" role="status" aria-live="polite"></div>
+                <p class="rb-math" id="rb-d-math"></p>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============================== THE RETRY (EVM) ============================== -->
+      <section class="rb-attack" id="retry" aria-labelledby="retry-title">
+        <div class="wrap">
+          <div class="section-head">
+            <p class="eyebrow rb-danger">Trap · the retry that pays twice</p>
+            <h2 class="h2" id="retry-title">No answer. Send again?</h2>
+            <p class="sub">
+              You send 100 USDC on Base, and the network doesn't answer. Maybe it got there, maybe not. You press Send
+              again. If your wallet signs a brand-new payment and the first one did get through, you've paid twice.
+            </p>
+            <p class="sub">
+              <strong>Kailah signs the retry with the same sequence number, the nonce, at a 10% higher fee.</strong> The network
+              accepts one payment per nonce, so whichever lands, the other never can.
+            </p>
+          </div>
+
+          <div class="rb-bench">
+            <ol class="rb-steps" id="rb-r-steps" aria-label="Where the story is"></ol>
+            <div class="rb-lanes">
+              <div class="rb-panel rb-lane">
+                <p class="rb-panel-title">A wallet that signs a new payment</p>
+                <ol class="rb-attempts" id="rb-r-naive"></ol>
+                <p class="rb-outcome is-bad" id="rb-r-naive-out" aria-live="polite"></p>
+              </div>
+              <div class="rb-panel rb-lane">
+                <p class="rb-panel-title">Kailah</p>
+                <ol class="rb-attempts" id="rb-r-kailah"></ol>
+                <p class="rb-outcome is-good" id="rb-r-kailah-out" aria-live="polite"></p>
+              </div>
+            </div>
+            <div class="rb-btns">
+              <button class="btn btn-primary btn-small" id="rb-r-play" type="button">Play it again</button>
+              <button class="btn btn-secondary btn-small" id="rb-r-step" type="button">Step</button>
+            </div>
+            <p class="rb-quote">
+              And before any new send, Kailah checks whether the last one is still out there. If it might be, the form
+              says so in the wallet's own words: "A new send now could pay twice. Wait for it, or replace it: the
+              replacement takes its place at a higher fee, so only one of the two can ever go through."
+            </p>
+            <p class="rb-small">
+              Every network gets its own version. On Solana and TRON a retry sends the same signed bytes again, and
+              new sends wait until those bytes expire. Bitcoin, Dogecoin and Litecoin hold new sends for up to 30
+              minutes while an earlier attempt could still land.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============================== MORE ============================== -->
+      <section class="rb-more" aria-labelledby="more-title">
+        <div class="wrap">
+          <div class="section-head">
+            <p class="eyebrow">And there's more</p>
+            <h2 class="h2" id="more-title">Twelve more things Kailah checks</h2>
+          </div>
+          <ul class="rb-grid">
+            <li class="card">
+              <span class="card-ico"><svg class="ico" aria-hidden="true" focusable="false"><use href="#i-swap" /></svg></span>
+              <h3>Swaps can't hide a drain</h3>
+              <p>A swap service builds the swap. Kailah reads every instruction, allows only the programs a swap needs, pins where tokens leave and arrive to your own accounts, and refuses any extra transfer.</p>
+            </li>
+            <li class="card">
+              <span class="card-ico"><svg class="ico" aria-hidden="true" focusable="false"><use href="#i-usb" /></svg></span>
+              <h3>A Ledger can't lie</h3>
+              <p>Only signatures come back from the device. Each one is checked against Kailah's own record of the payment and fee you reviewed.</p>
+            </li>
+            <li class="card">
+              <span class="card-ico"><svg class="ico" aria-hidden="true" focusable="false"><use href="#i-flask" /></svg></span>
+              <h3>Practice can't sign for real</h3>
+              <p>Test networks use different keys, so a lying test node can't get a signature from you that works on the real network.</p>
+            </li>
+            <li class="card">
+              <span class="card-ico"><svg class="ico" aria-hidden="true" focusable="false"><use href="#i-eye" /></svg></span>
+              <h3>Only you make an address trusted</h3>
+              <p>Trust comes from payments you made and contacts you saved. A row in your history never counts, because a data service could fake one.</p>
+            </li>
+            <li class="card">
+              <span class="card-ico"><svg class="ico" aria-hidden="true" focusable="false"><use href="#i-warn" /></svg></span>
+              <h3>A capital-letter trap</h3>
+              <p>Written in capitals, three in ten Litecoin segwit addresses also read as a valid Solana address that nobody controls. Kailah's Solana form refuses them.</p>
+            </li>
+            <li class="card">
+              <span class="card-ico"><svg class="ico" aria-hidden="true" focusable="false"><use href="#i-zap" /></svg></span>
+              <h3>Speed-ups prove it's yours</h3>
+              <p>Before speeding up a stuck payment, Kailah checks that the pending transaction carries your wallet's own signatures.</p>
+            </li>
+            <li class="card">
+              <span class="card-ico"><svg class="ico" aria-hidden="true" focusable="false"><use href="#i-layers" /></svg></span>
+              <h3>Two servers must agree</h3>
+              <p>Before deciding an earlier Solana payment never happened, Kailah asks both of its servers. One server alone can't end the hold.</p>
+            </li>
+            <li class="card">
+              <span class="card-ico"><svg class="ico" aria-hidden="true" focusable="false"><use href="#i-server-off" /></svg></span>
+              <h3>The code is never cached</h3>
+              <p>The offline helper stores only the offline screen. The wallet itself always loads fresh.</p>
+            </li>
+            <li class="card">
+              <span class="card-ico"><svg class="ico" aria-hidden="true" focusable="false"><use href="#i-list" /></svg></span>
+              <h3>A fixed list of hosts</h3>
+              <p>The browser lets the app talk only to a fixed list of blockchain and price services. A test proves the list has nothing missing and nothing extra.</p>
+            </li>
+            <li class="card">
+              <span class="card-ico"><svg class="ico" aria-hidden="true" focusable="false"><use href="#i-hash" /></svg></span>
+              <h3>Money is whole numbers</h3>
+              <p>Every amount is counted as an integer in the coin's smallest unit. No floating point touches a balance.</p>
+            </li>
+            <li class="card">
+              <span class="card-ico"><svg class="ico" aria-hidden="true" focusable="false"><use href="#i-lock" /></svg></span>
+              <h3>Locked by default</h3>
+              <p>Your recovery phrase is encrypted with AES-256-GCM under a key derived with Argon2id, and the wallet locks after 15 minutes idle.</p>
+            </li>
+            <li class="card">
+              <span class="card-ico"><svg class="ico" aria-hidden="true" focusable="false"><use href="#i-file" /></svg></span>
+              <h3>Anyone can check the build</h3>
+              <p>Rebuild the extension from the public source and you get the same bytes. After every release, the copy Google serves is checked against that build, file for file.</p>
+            </li>
+          </ul>
+        </div>
+      </section>
+
+      <!-- ============================== PROOF ============================== -->
+      <section class="rb-proof" aria-labelledby="proof-title">
+        <div class="wrap">
+          <div class="section-head">
+            <p class="eyebrow">How this page is checked</p>
+            <h2 class="h2" id="proof-title">Copied, then held to the original.</h2>
+            <p class="sub">
+              The lookalike check, the TRON decoder and the Dogecoin hash check on this page are copies of
+              <code>src/lib/lookalike.ts</code>, <code>src/lib/tron.ts</code> and <code>src/lib/rawtxcache.ts</code>.
+              A test in the wallet's suite, <code>scripts/check-sitedemo.mjs</code>, runs them beside the wallet's own
+              modules on every change, on the cases below, and fails if a single verdict differs. The retry lanes
+              illustrate the rule in <code>src/lib/evm.ts</code>; everything else here runs for real, in your browser.
+              Nothing touches a network and no coins move.
+            </p>
+            <ul class="rb-counts" aria-label="The cases the test compares">
+              <li><b>60,000</b> address checks</li>
+              <li><b>6,600</b> staged node replies</li>
+              <li><b>9,000</b> randomly damaged transactions</li>
+              <li><b>3,000</b> SHA-256 hashes</li>
+              <li><b>2,600</b> more: addresses, histories, Dogecoin IDs</li>
+            </ul>
+            <div class="cta-row">
+              <a class="btn btn-primary btn-lg" href="https://kailah-wallet.netlify.app">
+                Use it now
+                <svg class="ico" aria-hidden="true" focusable="false"><use href="#i-arrow" /></svg>
+              </a>
+              <a class="btn btn-secondary btn-lg" href="https://chromewebstore.google.com/detail/kailah-wallet/nlcefhomhhohcegbacldomjpamambmac">
+                Chrome extension
+                <svg class="ico" aria-hidden="true" focusable="false"><use href="#i-arrow" /></svg>
+              </a>
+              <a class="btn btn-ghost btn-lg" href="https://github.com/cbmcjargon/kailah">Read the source</a>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <div class="wrap footer-inner">
+        <div class="footer-brand">
+          <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true" focusable="false">
+            <circle cx="16" cy="16" r="14" stroke="#5eead4" stroke-width="2.25" fill="none" />
+            <path d="M12.2 9.5v13M20 9.5l-7.3 6.9M15 14.9l5.2 7.6" stroke="#5eead4" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round" fill="none" />
+          </svg>
+          <div>
+            <p class="footer-name">Kailah Wallet</p>
+            <p class="footer-tag">Self-custody, in your browser. MIT-licensed.</p>
+          </div>
+        </div>
+        <nav class="footer-links" aria-label="Policies and source">
+          <a href="../">Home</a>
+          <a href="https://github.com/cbmcjargon/kailah/blob/main/PRIVACY.md">Privacy policy</a>
+          <a href="https://github.com/cbmcjargon/kailah/blob/main/SECURITY.md">Security policy</a>
+          <a href="https://github.com/cbmcjargon/kailah/blob/main/TRADEMARK.md">Name and logo</a>
+          <a href="https://github.com/cbmcjargon/kailah">GitHub</a>
+          <a href="https://wallet.photoprompting.org">Mirror</a>
+        </nav>
+      </div>
+      <div class="wrap footer-fine">
+        <p>This page sets no cookies, loads nothing from third parties and runs no analytics. The wallet collects no data either.</p>
+        <p>Nothing here is financial advice. Keep amounts small.</p>
+      </div>
+    </footer>
+
+    <script src="../rob-checks.js" defer></script>
+    <script src="../rob.js" defer></script>
+  </body>
+</html>
