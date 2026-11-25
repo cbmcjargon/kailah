@@ -14,7 +14,8 @@
 //      signing checks the page names (a change there must reach the page);
 //   C. every staged TRON attack ends as the page says, by the wallet's check;
 //   D. every poisoning button does what its label says, by the wallet's
-//      lookalike check, and one character fewer is quiet;
+//      lookalike check, and one character fewer is quiet; so does the first
+//      challenge's fake, and Alex's own address reads as the contact;
 //   E. the Dogecoin modes, by rawtxcache itself: the true bytes are kept,
 //      the 25 DOGE lie and every one-bit change of the true bytes refused;
 //   F. the words the page quotes are the wallet's (LookalikeWarning,
@@ -23,7 +24,9 @@
 //   G. the page keeps the site's rules: index.html's CSP, no inline script,
 //      style or handler, only its own files, no version to go stale, every id
 //      rob.js asks for, no HTML sink, network or storage API in its scripts;
-//      the home page and the sitemap link it.
+//      the home page and the sitemap link it; its four challenges ask their
+//      questions in order and deal only cases C, D and E test; and an element
+//      marked hidden stays hidden.
 import { readFileSync } from 'node:fs'
 import { randomInt } from 'node:crypto'
 import { sha256 } from '@noble/hashes/sha2'
@@ -391,6 +394,24 @@ check(
     robJs.includes("'So Kailah warns at 6 matching at one end, or 3 at each.'") &&
     robJs.includes("'So Kailah warns at 4 matching at one end, or 3 at each.'"),
 )
+{
+  // the first challenge's case (rob.js, challenge 'poison'): Alex paid and saved as a contact, nothing else known
+  const wrong = []
+  for (let i = 0; i < 200; i++) {
+    const alex = P.madeUp.sol()
+    const known = look.knownAddresses([], [], [alex], [{ address: alex, name: 'Alex' }])
+    const fake = P.lookalike.fakeOf('sol', alex, 4, 4)
+    const w = look.findLookalike(fake, known, look.SOL_FORMAT)
+    if (!(w && w.ends === 'both' && w.relation === 'contact' && w.name === 'Alex' && w.sameStart === 4 && w.sameEnd === 4)) wrong.push(`fake ${fake}: ${json(w)}`)
+    const k = look.findKnown(alex, known, look.SOL_FORMAT)
+    if (!(look.findLookalike(alex, known, look.SOL_FORMAT) === null && k?.relation === 'contact' && k?.name === 'Alex')) wrong.push(`alex ${alex}: ${json(k)}`)
+  }
+  check(
+    'D7 the first challenge (200 cases): a fake copying 4 characters at each end warns as a lookalike of your contact Alex, matching exactly 4 at each end as the reveal says, and Alex\'s own address reads as the contact',
+    wrong.length === 0,
+    firstOf(wrong),
+  )
+}
 
 console.log('--- E. the Dogecoin modes, by rawtxcache ---')
 {
@@ -548,6 +569,48 @@ check(
     sitemap.includes('<loc>https://kailah.netlify.app/rob/</loc>') &&
     robHtml.includes('<link rel="canonical" href="https://kailah.netlify.app/rob/" />') &&
     robHtml.includes('<meta property="og:url" content="https://kailah.netlify.app/rob/" />'),
+)
+const QUESTIONS = [
+  ['poison', 'rb-q1', 'Can you spot a fake wallet address?', ['same', 'fake']],
+  ['node', 'rb-q2', 'Can you detect a manipulated transaction?', ['sign', 'refuse']],
+  ['doge', 'rb-q3', 'Can you identify a suspicious network response?', ['trust', 'doubt']],
+  ['retry', 'rb-q4', 'Can you prevent a double payment?', ['again', 'wait', 'replace']],
+]
+const quizWrong = []
+{
+  const navAt = robHtml.indexOf('<nav class="rb-index"')
+  const links = [...robHtml.slice(navAt, robHtml.indexOf('</nav>', navAt)).matchAll(/<a href="#([^"]+)">([^<]+)<\/a>/g)].map((m) => [m[1], m[2]])
+  if (json(links) !== json(QUESTIONS.map(([section, , question]) => [section, question]))) quizWrong.push(`the index links ${json(links)}`)
+  QUESTIONS.forEach(([section, quiz, question, answers], i) => {
+    const at = robHtml.indexOf(`<section class="rb-attack" id="${section}"`)
+    const body = at < 0 ? '' : robHtml.slice(at, robHtml.indexOf('</section>', at))
+    if (!body.includes(`Challenge ${i + 1} of 4 · `) || !body.includes(`<h2 class="h2" id="${section}-title">${question}</h2>`)) quizWrong.push(`${section}: its eyebrow or heading`)
+    const quizAt = body.indexOf(`<div class="rb-quiz" id="${quiz}" hidden>`)
+    const howAt = body.indexOf('<p class="sub rb-how">')
+    const benchAt = body.indexOf('<div class="rb-bench">')
+    if (!(quizAt > 0 && quizAt < howAt && howAt < benchAt)) quizWrong.push(`${section}: the challenge, then how Kailah stops it, then the demo`)
+    const choicesAt = body.indexOf(`id="${quiz}-choices"`)
+    const got = [...body.slice(choicesAt, body.indexOf('</div>', choicesAt)).matchAll(/data-answer="([^"]+)"/g)].map((m) => m[1])
+    if (choicesAt < 0 || json(got) !== json(answers)) quizWrong.push(`${section}: answers ${json(got)}`)
+    for (const a of answers) if (!new RegExp(`'${a}'|\\b${a}: `).test(robJs)) quizWrong.push(`${section}: rob.js never reads '${a}'`)
+    for (const part of ['', '-choices', '-reveal', '-again']) if (!robJs.includes(`$('${quiz}${part}')`)) quizWrong.push(`${section}: rob.js doesn't wire #${quiz}${part}`)
+  })
+  // the cases the challenges deal are the ones C, D7 and E test
+  for (const dealt of ["L.fakeOf('sol', Q1.alex, 4, 4)", "rnd(3) === 0 ? 'honest' : T.ATTACKS[1 + rnd(T.ATTACKS.length - 1)]", "dogeServe(['truth', 'lie', 'flip'][rnd(3)])"]) {
+    if (!robJs.includes(dealt)) quizWrong.push(`rob.js no longer deals ${dealt}`)
+  }
+  const scoreAt = robHtml.indexOf('<section class="rb-attack rb-final" id="score" aria-labelledby="score-title" hidden>')
+  if (!(scoreAt > robHtml.indexOf('id="retry"') && scoreAt < robHtml.indexOf('<section class="rb-more"') && robJs.includes("$('score').hidden = false"))) quizWrong.push('the score section, after the retry and shown by rob.js')
+}
+check(
+  'G8 the four challenges: the hero\'s index and the sections\' headings ask the four questions in order; each section puts its challenge (hidden until rob.js runs) before how Kailah stops it and the demo, with the answers rob.js reads; the cases dealt are the ones C, D7 and E test; and the score follows the last one',
+  quizWrong.length === 0,
+  quizWrong.join('; '),
+)
+
+check(
+  'G9 an element with the hidden attribute stays hidden: rob.css says so for the whole page, since a button\'s or a challenge card\'s own display would otherwise win (until 2026-11-25 "Flip another bit" showed in every mode)',
+  /\.rb \[hidden\] \{\s*display: none !important;\s*\}/.test(read('site/rob.css')),
 )
 
 console.log(failures === 0 ? '\nAll site demo checks passed.' : `\n${failures} CHECK(S) FAILED.`)

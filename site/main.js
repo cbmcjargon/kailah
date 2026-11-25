@@ -139,7 +139,7 @@
       net: 'Solana · Jupiter',
       rows: [
         ['You pay', '0.25 SOL'],
-        ['You receive', '≥ 36.80 USDC'],
+        ['You receive', '≥ 24.83 USDC'],
         ['Kailah fee', '0.5%, in USDC'],
       ],
       checks: [

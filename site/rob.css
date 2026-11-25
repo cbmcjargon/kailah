@@ -816,6 +816,304 @@
   font-weight: 650;
 }
 
+/* ---- the four challenges -------------------------------------------------- */
+
+/* A class's display would otherwise beat the hidden attribute. */
+.rb [hidden] {
+  display: none !important;
+}
+
+.rb-mono {
+  font-family: var(--mono);
+}
+
+.rb-how {
+  max-width: 720px;
+  margin: 0 0 28px;
+}
+
+.rb-quiz {
+  display: grid;
+  gap: 14px;
+  max-width: 760px;
+  margin-bottom: 28px;
+  padding: 20px;
+  border: 1px solid rgba(94, 234, 212, 0.4);
+  border-radius: var(--radius-card);
+  background:
+    linear-gradient(180deg, var(--accent-soft), transparent 160px),
+    var(--surface);
+}
+
+.rb-quiz-label {
+  justify-self: start;
+  padding: 3px 10px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-size: 12px;
+  font-weight: 750;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.rb-quiz-ask {
+  font-size: 17px;
+  font-weight: 600;
+  line-height: 1.5;
+  text-wrap: pretty;
+}
+
+.rb-quiz-pair {
+  display: grid;
+  gap: 4px;
+}
+
+.rb-quiz-pair dt {
+  color: var(--text-3);
+  font-size: 13px;
+}
+
+.rb-quiz-pair dd {
+  margin-bottom: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--hairline);
+  border-radius: 10px;
+  background: var(--bg);
+  font-family: var(--mono);
+  font-size: 14.5px;
+  overflow-wrap: anywhere;
+}
+
+.rb-quiz-fields {
+  padding: 12px;
+  border: 1px solid var(--hairline);
+  border-radius: 10px;
+  background: var(--bg);
+}
+
+.rb-quiz-bytes {
+  max-height: 180px;
+}
+
+.rb-k-plain {
+  color: var(--text-2);
+}
+
+.rb-quiz-choices .btn {
+  min-width: 8.5em;
+}
+
+.rb-quiz .btn[aria-disabled='true'] {
+  cursor: default;
+  transform: none;
+}
+
+.rb-quiz .btn.is-off {
+  opacity: 0.45;
+}
+
+.rb-quiz .btn.is-right {
+  border-color: rgba(74, 222, 128, 0.6);
+  background: var(--rb-ok-soft);
+  color: var(--ok);
+}
+
+.rb-quiz .btn.is-wrong {
+  border-color: rgba(248, 113, 113, 0.6);
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.rb .rb-choice {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  padding: 10px 16px;
+}
+
+.rb-choice span {
+  color: var(--text-2);
+  font-size: 13px;
+  font-weight: 400;
+}
+
+.rb-quiz-reveal {
+  display: grid;
+  gap: 10px;
+}
+
+.rb-quiz-reveal:empty {
+  display: none;
+}
+
+.rb-result {
+  display: grid;
+  gap: 6px;
+  padding: 14px;
+  border-radius: 12px;
+  font-size: 15px;
+}
+
+.rb-result.is-right {
+  border: 1px solid rgba(74, 222, 128, 0.4);
+  background: var(--rb-ok-soft);
+}
+
+.rb-result.is-wrong {
+  border: 1px solid rgba(248, 113, 113, 0.45);
+  background: var(--danger-soft);
+}
+
+.rb-result.is-right > p:first-child > b {
+  color: var(--ok);
+}
+
+.rb-result.is-wrong > p:first-child > b {
+  color: var(--danger);
+}
+
+.rb-result p + p {
+  color: var(--text-2);
+  font-size: 14.5px;
+}
+
+.rb-result p + p b {
+  color: var(--text);
+}
+
+.rb-kailah {
+  display: grid;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid var(--hairline-strong);
+  border-radius: 12px;
+  background: var(--bg-2);
+  font-size: 14.5px;
+}
+
+.rb-tag {
+  display: inline-block;
+  padding: 1px 9px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 12.5px;
+  font-weight: 700;
+}
+
+.rb-warn-mini {
+  align-items: center;
+}
+
+.rb-warn-mini strong {
+  margin-bottom: 0;
+}
+
+.rb-quiz-ids {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 4px 14px;
+  font-size: 13px;
+}
+
+.rb-quiz-ids dt {
+  color: var(--text-3);
+}
+
+.rb-quiz-ids dd {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-family: var(--mono);
+}
+
+/* the score */
+
+.rb-scorecard {
+  display: grid;
+  gap: 16px;
+  max-width: 760px;
+  padding: 24px;
+  border: 1px solid rgba(94, 234, 212, 0.4);
+  border-radius: var(--radius-card);
+  background:
+    radial-gradient(600px 220px at 0% 0%, rgba(94, 234, 212, 0.1), transparent 70%),
+    var(--surface);
+}
+
+.rb-scorecard .eyebrow {
+  margin-bottom: -6px;
+}
+
+.rb-score {
+  display: grid;
+  gap: 6px;
+}
+
+.rb-score li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 64px 64px;
+  gap: 12px;
+  align-items: center;
+  padding: 10px 14px;
+  border: 1px solid var(--hairline);
+  border-radius: 10px;
+  background: var(--bg-2);
+  font-size: 15px;
+}
+
+.rb-score li > span + span {
+  text-align: center;
+}
+
+.rb-score .rb-score-head {
+  padding-block: 0;
+  border: 0;
+  background: none;
+  color: var(--text-3);
+  font-size: 12px;
+  font-weight: 650;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.rb-pip {
+  font-size: 17px;
+  font-weight: 700;
+}
+
+.rb-pip.is-yes {
+  color: var(--ok);
+}
+
+.rb-pip.is-no {
+  color: var(--danger);
+}
+
+.rb-pip.is-none {
+  color: var(--text-3);
+}
+
+.rb-score-total {
+  font-size: 18px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+
+.rb-score-total b {
+  color: var(--accent);
+}
+
+.rb-score-note {
+  color: var(--text-2);
+  font-size: 15px;
+  line-height: 1.6;
+}
+
+.rb-score-note:empty {
+  display: none;
+}
+
 /* ---- narrow screens ------------------------------------------------------- */
 
 @media (max-width: 900px) {
@@ -846,7 +1144,20 @@
   }
 
   .rb-bench,
-  .rb-panel {
+  .rb-panel,
+  .rb-quiz,
+  .rb-scorecard {
     padding: 12px;
+  }
+
+  .rb-quiz-ask {
+    font-size: 16px;
+  }
+
+  .rb-score li {
+    grid-template-columns: minmax(0, 1fr) 44px 60px;
+    gap: 8px;
+    padding: 10px;
+    font-size: 14px;
   }
 }

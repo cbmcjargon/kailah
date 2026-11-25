@@ -5,12 +5,12 @@
     <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; font-src 'self'; connect-src 'none'; base-uri 'none'; form-action 'none'; object-src 'none'; require-trusted-types-for 'script'; trusted-types default" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <title>Try to rob Kailah — four attacks, run live against Kailah Wallet's own checks</title>
-    <meta name="description" content="Address poisoning, a lying network node, a lying data service and the retry that pays twice, staged in your browser against copies of Kailah Wallet's own checks. Nothing is sent." />
+    <meta name="description" content="Can you spot a fake address, a doctored transaction, a lying data service and the retry that pays twice? Try, then watch copies of Kailah Wallet's own checks catch them in your browser. Nothing is sent." />
     <meta name="theme-color" content="#0b0e14" />
     <meta name="color-scheme" content="dark" />
     <meta property="og:type" content="website" />
     <meta property="og:title" content="Try to rob Kailah" />
-    <meta property="og:description" content="Four ways crypto gets stolen, run live in your browser against Kailah Wallet's own checks. You play the thief." />
+    <meta property="og:description" content="Four ways crypto gets stolen or lost. Can you catch them? Then watch Kailah Wallet's own checks do it, live in your browser." />
     <meta property="og:url" content="https://kailah.netlify.app/rob/" />
     <meta property="og:image" content="https://kailah.netlify.app/img/og.jpg" />
     <meta name="twitter:card" content="summary_large_image" />
@@ -63,27 +63,28 @@
           </p>
           <h1 class="rb-title" id="rb-title">Try to <span class="grad">rob</span> Kailah.</h1>
           <p class="lead">
-            Four ways crypto gets stolen or lost, staged right here. You play the thief. The checks that stop you
-            are copied line for line from the wallet's own source code, and a test in the wallet's suite runs them
-            beside the wallet's code on every change: the same verdict on 81,200 cases.
+            Four ways crypto gets stolen or lost, staged right here. First, see whether you can catch each one
+            yourself. Then play the thief and watch Kailah stop you. Its checks are copied line for line from the
+            wallet's own source code, and a test in the wallet's suite runs them beside the wallet's code on every
+            change: the same verdict on 81,200 cases.
           </p>
           <p class="honest">
             Hobby-grade and maintained by one person. Its security reviews were AI-assisted, not a third-party audit.
             Keep amounts small.
           </p>
           <noscript>
-            <p class="honest">The demos on this page run in JavaScript, in your browser. With it off, you can still read how each attack works.</p>
+            <p class="honest">The challenges and demos on this page run in JavaScript, in your browser. With it off, you can still read how each attack works.</p>
           </noscript>
           <ul class="rb-stats">
             <li><strong>9</strong><span>networks, one recovery phrase</span></li>
             <li><strong>1,500+</strong><span>automated checks on every change</span></li>
             <li><strong>0</strong><span>sign-ups, trackers or analytics</span></li>
           </ul>
-          <nav class="rb-index" aria-label="Attacks on this page">
-            <a href="#poison">The fake in your history</a>
-            <a href="#node">The node that rewrites your payment</a>
-            <a href="#doge">The coin that holds less</a>
-            <a href="#retry">The retry that pays twice</a>
+          <nav class="rb-index" aria-label="The four challenges">
+            <a href="#poison">Can you spot a fake wallet address?</a>
+            <a href="#node">Can you detect a manipulated transaction?</a>
+            <a href="#doge">Can you identify a suspicious network response?</a>
+            <a href="#retry">Can you prevent a double payment?</a>
           </nav>
         </div>
       </section>
@@ -92,20 +93,36 @@
       <section class="rb-attack" id="poison" aria-labelledby="poison-title">
         <div class="wrap">
           <div class="section-head">
-            <p class="eyebrow rb-danger">Attack · address poisoning</p>
-            <h2 class="h2" id="poison-title">The fake in your history</h2>
+            <p class="eyebrow rb-danger">Challenge 1 of 4 · address poisoning</p>
+            <h2 class="h2" id="poison-title">Can you spot a fake wallet address?</h2>
             <p class="sub">
               You paid Alex yesterday. A minute later a stranger sent you a fraction of a cent from an address that
               starts and ends like Alex's. Most wallets shorten addresses to their first and last few characters, so
               in your history the two look the same. Next time you copy "Alex" from your history, you might copy the
               thief.
             </p>
-            <p class="sub">
-              <strong>Kailah compares every address you enter with the ones you trust</strong>: your contacts, the addresses you've
-              paid and your own. It warns when three characters match at both ends, or when one end alone matches as
-              far as a fake can cheaply copy.
-            </p>
           </div>
+
+          <div class="rb-quiz" id="rb-q1" hidden>
+            <p class="rb-quiz-label">Your call</p>
+            <p class="rb-quiz-ask">
+              Alex is in your contacts. You're paying Alex again, with the address you copied from your history.
+              Same address, or a fake?
+            </p>
+            <dl class="rb-quiz-pair" id="rb-q1-show"></dl>
+            <div class="rb-btns rb-quiz-choices" id="rb-q1-choices">
+              <button class="btn btn-secondary" data-answer="same" type="button">Same address</button>
+              <button class="btn btn-secondary" data-answer="fake" type="button">A fake</button>
+            </div>
+            <div class="rb-quiz-reveal" id="rb-q1-reveal" role="status" aria-live="polite"></div>
+            <div class="rb-btns"><button class="btn btn-ghost btn-small" id="rb-q1-again" type="button" hidden>Try another</button></div>
+          </div>
+
+          <p class="sub rb-how">
+            <strong>Kailah compares every address you enter with the ones you trust</strong>: your contacts, the addresses you've
+            paid and your own. It warns when three characters match at both ends, or when one end alone matches as
+            far as a fake can cheaply copy. Now play the thief: try each kind of fake on the form below.
+          </p>
 
           <div class="rb-bench">
             <div class="rb-chips" role="radiogroup" aria-label="Network">
@@ -143,19 +160,36 @@
       <section class="rb-attack" id="node" aria-labelledby="node-title">
         <div class="wrap">
           <div class="section-head">
-            <p class="eyebrow rb-danger">Attack · a node that rewrites your payment</p>
-            <h2 class="h2" id="node-title">The bytes you sign are the bytes that count</h2>
+            <p class="eyebrow rb-danger">Challenge 2 of 4 · a node that rewrites your payment</p>
+            <h2 class="h2" id="node-title">Can you detect a manipulated transaction?</h2>
             <p class="sub">
               On TRON, your wallet asks a network node to build the payment, then signs the bytes that come back.
               The node also sends a readable summary of those bytes. A hacked or dishonest node can make the summary
               say one thing and the bytes another, and a wallet that checks only the summary signs what the bytes say.
             </p>
-            <p class="sub">
-              <strong>Kailah doesn't go by the summary.</strong> It decodes every byte it is about to sign, refuses any field it
-              doesn't know or finds twice, and checks that the payment is exactly the one you asked for. Pick an
-              attack.
-            </p>
           </div>
+
+          <div class="rb-quiz" id="rb-q2" hidden>
+            <p class="rb-quiz-label">Your call</p>
+            <p class="rb-quiz-ask">
+              You asked to send 250 TRX to Alex, and the node's summary says exactly that. Below are the fields
+              inside the bytes you would sign. Sign them, or refuse?
+            </p>
+            <p class="rb-small" id="rb-q2-who"></p>
+            <dl class="rb-decoded rb-quiz-fields" id="rb-q2-fields"></dl>
+            <div class="rb-btns rb-quiz-choices" id="rb-q2-choices">
+              <button class="btn btn-secondary" data-answer="sign" type="button">Sign</button>
+              <button class="btn btn-secondary" data-answer="refuse" type="button">Refuse</button>
+            </div>
+            <div class="rb-quiz-reveal" id="rb-q2-reveal" role="status" aria-live="polite"></div>
+            <div class="rb-btns"><button class="btn btn-ghost btn-small" id="rb-q2-again" type="button" hidden>Try another</button></div>
+          </div>
+
+          <p class="sub rb-how">
+            <strong>Kailah doesn't go by the summary.</strong> It decodes every byte it is about to sign, refuses any field it
+            doesn't know or finds twice, and checks that the payment is exactly the one you asked for. Now play the
+            node: pick an attack.
+          </p>
 
           <div class="rb-bench">
             <div class="rb-chips is-thief" role="radiogroup" aria-label="What the node does">
@@ -212,20 +246,37 @@
       <section class="rb-attack" id="doge" aria-labelledby="doge-title">
         <div class="wrap">
           <div class="section-head">
-            <p class="eyebrow rb-danger">Attack · a data service that lies about your coins</p>
-            <h2 class="h2" id="doge-title">The coin that holds less</h2>
+            <p class="eyebrow rb-danger">Challenge 3 of 4 · a data service that lies about your coins</p>
+            <h2 class="h2" id="doge-title">Can you identify a suspicious network response?</h2>
             <p class="sub">
               A classic Dogecoin signature doesn't cover how much the coin being spent is worth. So the wallet has to
               know each coin's amount, and it asks a data service. If the service says your 2,500 DOGE coin holds 25,
               the wallet builds a payment that hands the difference to the miners as a fee.
             </p>
-            <p class="sub">
-              <strong>Kailah also fetches the transaction that created the coin, and keeps it only if its bytes hash to the
-              coin's ID.</strong> Nobody can make different bytes with the same hash. If the service lies in its list of coins
-              instead, the verified bytes still win: before anything goes out, Kailah checks that the fee the signed
-              transaction really pays is the fee it planned. The hashing below runs in your browser.
-            </p>
           </div>
+
+          <div class="rb-quiz" id="rb-q3" hidden>
+            <p class="rb-quiz-label">Your call</p>
+            <p class="rb-quiz-ask">
+              Your coin holds 2,500 DOGE. To spend it, the wallet asks a data service for the transaction that
+              created the coin, and this comes back. Trust it?
+            </p>
+            <div class="rb-bytes rb-quiz-bytes" id="rb-q3-bytes" role="img" aria-label="The transaction the data service sent"></div>
+            <p class="rb-small" id="rb-q3-claim"></p>
+            <div class="rb-btns rb-quiz-choices" id="rb-q3-choices">
+              <button class="btn btn-secondary" data-answer="trust" type="button">Trust it</button>
+              <button class="btn btn-secondary" data-answer="doubt" type="button">Something's off</button>
+            </div>
+            <div class="rb-quiz-reveal" id="rb-q3-reveal" role="status" aria-live="polite"></div>
+            <div class="rb-btns"><button class="btn btn-ghost btn-small" id="rb-q3-again" type="button" hidden>Try another</button></div>
+          </div>
+
+          <p class="sub rb-how">
+            <strong>Kailah also fetches the transaction that created the coin, and keeps it only if its bytes hash to the
+            coin's ID.</strong> Nobody can make different bytes with the same hash. If the service lies in its list of coins
+            instead, the verified bytes still win: before anything goes out, Kailah checks that the fee the signed
+            transaction really pays is the fee it planned. The hashing below runs in your browser.
+          </p>
 
           <div class="rb-bench">
             <div class="rb-chips is-thief" role="radiogroup" aria-label="What the data service does">
@@ -265,17 +316,30 @@
       <section class="rb-attack" id="retry" aria-labelledby="retry-title">
         <div class="wrap">
           <div class="section-head">
-            <p class="eyebrow rb-danger">Trap · the retry that pays twice</p>
-            <h2 class="h2" id="retry-title">No answer. Send again?</h2>
+            <p class="eyebrow rb-danger">Challenge 4 of 4 · the retry that pays twice</p>
+            <h2 class="h2" id="retry-title">Can you prevent a double payment?</h2>
             <p class="sub">
-              You send 100 USDC on Base, and the network doesn't answer. Maybe it got there, maybe not. You press Send
-              again. If your wallet signs a brand-new payment and the first one did get through, you've paid twice.
-            </p>
-            <p class="sub">
-              <strong>Kailah signs the retry with the same sequence number, the nonce, at a 10% higher fee.</strong> The network
-              accepts one payment per nonce, so whichever lands, the other never can.
+              You send 100 USDC on Base, and the network doesn't answer. Maybe it got there, maybe not.
             </p>
           </div>
+
+          <div class="rb-quiz" id="rb-q4" hidden>
+            <p class="rb-quiz-label">Your call</p>
+            <p class="rb-quiz-ask">Your 100 USDC payment got no answer. What do you do?</p>
+            <div class="rb-btns rb-quiz-choices" id="rb-q4-choices">
+              <button class="btn btn-secondary rb-choice" data-answer="again" type="button"><b>Send it again</b><span>a new 100 USDC payment</span></button>
+              <button class="btn btn-secondary rb-choice" data-answer="wait" type="button"><b>Wait for it</b><span>until the network shows what happened</span></button>
+              <button class="btn btn-secondary rb-choice" data-answer="replace" type="button"><b>Replace it</b><span>the same payment, signed again at a higher fee</span></button>
+            </div>
+            <div class="rb-quiz-reveal" id="rb-q4-reveal" role="status" aria-live="polite"></div>
+            <div class="rb-btns"><button class="btn btn-ghost btn-small" id="rb-q4-again" type="button" hidden>Try again</button></div>
+          </div>
+
+          <p class="sub rb-how">
+            If your wallet signs a brand-new payment and the first one did get through, you've paid twice.
+            <strong>Kailah signs the retry with the same sequence number, the nonce, at a 10% higher fee.</strong> The network
+            accepts one payment per nonce, so whichever lands, the other never can.
+          </p>
 
           <div class="rb-bench">
             <ol class="rb-steps" id="rb-r-steps" aria-label="Where the story is"></ol>
@@ -304,6 +368,23 @@
               Every network gets its own version. On Solana and TRON a retry sends the same signed bytes again, and
               new sends wait until those bytes expire. Bitcoin, Dogecoin and Litecoin hold new sends for up to 30
               minutes while an earlier attempt could still land.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============================== SCORE ============================== -->
+      <section class="rb-attack rb-final" id="score" aria-labelledby="score-title" hidden>
+        <div class="wrap">
+          <div class="rb-scorecard">
+            <p class="eyebrow">Your score</p>
+            <h2 class="h2" id="score-title">How did you do?</h2>
+            <ol class="rb-score" id="rb-score"></ol>
+            <p class="rb-score-total" id="rb-score-total" role="status" aria-live="polite"></p>
+            <p class="rb-score-note" id="rb-score-note"></p>
+            <p class="rb-muted">
+              Your first answer to each challenge counts. Kailah's answers come from its checks, run in your browser,
+              and for the retry from the wallet's rule for a send that got no answer.
             </p>
           </div>
         </div>
